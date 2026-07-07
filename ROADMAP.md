@@ -10,7 +10,7 @@ Expand DGML reach with integration with other solutions:
   * Expose DGML capabilities through MCPs to enable agentic-based scenarios.
 
 ### 2. Validate with small/open-source LLMs
-Prove the generation/tagging/extraction pipeline works well on small, open-weight LLMs (e.g. Llama, Mistral) — not just frontier proprietary ones. This also includes proposing open-weight LLMs to the community as a supported path, or adapter weights built on top of open-weight models. The goal is to enable more cost-sensitive and self-hosting scenarios.
+Prove the generation/tagging/extraction pipeline works well on small, open-weight LLMs (e.g. Llama, Mistral) — not just frontier proprietary ones. This may also includes proposing open-weight LLMs to the community as a supported path, or adapter weights built on top of open-weight models. The goal is to enable more cost-sensitive and self-hosting scenarios.
 
 ### 3. Real-world examples, more samples, and multi-chain attestation
 Grow the set of industry examples showing DGML in production-style use — more real-world document types, contributed to [`dgml-spec/samples/`](https://github.com/dgml-io/dgml-spec/tree/main/samples) — and exercise attestation across multiple blockchain networks. The focus here is breadth of real usage and industry examples.
