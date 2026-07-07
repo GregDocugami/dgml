@@ -5,9 +5,7 @@ It reflects our priorities for the next 3–6 months.
 
 ## Themes
 ### 1. Third-party integrations
-Expand DGML reach with integration with other solutions:
- * LangChain, LlamaIndex
-  * Expose DGML capabilities through MCPs to enable agentic-based scenarios.
+Expand DGML's reach through integration with other solutions — for example LangChain, LlamaIndex, and others as they come up — plus exposing DGML capabilities through MCPs to enable agentic-based scenarios.
 
 Tracked in [#11](https://github.com/dgml-io/dgml/issues/11).
 
