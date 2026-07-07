@@ -351,10 +351,12 @@ deterministic. There is no separate transform pass.
 resume below), so adding a document and re-running generates only the new one.
 To keep its tags consistent with the existing docset, the new document is
 labeled seeded with the docset's existing `cache/concept_roster.json` (default;
-disable with `--no-roster`). The `docset:`/`dg:` namespacing is recomputed over
-the whole docset, so any already-generated file whose namespacing changes (a
-concept it shares was promoted to `docset:`) is deterministically re-rendered —
-no re-transcription or re-labeling. These show up in the top-level `rerendered` list.
+disable with `--no-roster`). Every concept is emitted in the per-docset
+`docset:` vocabulary namespace (`dg:` is framework-only), so growing the docset
+never flips a tag's prefix. An already-generated file is still re-rendered
+deterministically when its output changes as the docset's schema/roster grows
+(e.g. entity-container grouping) — no re-transcription or re-labeling. These
+show up in the top-level `rerendered` list.
 
 Output always goes to the docset directory in the workspace
 (`<workspace>/docsets/<docset-id>/`) — there is no output-directory flag,
@@ -735,7 +737,7 @@ ignored when `<path>` is a single file.
 |---|---|
 | `digital` (default) | Extract digital text from the PDF with `pdfminer.six`. A permanent text-extraction error is recorded for files with no digital text — the File record is still created (soft fail). |
 | `ocr` | Send each rendered page image to the cloud provider configured in `<workspace>/config.json`. Requires `pip install dgml[azure]` or `pip install dgml[aws]`. See "OCR configuration" below. |
-| `hybrid` | Run `digital` then `ocr` and merge the two per-page results by grouping words covering the same region into overlap clusters (boxes overlap on IoU > 0.5 *or* one mostly contained in the other, so split/merge tokenization is resolved as a unit). Each cluster is resolved as a whole: OCR-only clusters are kept; digital-only clusters (no overlapping OCR) are assumed invisible to the human eye and dropped; mixed clusters compare both sides' concatenated text by dash-normalized Levenshtein distance — if they agree (distance ≤ 2) digital wins (its characters come straight from the PDF font, more reliable than OCR even when OCR's tokenization is finer), and if they disagree OCR wins. A page whose digital text is mostly unresolved glyphs (pdfminer `(cid:N)` sentinels) falls back to OCR entirely. Default is silent — pass the global `--verbose` flag to surface per-page warnings and the merge summary on stderr. Requires the same `ocr` workspace config as `--text-mode ocr`. Optionally, an LLM can make the per-cluster decision instead of this heuristic — declare a `text_extraction` section in `config.json` (e.g. a local Ollama model); see [storage-layout.md](storage-layout.md#text_extraction-optional). Any LLM failure falls back to the heuristic for that page. |
+| `hybrid` | Run `digital` then `ocr` and merge the two per-page results by grouping words covering the same area into overlap regions (boxes overlap on IoU > 0.5 *or* one mostly contained in the other, so split/merge tokenization is resolved as a unit). Each region is resolved as a whole: OCR-only regions are kept; digital-only regions (no overlapping OCR) are assumed invisible to the human eye and dropped; mixed regions compare both sides' concatenated text by dash-normalized Levenshtein distance — if they agree (distance ≤ 2) digital wins (its characters come straight from the PDF font, more reliable than OCR even when OCR's tokenization is finer), and if they disagree OCR wins. A page whose digital text is mostly unresolved glyphs (pdfminer `(cid:N)` sentinels) falls back to OCR entirely. Default is silent — pass the global `--verbose` flag to surface per-page warnings and the merge summary on stderr. Requires the same `ocr` workspace config as `--text-mode ocr`. Optionally, an LLM can make the per-region decision instead of this heuristic — declare a `text_extraction` section in `config.json` (e.g. a local Ollama model); see [storage-layout.md](storage-layout.md#text_extraction-optional). Any LLM failure falls back to the heuristic for that page. |
 
 Conflict types recorded in the success payload as `conflict_kind`:
 

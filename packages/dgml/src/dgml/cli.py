@@ -396,9 +396,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "(default). 'ocr' uses the cloud provider configured in "
             "<workspace>/config.json (requires `pip install dgml[aws]` or "
             "`pip install dgml[azure]`). 'hybrid' runs digital and OCR and "
-            "merges them by grouping overlapping words into clusters: "
+            "merges them by grouping overlapping words into regions: "
             "digital wins when the two sides agree on content, OCR wins "
-            "when they disagree, and digital-only clusters (no overlapping "
+            "when they disagree, and digital-only regions (no overlapping "
             "OCR) are dropped as assumed-invisible. Pass --verbose to "
             "surface per-page merge decisions on stderr. Requires the "
             "same OCR config as 'ocr'."
@@ -2176,8 +2176,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         else:
             roster_seed = None
 
-        # Reload already-generated docs from cache so collect_shared_concepts
-        # spans the whole docset; flipped originals re-render (no re-LLM).
+        # Reload already-generated docs from cache so the whole docset stays
+        # consistent as its schema/roster grows; changed originals re-render
+        # (no re-LLM).
         for stem, blocks in load_labeled_docs_from_cache(cache_dir, list(prior_stems)).items():
             nm = prior_stems[stem]
             prior_docs[nm] = blocks
