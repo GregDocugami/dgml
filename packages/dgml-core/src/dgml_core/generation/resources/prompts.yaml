@@ -161,6 +161,39 @@
     "entities": [{"quote": "<exact substring>", "concept": "..."}]}}}
   Every key must be a block id from the input. Label densely per the rules
   above; omit only connective prose.
+"label_phase1_structure": |-
+  TWO-PASS LABELING — PASS 1 of 2: STRUCTURE ONLY.
+
+  Right now, assign ONLY the higher-level structural / topic concepts for the
+  blocks above — the containers that give the document its shape. A SECOND pass
+  will tag the atomic values inside them, so do NOT emit any "entities" now.
+
+  For every block that carries a role (all headings; sections, clauses, and
+  recurring items per the density rules) return its "concept". For each `row`
+  block also return "table" (the table's name, the SAME for every row of that
+  table) and "cells" (one concept per column, in column order, each naming the
+  kind of value that column holds). Follow all the naming and density rules
+  above; reuse roster concepts verbatim where the role matches.
+
+  Output JSON only — no "entities" in this pass:
+  {"labels": {"<block_id>": {"concept": "...", "table": "...", "cells": ["...", "..."]}}}
+  Omit "table"/"cells" for non-row blocks; omit "concept" for a block with no role.
+"label_phase2_values": |-
+  PASS 2 of 2: INLINE VALUES.
+
+  The block, table, and column concepts you assigned in pass 1 are SETTLED and
+  shown in your previous message — do not repeat, rename, or change them. Using
+  that structure as context, now tag the atomic extractable VALUES the blocks
+  contain: dates, amounts, durations, parties, addresses, identifiers. Each is
+  an entity quoting the value VERBATIM, with a concept naming the KIND of value
+  (what a column header for it would be called), following all the entity rules
+  above. Where a heading's TEXT is itself a value, add an entity quoting the
+  whole heading text. For a cell that packs several values into one column, add
+  one entity per value.
+
+  Output JSON only — do NOT output "concept", "table", or "cells" in this pass:
+  {"labels": {"<block_id>": {"entities": [{"quote": "<exact substring>", "concept": "..."}]}}}
+  Include only blocks that hold at least one value.
 "plan_system": |
   You design the CONCEPT ROSTER for a set of related documents. You are shown
   the structural skeleton (headings, form fields, table rows, first list

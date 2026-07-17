@@ -135,6 +135,11 @@ class ConvertOptions:
     # parent/children). Drives the entity-container grouping in render_dgml
     # (e.g. BuyerAddress/BuyerPhone → BuyerInformation). None = no grouping.
     parent_map: dict[str, str] | None = None
+    # Opt-in hierarchical labeling: split each chunk's labeling into two grounded
+    # turns (structure first, then values) sharing one cached prefix, instead of
+    # one combined call. Resolves the chicken-and-egg of tagging containers and
+    # their inline values simultaneously. Default off; see label._label_one_document.
+    two_phase_labeling: bool = False
     progress: Callable[[str], None] | None = field(default=None)
     # Workspace to record LLM usage into. When set (and ``debug`` is True), the
     # transcription/labeling calls append rows to ``usage.jsonl``; None disables
@@ -252,6 +257,7 @@ def convert_batch(
             log=log,
             roster_seed=opts.roster_seed,
             schema_seed=opts.schema_seed,
+            two_phase=opts.two_phase_labeling,
         )
 
     outputs: dict[str, str] = {}

@@ -30,6 +30,7 @@ from dgml_core.generation.blocks import (
     sanitize_concept,
 )
 from dgml_core.generation.label import (
+    _merge_two_phase_labels,
     apply_labels,
     label_documents,
     propagate_table_consistency,
@@ -373,6 +374,81 @@ def test_label_documents_roster_seed_skips_planning(
     # The seeded concept is carried into the per-document labeling calls.
     assert all("- PaymentTerms" in text for text in label_inputs)
     assert docs["a.pdf"][0].concept == "PaymentTerms"
+
+
+def test_merge_two_phase_labels_combines_structure_and_values() -> None:
+    """Structure keys win where set; the values pass contributes entities."""
+    structure = {
+        "b1": {"concept": "PaymentTerms"},
+        "r1": {"concept": "LineItem", "table": "Charges", "cells": ["Item", "Amount"]},
+    }
+    values = {
+        "b1": {"entities": [{"quote": "30 days", "concept": "PaymentDuePeriod"}]},
+        "r1": {"concept": "IGNORED", "entities": [{"quote": "Oven", "concept": "ItemName"}]},
+        "b2": {"entities": [{"quote": "Acme", "concept": "SellerName"}]},
+    }
+    merged = _merge_two_phase_labels(structure, values)
+    # Structure roles preserved; the values pass may not overwrite them (r1 keeps
+    # LineItem, not IGNORED), but it adds entities to every block — including a
+    # block the structure pass never mentioned (b2).
+    assert merged["b1"] == {
+        "concept": "PaymentTerms",
+        "entities": [{"quote": "30 days", "concept": "PaymentDuePeriod"}],
+    }
+    assert merged["r1"]["concept"] == "LineItem"
+    assert merged["r1"]["cells"] == ["Item", "Amount"]
+    assert merged["r1"]["entities"] == [{"quote": "Oven", "concept": "ItemName"}]
+    assert merged["b2"] == {"entities": [{"quote": "Acme", "concept": "SellerName"}]}
+
+
+def test_label_documents_two_phase_splits_structure_and_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """two_phase labels each chunk in two turns (structure, then values) sharing
+    one cached prefix, and merges them — the heading gets its concept from pass
+    1, the paragraph's value its entity from pass 2."""
+    docs = _docs()
+    turns: list[dict[str, Any]] = []
+
+    def fake_refine(config: llm.LLMConfig, **kwargs: Any) -> tuple[str, str]:
+        turns.append(kwargs)
+        # The block-listing block is the one carrying the "== <doc> ==" header
+        # (not the roster block, which may echo an observed example verbatim).
+        listing = next(str(p["text"]) for p in kwargs["user_content"] if "==" in str(p["text"]))
+        structure = json.dumps({"labels": {"b0001": {"concept": "PaymentTerms"}}})
+        # The value quote is doc-specific (a.pdf says 30 days, b.pdf 45) so the
+        # pipeline locates it verbatim in each document's own text.
+        quote = "30 days" if "a.pdf" in listing else "45 days"
+        values = json.dumps(
+            {"labels": {"b0002": {"entities": [{"quote": quote, "concept": "PaymentDuePeriod"}]}}}
+        )
+        return (structure, values)
+
+    def boom_call(config: llm.LLMConfig, **kwargs: object) -> str:
+        raise AssertionError("single-call labeling must not run in two-phase mode")
+
+    monkeypatch.setattr(llm, "call_with_refinement", fake_refine)
+    monkeypatch.setattr(llm, "call", boom_call)
+    warnings = label_documents(
+        docs,
+        config=llm.LLMConfig(model="anthropic/claude-haiku-4-5"),
+        roster_seed={"PaymentTerms": "the payment clause"},  # skip Pass B.1 planning
+        two_phase=True,
+    )
+    assert warnings == []
+    # One two-turn call per document (2 docs); planning was skipped by the seed.
+    assert len(turns) == 2
+    # Turn 1's trailing (cached) block is the structure instruction; turn 2's
+    # refine instruction is the values instruction — the shared prefix between.
+    assert "PASS 1 of 2" in turns[0]["user_content"][-1]["text"]
+    assert "PASS 2 of 2" in turns[0]["refine_instruction"][0]["text"]
+    # Structure pass tagged the heading; values pass isolated the inline value.
+    assert docs["a.pdf"][0].concept == docs["b.pdf"][0].concept == "PaymentTerms"
+    (span_a,) = docs["a.pdf"][1].entities
+    assert docs["a.pdf"][1].text[span_a.start : span_a.end] == "30 days"
+    assert span_a.concept == "PaymentDuePeriod"
+    (span_b,) = docs["b.pdf"][1].entities
+    assert docs["b.pdf"][1].text[span_b.start : span_b.end] == "45 days"
 
 
 def test_label_documents_schema_seed_full_fidelity(

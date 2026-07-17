@@ -111,6 +111,15 @@ def _needs_label(block: Block) -> bool:
 
 
 SYSTEM_PROMPT = prompt("label_system")
+# Two-pass labeling (opt-in): the SAME system prompt drives both turns; each
+# turn is scoped by a user instruction appended after the (cached) block
+# listing. Pass 1 assigns the structural/topic concepts (sections, tables,
+# columns), pass 2 tags the atomic values INSIDE that settled structure — the
+# structure-then-values split that resolves the chicken-and-egg of doing both
+# in one shot. Sharing the system prefix and the listing lets pass 2 replay
+# them from cache (see llm.call_with_refinement).
+PHASE1_STRUCTURE_PROMPT = prompt("label_phase1_structure")
+PHASE2_VALUES_PROMPT = prompt("label_phase2_values")
 
 
 def render_block_listing(doc_name: str, blocks: list[Block]) -> str:
@@ -197,6 +206,40 @@ def _parse_labels_json(raw: str) -> dict[str, Any]:
     cleaned = (match.group(1) if match else raw).strip()
     out = loads_tolerant(cleaned)
     return out if isinstance(out, dict) else {}
+
+
+# Keys the STRUCTURE pass owns (block/table/column roles); the VALUES pass owns
+# everything else it emits (chiefly "entities"). On the rare overlap, structure
+# wins for its own keys — the values turn is instructed not to restate them.
+_STRUCTURE_KEYS = ("concept", "table", "cells")
+
+
+def _merge_two_phase_labels(
+    structure: Mapping[str, Any], values: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Fuse a two-pass labeling result into one ``apply_labels`` payload.
+
+    The two turns produce partial per-block labels — pass 1 the structural
+    roles, pass 2 the inline value entities. Merging them back into the single
+    ``{block_id: {concept, table, cells, entities}}`` shape means the whole
+    tested ``apply_labels``/propagation path is reused unchanged: the split is
+    purely how the MODEL reasons, not how the labels are applied.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for block_id, payload in structure.items():
+        if isinstance(payload, Mapping):
+            merged[str(block_id)] = dict(payload)
+    for block_id, payload in values.items():
+        if not isinstance(payload, Mapping):
+            continue
+        entry = merged.setdefault(str(block_id), {})
+        for key, val in payload.items():
+            # Structure keys already set in pass 1 are authoritative; pass 2
+            # contributes entities (and any other value-only fields).
+            if key in _STRUCTURE_KEYS and key in entry:
+                continue
+            entry[key] = val
+    return merged
 
 
 def _locate_quote(text: str, raw_span: Mapping[str, Any]) -> tuple[int, int] | None:
@@ -1188,6 +1231,55 @@ def _seed_entries_from_schema(schema: Schema) -> dict[str, RosterEntry]:
     return roster
 
 
+def _run_chunk_labeling(
+    call_content: list[dict[str, Any]],
+    *,
+    config: llm.LLMConfig,
+    cache_dir: Path | str | None,
+    stem: str,
+    cnn: str,
+    debug: bool,
+    two_phase: bool,
+) -> dict[str, Any]:
+    """One chunk's LLM labeling → the parsed ``{block_id: labels}`` mapping.
+
+    Single-call by default. With *two_phase*, runs the structure then values
+    turns via ``llm.call_with_refinement`` (shared cached prefix) and merges
+    them. Either way the functional ``label_<stem>_<cnn>_raw.json`` the next run
+    reloads holds the SAME ``{"labels": {...}}`` shape, so the cache-reload path
+    is identical for both modes.
+    """
+    raw_path = f"label_{stem}_{cnn}_raw.json"
+    if not two_phase:
+        raw = llm.call(config, system_prompt=SYSTEM_PROMPT, user_content=call_content, cache=True)
+        # Functional file the next run reloads — written regardless of --debug.
+        cache_write(cache_dir, raw_path, strip_fences(raw), debug=True)
+        return _parse_labels_json(raw).get("labels", {}) or {}
+    structure_raw, values_raw = llm.call_with_refinement(
+        config,
+        system_prompt=SYSTEM_PROMPT,
+        user_content=call_content,
+        refine_instruction=[{"type": "text", "text": PHASE2_VALUES_PROMPT}],
+        cache=True,
+    )
+    # Debug-only per-turn dumps; never read back (the merged file below is).
+    cache_write(
+        cache_dir,
+        f"label_{stem}_{cnn}_structure_raw.json",
+        strip_fences(structure_raw),
+        debug=debug,
+    )
+    cache_write(
+        cache_dir, f"label_{stem}_{cnn}_values_raw.json", strip_fences(values_raw), debug=debug
+    )
+    structure_labels = _parse_labels_json(structure_raw).get("labels", {}) or {}
+    value_labels = _parse_labels_json(values_raw).get("labels", {}) or {}
+    labels = _merge_two_phase_labels(structure_labels, value_labels)
+    # Functional merged file the next run reloads — written regardless of --debug.
+    cache_write(cache_dir, raw_path, json.dumps({"labels": labels}, ensure_ascii=False), debug=True)
+    return labels
+
+
 def _label_one_document(
     doc_name: str,
     blocks: list[Block],
@@ -1197,8 +1289,17 @@ def _label_one_document(
     cache_dir: Path | str | None,
     debug: bool,
     log: Callable[[str], None],
+    two_phase: bool = False,
 ) -> list[str]:
-    """Label one document's blocks against (and into) the shared roster."""
+    """Label one document's blocks against (and into) the shared roster.
+
+    With *two_phase* the per-chunk labeling runs as two grounded turns sharing
+    one cached prefix (see ``PHASE1_STRUCTURE_PROMPT``): pass 1 assigns the
+    structural/topic concepts, pass 2 tags the atomic values inside that settled
+    structure. The two partial results are merged back into one payload, so
+    ``apply_labels`` and the consistency propagation run exactly as in the
+    single-call path.
+    """
     warnings: list[str] = []
     stem = Path(doc_name).stem
     # One roster snapshot per document: every call for this document reuses the
@@ -1206,31 +1307,30 @@ def _label_one_document(
     # document's chunks and its section retry.
     roster_blocks = _roster_content_blocks(roster, model=config.model)
     for chunk_idx, chunk in enumerate(_chunks(blocks)):
+        cnn = f"c{chunk_idx + 1:02d}"
         listing = render_block_listing(doc_name, chunk)
-        user_content = [*roster_blocks, {"type": "text", "text": listing}]
-        user_text = "\n\n".join(str(part["text"]) for part in user_content)
-        cache_write(
-            cache_dir, f"label_{stem}_c{chunk_idx + 1:02d}_input.txt", user_text, debug=debug
+        base_content = [*roster_blocks, {"type": "text", "text": listing}]
+        # Two-phase adds a trailing pass-1 instruction; it becomes the cached
+        # breakpoint so pass 2 replays roster + listing + pass-1 from cache.
+        call_content = (
+            [*base_content, {"type": "text", "text": PHASE1_STRUCTURE_PROMPT}]
+            if two_phase
+            else base_content
         )
+        user_text = "\n\n".join(str(part["text"]) for part in call_content)
+        cache_write(cache_dir, f"label_{stem}_{cnn}_input.txt", user_text, debug=debug)
         for attempt in range(2):
             try:
-                raw = llm.call(
-                    config,
-                    system_prompt=SYSTEM_PROMPT,
-                    user_content=user_content,
-                    cache=True,
+                labels = _run_chunk_labeling(
+                    call_content,
+                    config=config,
+                    cache_dir=cache_dir,
+                    stem=stem,
+                    cnn=cnn,
+                    debug=debug,
+                    two_phase=two_phase,
                 )
-                # Functional file the next run reloads — written regardless of --debug.
-                cache_write(
-                    cache_dir,
-                    f"label_{stem}_c{chunk_idx + 1:02d}_raw.json",
-                    strip_fences(raw),
-                    debug=True,
-                )
-                payload = _parse_labels_json(raw)
-                warnings.extend(
-                    apply_labels(chunk, payload.get("labels", {}) or {}, doc_name=doc_name)
-                )
+                warnings.extend(apply_labels(chunk, labels, doc_name=doc_name))
             except Exception as exc:  # labeling must never lose the transcription
                 msg = f"labeling failed for {doc_name} chunk {chunk_idx + 1}: {exc}"
                 log(f"[label] {msg}")
@@ -1322,6 +1422,7 @@ def label_documents(
     roster_refine: bool = True,
     roster_seed: Mapping[str, str] | None = None,
     schema_seed: Schema | None = None,
+    two_phase: bool = False,
 ) -> list[str]:
     """Label every document, chunked, carrying the roster between calls.
 
@@ -1349,6 +1450,11 @@ def label_documents(
     *debug* additionally set, the per-call input listings
     (``label_<stem>_cNN_input.txt``) and section-retry artifacts are written
     too (debug-only; never read back).
+
+    *two_phase* runs each chunk's labeling as two grounded turns (structure then
+    values) sharing one cached prefix, instead of one combined call — see
+    :func:`_label_one_document`. Opt-in; the roster planning (Pass B.1), pilot
+    staging, and section retry are unchanged.
     """
     total_blocks = sum(len(b) for b in docs.values())
     log(f"Pass B: labeling {total_blocks} block(s) across {len(docs)} doc(s)...")
@@ -1404,6 +1510,7 @@ def label_documents(
                 cache_dir=cache_dir,
                 debug=debug,
                 log=log,
+                two_phase=two_phase,
             )
         )
         if pilot and idx == len(pilot) - 1:
