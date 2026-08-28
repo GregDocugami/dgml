@@ -1723,6 +1723,79 @@ def test_find_verbatim_respects_token_boundaries() -> None:
     assert _find_verbatim("zz 2", "2", 0) == 3
 
 
+def _p(*texts: str) -> dict[str, object]:
+    return {"continues": "", "blocks": [{"structure": "p", "text": t} for t in texts]}
+
+
+def test_union_payloads_splices_only_content_the_base_lacks() -> None:
+    from dgml_core.generation.transcribe import _union_payloads
+
+    base = _p("alpha bravo charlie", "delta echo foxtrot")
+    # First block restates base's opener in different words (represented);
+    # the middle one is content base never rendered; the last is a near-copy.
+    other = _p(
+        "alpha bravo charlie again",
+        "owned facilities 29.9 16.7 46.6",
+        "delta echo foxtrot",
+    )
+    union = _union_payloads(base, other)
+    texts = [b["text"] for b in union["blocks"]]
+    # The new block is spliced in, in document order — between its neighbours.
+    assert texts == [
+        "alpha bravo charlie",
+        "owned facilities 29.9 16.7 46.6",
+        "delta echo foxtrot",
+    ]
+
+
+def test_union_payloads_leaves_a_fully_represented_other_alone() -> None:
+    from dgml_core.generation.transcribe import _union_payloads
+
+    base = _p("alpha bravo charlie", "delta echo foxtrot")
+    assert _union_payloads(base, base) == base
+    # An empty retry contributes nothing rather than erasing the base.
+    assert _union_payloads(base, {"continues": "", "blocks": []}) == base
+
+
+def test_union_payloads_ignores_blocks_too_short_to_judge() -> None:
+    from dgml_core.generation.transcribe import _union_payloads
+
+    base = _p("alpha bravo charlie")
+    union = _union_payloads(base, _p("Total"))
+    assert [b["text"] for b in union["blocks"]] == ["alpha bravo charlie"]
+
+
+def test_combine_attempts_keeps_content_from_the_lower_recall_attempt() -> None:
+    """The regression: a retry that loses on recall can hold the only copy.
+
+    Modelled on INTC_2013 w03, where the first attempt scored 0.63 against the
+    page-text layer and the retry 0.27 — but only the retry rendered the ITEM 2
+    PROPERTIES table, so keeping the higher-recall attempt dropped it for good.
+    """
+    from dgml_core.generation.transcribe import _combine_attempts
+
+    expected = "alpha bravo charlie delta echo foxtrot".split()
+    kept = (1.0, "", _p("alpha bravo charlie", "delta echo foxtrot"))
+    fresh = (0.0, "", _p("owned facilities 29.9 16.7 46.6"))
+    recall, raw, payload = _combine_attempts(kept, fresh, expected)
+    texts = [b["text"] for b in payload["blocks"]]
+    assert "owned facilities 29.9 16.7 46.6" in texts
+    assert "alpha bravo charlie" in texts  # the base survives intact
+    assert json.loads(raw) == payload  # raw stays the cache-written form
+    assert recall == 1.0
+
+
+def test_combine_attempts_returns_the_base_untouched_when_nothing_is_new() -> None:
+    from dgml_core.generation.transcribe import _combine_attempts
+
+    expected = "alpha bravo charlie".split()
+    kept = (1.0, "kept-raw", _p("alpha bravo charlie"))
+    fresh = (0.5, "fresh-raw", _p("alpha bravo charlie"))
+    # Identical content: the higher-recall attempt is returned as-is, so a run
+    # with nothing to recover behaves exactly as it did before the union.
+    assert _combine_attempts(kept, fresh, expected) == kept
+
+
 def test_salvage_window_json_recovers_complete_blocks() -> None:
     """A truncated transcription window keeps every block before the cut."""
     from dgml_core.generation.transcribe import _salvage_window_json

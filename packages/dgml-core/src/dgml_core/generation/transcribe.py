@@ -515,6 +515,95 @@ def _merge_payloads(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     return {"continues": str(a.get("continues", "") or ""), "blocks": blocks_a + blocks_b}
 
 
+# ── attempt union ───────────────────────────────────────────────────────────
+# A retry re-transcribes the SAME pages, so most of its blocks restate the first
+# attempt's. But either attempt can also carry a region the other skipped whole
+# — a table the first pass walked past, a page the retry rendered where the
+# first one jumped it. Keeping only the higher-recall attempt drops that content
+# for good: across the DocFinQA dev docset, 141 distinct figures lived only in
+# the discarded attempt (INTC w03's ITEM 2 PROPERTIES table among them).
+# Recall cannot see the gap — it scores an attempt against the page-text layer,
+# so content both attempts render differently, or that the page layer indexes
+# under other pages, moves the number hardly at all. Union the attempts instead
+# of choosing between them.
+
+# A block counts as already-represented when more than this share of its tokens
+# appear anywhere in the base; below it, the block is mostly new content.
+_NEW_BLOCK_MAX_PRESENT = 0.5
+# Shorter blocks ("Total", a lone figure) are too small to judge either way.
+_NEW_BLOCK_MIN_TOKENS = 3
+
+
+def _block_text(block: dict[str, Any]) -> str:
+    """Every character one parsed block contributes to the document."""
+    parts = [str(block.get(key, "") or "") for key in ("text", "lim", "label", "value")]
+    parts.extend(str(c) for c in block.get("cells", []) or [])
+    return " ".join(p for p in parts if p)
+
+
+def _union_payloads(base: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
+    """``base`` plus the blocks of ``other`` whose content ``base`` lacks.
+
+    Blocks are compared by token presence rather than equality — the attempts
+    word the same region differently, so a block is *already represented* when
+    most of its tokens appear anywhere in ``base``. Only a mostly-new block is
+    spliced in, positioned after whichever base block its neighbour matched, so
+    the result stays in document order. Conservative by construction: a block
+    the test cannot confidently call new is left out rather than duplicated.
+    """
+    base_blocks = [dict(x) for x in base.get("blocks", []) or [] if isinstance(x, dict)]
+    other_blocks = [x for x in other.get("blocks", []) or [] if isinstance(x, dict)]
+    continues = str(base.get("continues", "") or "")
+    if not other_blocks:
+        return {"continues": continues, "blocks": base_blocks}
+
+    have = Counter(coverage._tokenize(_payload_text(base)))
+    base_tokens = [set(coverage._tokenize(_block_text(b))) for b in base_blocks]
+    out = list(base_blocks)
+    anchor = 0  # index into base_blocks; insertions land here, offset by `added`
+    added = 0
+    for block in other_blocks:
+        tokens = coverage._tokenize(_block_text(block))
+        if len(tokens) < _NEW_BLOCK_MIN_TOKENS:
+            continue
+        present = sum(1 for t in tokens if have[t] > 0) / len(tokens)
+        if present > _NEW_BLOCK_MAX_PRESENT:
+            # Represented already — advance the anchor past this block's twin so
+            # anything new that follows it lands after it, not at the top.
+            tset = set(tokens)
+            best_j, best_overlap = -1, 0
+            for j in range(anchor, len(base_tokens)):
+                overlap = len(tset & base_tokens[j])
+                if overlap > best_overlap:
+                    best_j, best_overlap = j, overlap
+            if best_j >= 0:
+                anchor = best_j + 1
+            continue
+        out.insert(anchor + added, dict(block))
+        added += 1
+        have.update(tokens)  # a later near-copy of this block is now represented
+    return {"continues": continues, "blocks": out}
+
+
+def _combine_attempts(
+    kept: tuple[float, str, dict[str, Any]],
+    fresh: tuple[float, str, dict[str, Any]],
+    expected: list[str],
+) -> tuple[float, str, dict[str, Any]]:
+    """Fold a fresh attempt into the best-so-far, keeping content from both.
+
+    The higher-recall attempt is the base (it reproduces more of the page-text
+    layer, so it is the better skeleton); the other contributes only what the
+    base lacks. When it contributes nothing, the base is returned untouched and
+    the run is exactly as it was before attempts were unioned.
+    """
+    base, other = (kept, fresh) if kept[0] >= fresh[0] else (fresh, kept)
+    union = _union_payloads(base[2], other[2])
+    if len(union.get("blocks", []) or []) <= len(base[2].get("blocks", []) or []):
+        return base
+    return (_window_recall(union, expected), json.dumps(union, ensure_ascii=False), union)
+
+
 def transcribe_document(
     pdf_bytes: bytes,
     *,
@@ -618,13 +707,17 @@ def transcribe_document(
                         f"salvaged {len(payload.get('blocks', []))} block(s)"
                     )
                 recall = _window_recall(payload, exp)
-                if found is None or recall > found[0]:
+                if found is None:
                     found = (recall, raw, payload)
-                if recall >= _GATE_RECALL:
+                else:
+                    # Union rather than choose: an attempt that loses on recall
+                    # can still hold the only copy of a region.
+                    found = _combine_attempts(found, (recall, raw, payload), exp)
+                if found[0] >= _GATE_RECALL:
                     break
                 log(
                     f"{doc_name} {wlog}: transcription covers only "
-                    f"{recall:.0%} of the pages' words"
+                    f"{found[0]:.0%} of the pages' words"
                     + ("; retrying window" if attempt + 1 < n_attempts else "")
                 )
             return found
