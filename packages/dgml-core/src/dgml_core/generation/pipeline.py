@@ -67,7 +67,15 @@ def load_labeled_docs_from_cache(cache_dir: Path | str, stems: list[str]) -> dic
             for b in raw_blocks
         ]
         for label_file in sorted(cache.glob(f"label_{glob.escape(stem)}_*_raw.json")):
-            payload = _parse_labels_json(label_file.read_text(encoding="utf-8"))
+            # A chunk's raw reply is cached before it is known to parse, so a
+            # run that died mid-labeling leaves a truncated file behind. One
+            # such file must not abort the reload of an entire docset — skip it
+            # and let that chunk's blocks stay unlabeled, which is what a
+            # missing file would already have produced.
+            try:
+                payload = _parse_labels_json(label_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, ValueError):
+                continue
             apply_labels(blocks, payload.get("labels", {}) or {}, doc_name=stem)
         propagate_table_consistency(blocks)
         propagate_list_consistency(blocks)

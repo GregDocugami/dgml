@@ -95,9 +95,18 @@ def rerender(
     else:
         for stem, blocks in docs.items():
             n_warn = 0
+            n_bad = 0
             for label_file in sorted(cache.glob(f"label_{glob.escape(stem)}_c*_raw.json")):
-                payload = _parse_labels_json(label_file.read_text(encoding="utf-8"))
+                # Truncated cache files (a run that died mid-labeling) leave
+                # their chunk unlabeled rather than killing the whole replay.
+                try:
+                    payload = _parse_labels_json(label_file.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, ValueError):
+                    n_bad += 1
+                    continue
                 n_warn += len(apply_labels(blocks, payload.get("labels", {}) or {}, doc_name=stem))
+            if n_bad:
+                print(f"{stem[:48]}: skipped {n_bad} unparseable label cache file(s)")
             if n_warn:
                 print(f"{stem[:48]}: {n_warn} label warning(s)")
 
