@@ -33,6 +33,7 @@ from typing import IO, TYPE_CHECKING, Any
 from dgml_core import layout
 from dgml_core.classification import (
     ClassificationConfig,
+    ClassifyMode,
     classify_file,
     load_classification_config,
 )
@@ -652,15 +653,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     fl_add.add_argument(
         "--auto-classify",
-        action="store_true",
+        nargs="?",
+        metavar="MODE",
+        const=ClassifyMode.EXISTING_OR_NEW.value,
+        default=None,
+        choices=[m.value for m in ClassifyMode],
         help=(
             "After adding, use the configured vision LLM to assign the file "
-            "to a DocSet — assigning to an existing DocSet if one fits, "
-            "otherwise creating a new one. Requires a 'classification' section "
-            "in <workspace>/config.toml; a missing or invalid config is a hard "
-            "error (exit 1). Failures of the classification call itself (LLM "
-            "error, auth) are reported in the 'classification' field of the "
-            "response payload without aborting the file add."
+            "to a DocSet. MODE is 'existing-or-new' (the default when the flag "
+            "is passed bare): assign to an existing DocSet if one fits, "
+            "otherwise create a new one. 'existing' restricts the LLM to "
+            "DocSets that already exist — a file matching none is added and "
+            "left unassigned rather than anchoring a new DocSet, reported as "
+            "decision 'none'. Note MODE is consumed greedily, so put PATH "
+            "before this flag (or pass MODE explicitly). Requires a "
+            "'classification' section in <workspace>/config.toml; a missing or "
+            "invalid config is a hard error (exit 1). Failures of the "
+            "classification call itself (LLM error, auth) are reported in the "
+            "'classification' field of the response payload without aborting "
+            "the file add."
         ),
     )
     files.add_parser("list", parents=[common], help="List Files.")
@@ -3809,7 +3820,9 @@ def _file_add_bulk(args: argparse.Namespace, ws: Workspace, store: FileStore, fm
     recursive: bool = args.recursive
     pdfs = _gather_pdfs(directory, recursive=recursive, suffixes=_ingestible_suffixes(ws))
 
-    auto_classify = getattr(args, "auto_classify", False)
+    classify_mode = getattr(args, "auto_classify", None)
+    auto_classify = classify_mode is not None
+    allow_new = classify_mode != ClassifyMode.EXISTING
     config: ClassificationConfig | None = None
     docsets: list[DocSet] | None = None
     if auto_classify:
@@ -3862,7 +3875,12 @@ def _file_add_bulk(args: argparse.Namespace, ws: Workspace, store: FileStore, fm
         entry: dict[str, Any] = {"status": status, "path": str(pdf), **_file_add_payload(result)}
         if auto_classify:
             entry["classification"] = _auto_classify(
-                ws, result, config=config, docsets=docsets, debug=args.debug
+                ws,
+                result,
+                config=config,
+                docsets=docsets,
+                allow_new=allow_new,
+                debug=args.debug,
             )
         entries.append(entry)
 
@@ -3891,10 +3909,16 @@ def _file_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             debug=args.debug,
         )
         payload: dict[str, Any] = _file_add_payload(result)
-        if getattr(args, "auto_classify", False):
+        classify_mode = getattr(args, "auto_classify", None)
+        if classify_mode is not None:
             # _auto_classify loads the classification config itself; a
             # missing/invalid one raises straight through to an error envelope.
-            payload["classification"] = _auto_classify(ws, result, debug=args.debug)
+            payload["classification"] = _auto_classify(
+                ws,
+                result,
+                allow_new=classify_mode != ClassifyMode.EXISTING,
+                debug=args.debug,
+            )
         _emit(payload, fmt)
     elif sub == "list":
         _emit({"files": [f.to_json() for f in store.list_all()]}, fmt)
@@ -3914,11 +3938,18 @@ def _auto_classify(
     *,
     config: ClassificationConfig | None = None,
     docsets: list[DocSet] | None = None,
+    allow_new: bool = True,
     debug: bool = False,
 ) -> dict[str, Any]:
     """Run LLM auto-classification on a freshly added File and assign it.
 
     Returns the ``classification`` block embedded in ``dgml file add`` output.
+
+    ``allow_new=False`` (``--auto-classify existing``) forbids creating a
+    DocSet: a file the LLM matches to none is left unassigned and reported as
+    ``decision: "none"`` with no error, since the add itself succeeded. With no
+    DocSets in the workspace at all there is nothing to match against, so the
+    LLM call is skipped entirely rather than burned on a foregone conclusion.
 
     A missing or invalid classification config is a **hard** failure: when
     ``config`` is not supplied it is loaded here via
@@ -3947,6 +3978,19 @@ def _auto_classify(
     if config is None:
         config = load_classification_config(ws)
 
+    if not allow_new:
+        # Nothing to assign to and creating is forbidden, so the outcome is
+        # settled before we ask. The single-file path passes docsets=None, so
+        # read the store here and hand the list on to classify_file rather than
+        # letting it re-read.
+        if docsets is None:
+            docsets = DocSetStore(ws).list_all()
+        if not docsets:
+            return {
+                "performed": False,
+                "reason": "no existing DocSets to assign to",
+            }
+
     file_id = result.record.id
     block: dict[str, Any] = {
         "performed": True,
@@ -3960,7 +4004,9 @@ def _auto_classify(
     }
 
     try:
-        decision = classify_file(ws, file_id, config=config, docsets=docsets, debug=debug)
+        decision = classify_file(
+            ws, file_id, config=config, docsets=docsets, allow_new=allow_new, debug=debug
+        )
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
         return block
@@ -3986,7 +4032,11 @@ def _auto_classify(
             )
             if extraction_block is not None:
                 block["extraction"] = extraction_block
-        else:
+        elif decision.decision == "none":
+            # No existing DocSet fits and creating one is forbidden. The file
+            # is added and left unassigned — a normal outcome, not an error.
+            block.update(decision="none")
+        elif decision.decision == "new":
             assert decision.new_name is not None and decision.new_description is not None
             created = docset_store.create(
                 name=decision.new_name,
@@ -4003,6 +4053,8 @@ def _auto_classify(
                 docset_name=created.name,
                 docset_key_questions=list(created.key_questions),
             )
+        else:  # unreachable — classify_file returns only these three
+            raise AssertionError(f"unhandled classification decision: {decision.decision}")
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
     return block

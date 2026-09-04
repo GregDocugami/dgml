@@ -587,6 +587,118 @@ def test_classify_file_no_existing_docsets_forces_new(workspace: Workspace) -> N
 
 
 # ---------------------------------------------------------------------------
+# classify_file with allow_new=False (ClassifyMode.EXISTING)
+# ---------------------------------------------------------------------------
+
+
+def _tool_names(mock_completion: Any) -> list[str]:
+    return [t["function"]["name"] for t in mock_completion.call_args.kwargs["tools"]]
+
+
+def test_classify_file_existing_only_offers_assign_and_leave_unassigned(
+    workspace: Workspace,
+) -> None:
+    """create_new_docset must not be on the menu — the whole point of the mode
+    is that the LLM cannot reach for it. leave_unassigned takes its slot,
+    because tool_choice="required" means offering assign alone would force a
+    bad match."""
+    existing_id, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        classify_file(workspace, new_id, config=cfg, allow_new=False)
+
+    assert _tool_names(mock_completion) == ["assign_to_existing_docset", "leave_unassigned"]
+    assert mock_completion.call_args.kwargs["tool_choice"] == "required"
+
+
+def test_classify_file_default_still_offers_create(workspace: Workspace) -> None:
+    """The default (allow_new=True) menu is unchanged."""
+    existing_id, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        classify_file(workspace, new_id, config=cfg)
+
+    assert _tool_names(mock_completion) == ["assign_to_existing_docset", "create_new_docset"]
+
+
+def test_classify_file_existing_only_assigns(workspace: Workspace) -> None:
+    """A file that fits an existing DocSet is assigned exactly as it would be
+    in the default mode."""
+    existing_id, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with patch("litellm.completion", return_value=response):
+        decision = classify_file(workspace, new_id, config=cfg, allow_new=False)
+
+    assert decision == ClassificationDecision(decision="existing", existing_docset_id=existing_id)
+
+
+def test_classify_file_existing_only_leave_unassigned(workspace: Workspace) -> None:
+    """No fit → decision "none", with nothing else populated. The caller reads
+    this as "add the file, assign it to nothing"."""
+    _, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("leave_unassigned", {})
+
+    with patch("litellm.completion", return_value=response):
+        decision = classify_file(workspace, new_id, config=cfg, allow_new=False)
+
+    assert decision == ClassificationDecision(decision="none")
+
+
+def test_classify_file_existing_only_rejects_create_call(workspace: Workspace) -> None:
+    """A model that calls create_new_docset anyway is refused rather than
+    obeyed — honoring it would create the DocSet the caller ruled out."""
+    _, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("create_new_docset", _create_new_args())
+
+    with patch("litellm.completion", return_value=response):
+        with pytest.raises(ClassificationFailed, match="was not offered"):
+            classify_file(workspace, new_id, config=cfg, allow_new=False)
+
+
+def test_classify_file_leave_unassigned_rejected_in_default_mode(workspace: Workspace) -> None:
+    """leave_unassigned isn't offered in the default mode, so a call to it is
+    an unexpected tool name — not a silent no-op."""
+    _, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("leave_unassigned", {})
+
+    with patch("litellm.completion", return_value=response):
+        with pytest.raises(ClassificationFailed, match="unexpected tool name"):
+            classify_file(workspace, new_id, config=cfg)
+
+
+def test_classify_file_existing_only_prompt_keeps_docset_context(workspace: Workspace) -> None:
+    """The restricted prompt keeps the part that makes assignment good — the
+    existing DocSets and their key questions — and drops only the instruction
+    to create one."""
+    existing_id, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        classify_file(workspace, new_id, config=cfg, allow_new=False)
+
+    content = mock_completion.call_args.kwargs["messages"][0]["content"]
+    prompt_text = next(c["text"] for c in content if c["type"] == "text")
+    for q in (
+        "What is the vendor name?",
+        "What is the invoice total?",
+        "What is the invoice date?",
+    ):
+        assert q in prompt_text
+    assert "leave_unassigned" in prompt_text
+    assert "create_new_docset" not in prompt_text
+
+
+# ---------------------------------------------------------------------------
 # propose_new_docset_for_files
 # ---------------------------------------------------------------------------
 

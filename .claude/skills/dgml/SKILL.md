@@ -139,7 +139,37 @@ uv run dgml docset create --name "Lease Abstract" \
   --key-question "What is the monthly base rent?"
 ```
 
+For that curated case, pass `--auto-classify existing` so the run can
+only *route into* those DocSets, never invent more. Without it, one
+document that matches nothing anchors a brand-new one-file DocSet that
+someone has to notice and clean up. Unmatched files come back as
+`decision: "none"` and stay unassigned — collect them and decide
+deliberately (assign by hand, or let `dgml cluster` propose DocSets for
+the leftovers as a batch, which names them from the whole group rather
+than from whichever file happened to arrive first):
+
+```bash
+payload=$(uv run dgml file add --workspace "$wid" /path/to/docs \
+            --recursive --on-conflict skip --auto-classify existing)
+# Files that matched nothing — route these deliberately, don't re-run blind.
+jq -r '.results[] | select(.classification.decision == "none") | .path' <<<"$payload"
+```
+
+⚠️ `--auto-classify` takes an *optional* MODE, so the parser eats the
+next token. Always put PATH **before** the flag (as above), or name the
+mode explicitly (`--auto-classify existing /path/doc.pdf`).
+`dgml file add --auto-classify /path/doc.pdf` exits 2 with
+`invalid choice: '/path/doc.pdf'`.
+
 Key contract points:
+- `--auto-classify` (bare) == `--auto-classify existing-or-new`: assign
+  if something fits, else create. `--auto-classify existing` never
+  creates: a file matching nothing is added, left unassigned, and
+  reported as `decision: "none"` with `error: null` and exit 0 — a
+  normal outcome, not a failure, so don't treat it as one.
+- In `existing` mode against a workspace with **no** DocSets, no LLM
+  call is made at all (`performed: false`,
+  `reason: "no existing DocSets to assign to"`). Seed the DocSets first.
 - A missing or invalid `classification` config is a **hard** error
   (exit 1, `CLASSIFICATION_CONFIG_MISSING` / `_INVALID`): config is a
   precondition, so the command aborts rather than recording the same
@@ -196,7 +226,7 @@ summing to `total`) is the quick health read; report it to the user.
 
 Variants:
 - **Add to an existing DocSet:** skip the `docset create` step; pass its known ID as `$ds`. Find it with `uv run dgml docset list | jq -r '.docsets[] | select(.name=="…") | .id'`.
-- **Auto-route heterogeneous PDFs into DocSets**: drop the `docset create` step and the `docset add-file` loop; pass `--auto-classify` to `file add` instead. Each file lands in the best-fitting existing DocSet, or in a new one the LLM proposes — and DocSets created mid-run are visible to later files in the same batch, so similar PDFs cluster. Requires `classification` config in `<workspace>/config.toml`; see the one-shot example above. Read each file's `.results[].classification` block for the outcome.
+- **Auto-route heterogeneous PDFs into DocSets**: drop the `docset create` step and the `docset add-file` loop; pass `--auto-classify` to `file add` instead. Each file lands in the best-fitting existing DocSet, or in a new one the LLM proposes — and DocSets created mid-run are visible to later files in the same batch, so similar PDFs cluster. Requires `classification` config in `<workspace>/config.toml`; see the one-shot example above. Read each file's `.results[].classification` block for the outcome. Use `--auto-classify existing` instead when the workspace's DocSets are curated and the run must not create more — unmatched files come back as `decision: "none"` and stay unassigned.
 - **Recurse into subdirectories:** add `--recursive`.
 - **Hidden errors:** a PDF that fails to parse, render, or extract digital text still produces an entry — `soft_failed` (the `page_*`/`text_extraction_error` fields are set on its `file` entry) or `hard_failed` (the entry has an `error` object and no `file`). `dgml check` afterward is the authoritative whole-workspace health signal.
 

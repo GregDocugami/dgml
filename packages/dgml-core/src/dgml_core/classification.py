@@ -18,7 +18,13 @@ When ``dgml file add --auto-classify`` is used, this module:
 2. Gathers a small number of rendered page images from the new file plus
    the id/name/description of each existing DocSet.
 3. Calls the configured vision LLM via :mod:`litellm`, forcing a choice
-   between two tools: assign to an existing DocSet, or propose a new one.
+   between two tools. Which pair is offered depends on the mode: by default
+   (``existing-or-new``) it is assign-to-existing vs. propose-a-new-one; in
+   ``existing`` mode the create option is withheld and replaced by an
+   explicit "none of these fit" escape hatch, so a curated workspace can
+   absorb what matches without growing new DocSets. The call is made with
+   ``tool_choice="required"``, so that escape hatch has to be a real tool —
+   simply withholding the create option would force a bad assignment.
 
 The CLI treats every failure path here as a *soft fail*: the file record
 is kept, ``classification.error`` is populated in the response payload,
@@ -32,6 +38,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from typing import Any
 
 from .config import load_merged_config
@@ -54,6 +61,23 @@ DEFAULT_NAMING_ATTEMPTS = 1
 
 _TOOL_ASSIGN = "assign_to_existing_docset"
 _TOOL_CREATE = "create_new_docset"
+_TOOL_NONE = "leave_unassigned"
+
+
+class ClassifyMode(StrEnum):
+    """Which DocSets auto-classification is allowed to route a file into.
+
+    ``EXISTING_OR_NEW`` is the historical (and default) behavior: assign to an
+    existing DocSet when one fits, otherwise create one. ``EXISTING`` restricts
+    the LLM to DocSets that already exist — a file matching none is left
+    unassigned rather than anchoring a new DocSet, which keeps a curated
+    workspace from growing a one-document DocSet every time an odd file
+    arrives.
+    """
+
+    EXISTING = "existing"
+    EXISTING_OR_NEW = "existing-or-new"
+
 
 _NEW_DOCSET_INSTRUCTION_BULLETS = "\n".join(
     [
@@ -97,11 +121,15 @@ class ClassificationConfig:
 
 @dataclass(frozen=True)
 class ClassificationDecision:
-    """The LLM's decision: assign to an existing DocSet, or create a new one.
+    """The LLM's decision: assign to an existing DocSet, create a new one, or
+    neither.
 
     Exactly one of ``existing_docset_id`` or (``new_name``, ``new_description``,
     ``new_key_questions``) is populated. Validated at construction by
-    :func:`classify_file`.
+    :func:`classify_file`. The exception is ``decision="none"`` — reachable only
+    from :class:`ClassifyMode.EXISTING`, meaning no existing DocSet fits — where
+    neither is populated and the caller is expected to leave the file
+    unassigned.
 
     ``confidence`` is populated only by the multi-attempt path — see
     :func:`propose_new_docset_for_files` with ``attempts >= 2``. It is the share
@@ -110,7 +138,7 @@ class ClassificationDecision:
     and unrelated to how confident the clusterer was about the grouping.
     """
 
-    decision: str  # "existing" | "new"
+    decision: str  # "existing" | "new" | "none"
     existing_docset_id: str | None = None
     new_name: str | None = None
     new_description: str | None = None
@@ -165,12 +193,20 @@ def classify_file(
     *,
     config: ClassificationConfig,
     docsets: list[DocSet] | None = None,
+    allow_new: bool = True,
     debug: bool = False,
 ) -> ClassificationDecision:
     """Ask the configured vision LLM to classify ``file_id`` into a DocSet.
 
     The LLM picks exactly one of two tools: assign the file to an existing
     DocSet, or propose a new one (name + description).
+
+    ``allow_new=False`` (:class:`ClassifyMode.EXISTING`) withholds the
+    propose-a-new-one tool, offering ``leave_unassigned`` in its place: the
+    decision comes back as ``"none"`` when nothing fits, and the caller leaves
+    the file unassigned. The escape hatch is a real tool because the call is
+    made with ``tool_choice="required"`` — offering assign-to-existing alone
+    would force the LLM into a poor match.
 
     ``docsets`` is the list of existing DocSets to classify against. When
     omitted it is read fresh from the workspace. Bulk callers (e.g.
@@ -190,11 +226,11 @@ def classify_file(
         workspace,
         [file_id],
         config=config,
-        prompt=_build_prompt(docsets),
-        tools=_build_tools(docsets),
+        prompt=_build_prompt(docsets, allow_new=allow_new),
+        tools=_build_tools(docsets, allow_new=allow_new),
         debug=debug,
     )
-    return _parse_response(response, docsets)
+    return _parse_response(response, docsets, allow_new=allow_new)
 
 
 def propose_new_docset_for_files(
@@ -393,7 +429,7 @@ def _build_prompt_new_only() -> str:
     )
 
 
-def _build_prompt(docsets: list[DocSet]) -> str:
+def _build_prompt(docsets: list[DocSet], *, allow_new: bool = True) -> str:
     lines = [
         "You are classifying a newly ingested document into a DocSet.",
         "",
@@ -424,29 +460,31 @@ def _build_prompt(docsets: list[DocSet]) -> str:
                     lines.append(f"    - {q}")
     else:
         lines.append("There are no existing DocSets in this workspace yet.")
-    lines.extend(
-        [
-            "",
-            f"Call `{_TOOL_ASSIGN}` only if the new file's first pages plausibly "
-            "answer the same key questions as one of the existing DocSets above "
-            "(i.e. a single extraction schema would work for both). Otherwise "
-            f"call `{_TOOL_CREATE}` with:",
-            "  - a short, document-type-specific name (2-5 words; prefer the "
-            'document\'s own type, e.g. "Property Tax Bill" or "PILOT '
-            'Agreement", not a topical bucket like "Property Tax Records"),',
-            "  - a one-sentence description of what kind of document this is, and",
-            "  - a list of 3-7 concrete questions answerable from the first "
-            "pages of this kind of document. These define the DocSet for "
-            "future classification — prefer specific, type-discriminating "
-            "questions over generic ones.",
-            "",
-            "Call exactly one tool.",
-        ]
+    assign_rule = (
+        f"Call `{_TOOL_ASSIGN}` only if the new file's first pages plausibly "
+        "answer the same key questions as one of the existing DocSets above "
+        "(i.e. a single extraction schema would work for both)."
     )
+    lines.append("")
+    if allow_new:
+        lines.append(f"{assign_rule} Otherwise call `{_TOOL_CREATE}` with:")
+        lines.append(_NEW_DOCSET_INSTRUCTION_BULLETS)
+    else:
+        lines.append(assign_rule)
+        lines.append("")
+        lines.append(
+            "You may **not** create a DocSet. If none of the existing DocSets "
+            f"fit, call `{_TOOL_NONE}` — the file will be left unassigned for "
+            "a human to route later. Leaving a document unassigned is the "
+            "correct outcome for a document type that isn't represented above; "
+            "forcing it into a DocSet whose key questions it cannot answer is "
+            "worse than not assigning it."
+        )
+    lines.extend(["", "Call exactly one tool."])
     return "\n".join(lines)
 
 
-def _build_tools(docsets: list[DocSet]) -> list[dict[str, Any]]:
+def _build_tools(docsets: list[DocSet], *, allow_new: bool = True) -> list[dict[str, Any]]:
     valid_ids = [ds.id for ds in docsets]
     assign_schema: dict[str, Any] = {
         "type": "object",
@@ -471,8 +509,35 @@ def _build_tools(docsets: list[DocSet]) -> list[dict[str, Any]]:
                 "parameters": assign_schema,
             },
         },
-        _create_new_docset_tool(),
+        _create_new_docset_tool() if allow_new else _leave_unassigned_tool(),
     ]
+
+
+def _leave_unassigned_tool() -> dict[str, Any]:
+    """Litellm tool schema for declining to classify.
+
+    Offered in place of :func:`_create_new_docset_tool` when the caller has
+    forbidden new DocSets. Takes no arguments — there is nothing to say beyond
+    "none of these fit".
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": _TOOL_NONE,
+            "description": (
+                "Decline to assign the new file, because none of the existing "
+                "DocSets fit — the file answers a different set of questions "
+                "than any of them. The file will be left unassigned. Prefer "
+                "this over assigning a document to a DocSet whose key "
+                "questions it cannot answer."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    }
 
 
 def _create_new_docset_tool() -> dict[str, Any]:
@@ -530,8 +595,15 @@ def _create_new_docset_tool() -> dict[str, Any]:
     }
 
 
-def _parse_response(response: Any, docsets: list[DocSet]) -> ClassificationDecision:
-    """Parse the LLM's tool call into a :class:`ClassificationDecision`."""
+def _parse_response(
+    response: Any, docsets: list[DocSet], *, allow_new: bool = True
+) -> ClassificationDecision:
+    """Parse the LLM's tool call into a :class:`ClassificationDecision`.
+
+    With ``allow_new=False`` a ``create_new_docset`` call is rejected rather
+    than honored: the tool wasn't offered, so acting on it would create the
+    DocSet the caller explicitly ruled out.
+    """
     name, args = _extract_single_tool_call(response)
 
     if name == _TOOL_ASSIGN:
@@ -546,7 +618,16 @@ def _parse_response(response: Any, docsets: list[DocSet]) -> ClassificationDecis
             )
         return ClassificationDecision(decision="existing", existing_docset_id=docset_id)
 
+    if name == _TOOL_NONE and not allow_new:
+        return ClassificationDecision(decision="none")
+
     if name == _TOOL_CREATE:
+        if not allow_new:
+            raise ClassificationFailed(
+                f"LLM called {_TOOL_CREATE}, which was not offered; "
+                f"only {_TOOL_ASSIGN} and {_TOOL_NONE} are available in "
+                f"'{ClassifyMode.EXISTING}' mode"
+            )
         return _parse_new_docset_args(name, args)
 
     raise ClassificationFailed(f"LLM returned unexpected tool name: {name!r}")

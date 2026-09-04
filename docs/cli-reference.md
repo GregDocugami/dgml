@@ -20,11 +20,13 @@ flag-driven (no interactive prompts) and idempotent where reasonable.
 driving the CLI directly.
 
 **Boolean flags** follow one convention: a positive `--flag` (e.g.
-`--auto-classify`, `--recursive`, `--force`, `--skip-existing`) turns on a
-behavior that is **off by default**; a `--no-*` flag (e.g. `docset
-generate`'s `--no-coverage`) opts **out** of a step that is **on by
-default**. So `--no-*` appears only where the default is "do it"; everything
-else is opt-in.
+`--recursive`, `--force`, `--skip-existing`) turns on a behavior that is
+**off by default**; a `--no-*` flag (e.g. `docset generate`'s
+`--no-coverage`) opts **out** of a step that is **on by default**. So
+`--no-*` appears only where the default is "do it"; everything else is
+opt-in. `--auto-classify` is the one opt-in flag that also accepts an
+optional value to pick *which* variant of the behavior to run — see
+"Auto-classification".
 
 A complete list of error `code` values is in the [Error code
 reference](#error-code-reference) at the end of this document.
@@ -655,7 +657,8 @@ dgml docset generate <docset_id> [--window-size <n>] [--max-tokens <n>] [...]
 **Auto-extract on assignment.** When the target DocSet has an extraction
 schema set (`extraction-schema.rnc`), every assignment path fires value
 extraction on the newly-assigned file: `docset add-file`, `file add
---auto-classify` (existing-DocSet decisions), and `cluster` (existing-DocSet
+--auto-classify` (existing-DocSet decisions — a `"none"` decision assigns
+nothing, so nothing is extracted), and `cluster` (existing-DocSet
 matches — a DocSet created mid-run can't have a schema yet). The payload
 gains an `extraction` block; extraction failures are **soft** (the error
 lands in `extraction.error`, the assignment stands, exit stays 0). No schema
@@ -1200,7 +1203,7 @@ Errors across the group: `DOCSET_NOT_FOUND`, `FILE_NOT_FOUND`,
 
 ## File commands
 
-### `dgml file add <path> [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--dpi N] [--auto-classify]`
+### `dgml file add <path> [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--dpi N] [--auto-classify [MODE]]`
 
 Add a File. The source is copied into the workspace, hashed, its pages
 are rendered to PNGs via `gs` (300 dpi by default — see `--dpi`), and
@@ -1277,7 +1280,9 @@ The `dgml file add` response also includes:
   File record is still created (with `page_count: null`) and a permanent error
   is recorded. `null` for PDFs and successful conversions.
 - `classification` — present **only** when `--auto-classify` is passed.
-  See "Auto-classification" below.
+  `decision` is `"existing"`, `"new"`, or `"none"` (no DocSet fit and
+  `--auto-classify existing` forbade creating one). See
+  "Auto-classification" below.
 
 Error codes that can come back on `file add`:
 
@@ -1327,6 +1332,9 @@ exactly as for a single add. `--on-conflict skip` is the recommended
 bulk flag — it makes re-runs idempotent. With `--auto-classify`, a
 DocSet created for one file becomes visible to the files processed
 after it, so similar PDFs in the batch cluster into the same DocSet.
+Under `--auto-classify existing` no DocSets are created, so that in-run
+growth doesn't happen: every file is matched against the same curated
+set, and unmatched ones come back as `decision: "none"`.
 
 Each file commits independently: a single bad PDF (or a conflict under
 `--on-conflict error`) is recorded in its entry and the run continues.
@@ -1395,8 +1403,31 @@ whole workspace.
 
 `--auto-classify` on `dgml file add` uses a configured vision LLM to look at
 the new file's rendered page images and either assign it to an existing
-DocSet or create a new one. Configure the model via the `classification`
-section in `<workspace>/config.toml`:
+DocSet or create a new one.
+
+The flag takes an optional `MODE`:
+
+| Invocation | Behavior |
+|---|---|
+| `--auto-classify` | Same as `existing-or-new` — the historical default. |
+| `--auto-classify existing-or-new` | Assign to an existing DocSet if one fits; otherwise create one. |
+| `--auto-classify existing` | Assign to an existing DocSet if one fits; otherwise **leave the file unassigned**. Never creates a DocSet. |
+
+Use `existing` when the workspace's DocSets are curated and an ingest run
+must not grow new ones — otherwise one odd file anchors a one-document
+DocSet that someone has to notice and clean up. The tradeoff is that
+unmatched files accumulate unassigned; sweep them up afterwards with
+`dgml cluster`, or assign them by hand.
+
+> **Argument order matters.** `MODE` is optional, so the parser takes the
+> *next* token as its value. Put `<path>` **before** the flag —
+> `dgml file add doc.pdf --auto-classify` — or name the mode explicitly:
+> `dgml file add --auto-classify existing doc.pdf`. Writing
+> `dgml file add --auto-classify doc.pdf` exits 2 with
+> `invalid choice: 'doc.pdf'`.
+
+Configure the model via the `classification` section in
+`<workspace>/config.toml`:
 
 ```json
 {
@@ -1431,6 +1462,19 @@ The LLM is forced to pick exactly one of two tools:
   document type can answer. The `key_questions` are persisted on the
   new DocSet and shown to future classifications.
 
+In `--auto-classify existing` mode the second tool is replaced by
+`leave_unassigned()`, which takes no arguments and yields
+`decision: "none"`. It has to be an offered tool rather than an absence:
+the call is made with `tool_choice="required"`, so a menu of
+`assign_to_existing_docset` alone would force the LLM into a poor match.
+A model that calls `create_new_docset` anyway — it was not offered — is
+refused with `CLASSIFICATION_FAILED` rather than obeyed.
+
+With `--auto-classify existing` in a workspace that has **no** DocSets at
+all, the outcome is settled before asking, so no LLM call is made:
+`performed` is `false` with
+`reason: "no existing DocSets to assign to"`.
+
 Classification runs **after** the file is added, and only when `created`
 is `true`. Re-runs on a duplicate (`--on-conflict skip`) skip the LLM
 call entirely: `classification.performed` is `false` and the existing
@@ -1460,7 +1504,25 @@ The `classification` payload block:
 is `"new"`, this is the list the LLM just proposed and that has been
 persisted on the freshly-created DocSet.
 
-When the file already existed (`created: false`):
+When `--auto-classify existing` was passed and nothing fit, the file is
+added and joins no DocSet. This is a normal outcome, not a failure — the
+add succeeded, `error` stays `null`, and the exit code is 0:
+
+```json
+"classification": {
+  "performed": true,
+  "model": "gemini/gemini-flash-lite-latest",
+  "decision": "none",
+  "docset_id": null,
+  "docset_created": false,
+  "docset_name": null,
+  "docset_key_questions": [],
+  "error": null
+}
+```
+
+When the file already existed (`created: false`), or `--auto-classify
+existing` was passed to a workspace with no DocSets:
 
 ```json
 "classification": {
