@@ -15,8 +15,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 

@@ -402,7 +402,7 @@ def call_with_refinement(
             _build_completion_kwargs(config, messages=[sys_msg, user_msg])
         )
         add_partial(totals, extract_cost_and_tokens(draft_resp))
-        draft = cast(str, draft_resp["choices"][0]["message"]["content"])
+        draft = _require_text(draft_resp, config.model)
 
         refine_msgs: list[dict[str, Any]] = [
             sys_msg,
@@ -414,7 +414,7 @@ def call_with_refinement(
             _build_completion_kwargs(config, messages=refine_msgs)
         )
         add_partial(totals, extract_cost_and_tokens(refined_resp))
-        refined = cast(str, refined_resp["choices"][0]["message"]["content"])
+        refined = _require_text(refined_resp, config.model)
     return draft, refined
 
 
@@ -568,6 +568,51 @@ def _quiet_stdout() -> Iterator[None]:
         yield
 
 
+_NO_MESSAGE = object()  # first choice carries no message we recognise
+
+
+def _require_text(response: Any, model: str) -> str:
+    """The reply's text, or a typed error when the provider sent none.
+
+    Only the text-returning entry points use this. A null ``content`` is normal
+    on a tool call and on shapes this code does not model, so the shared retry
+    path must not treat it as a failure — but a caller whose signature promises
+    ``str`` must never hand back a ``None``. That is what produced
+    ``strip_fences(None)`` -> ``TypeError`` and took down a labeling batch.
+    """
+    content = _first_content(response)
+    if isinstance(content, str):
+        return content
+    raise EmptyModelResponse(f"model returned no message content (model={model!r})")
+
+
+def _first_content(response: Any) -> Any:
+    """The first choice's message content.
+
+    ``None`` means the message is there and its content is explicitly null —
+    the max_tokens-before-any-text case. :data:`_NO_MESSAGE` means the shape is
+    not one we recognise, which callers must treat as "cannot tell" rather than
+    as missing content, so an unfamiliar provider shape still passes through.
+    """
+    try:
+        choices = getattr(response, "choices", None)
+        if choices is None and isinstance(response, dict):
+            choices = response.get("choices")
+        if not choices:
+            return _NO_MESSAGE
+        choice = choices[0]
+        message = getattr(choice, "message", None)
+        if message is None and isinstance(choice, dict):
+            message = choice.get("message")
+        if isinstance(message, dict):
+            return message.get("content")
+        if message is not None and hasattr(message, "content"):
+            return message.content
+        return _NO_MESSAGE
+    except (AttributeError, IndexError, KeyError, TypeError):
+        return _NO_MESSAGE
+
+
 def _completion_with_retry(kwargs: dict[str, Any], *, max_retries: int = 3) -> Any:
     """Call litellm.completion with exponential-backoff retries for transient
     failures — both raised errors and *empty* responses.
@@ -719,7 +764,7 @@ def call(
     with _record_call(config) as totals:
         response = _completion_with_retry(kwargs)
         add_partial(totals, extract_cost_and_tokens(response))
-        return cast(str, response["choices"][0]["message"]["content"])
+        return _require_text(response, config.model)
 
 
 def call_continued(

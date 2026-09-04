@@ -627,3 +627,56 @@ def test_non_transient_errors_still_raise_immediately(
     with pytest.raises(Exception, match="AuthenticationError"):
         llm._completion_with_retry({"model": "claude-sonnet-4-5"})
     assert len(attempts) == 1
+
+
+def test_call_raises_rather_than_returning_null_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`llm.call` promises `str`; a null content must fail typed, not pass through.
+
+    Anthropic can cut a reply at max_tokens before emitting any text, leaving
+    `content: None`. Returning it surfaced downstream as `strip_fences(None)` ->
+    TypeError and aborted a whole labeling batch.
+    """
+    from dgml_core.errors import EmptyModelResponse
+
+    monkeypatch.setattr(
+        llm,
+        "_completion_with_retry",
+        lambda *_a, **_k: {"choices": [{"message": {"content": None}}]},
+    )
+
+    with pytest.raises(EmptyModelResponse, match="no message content"):
+        llm.call(
+            llm.LLMConfig(model="anthropic/claude-sonnet-5"),
+            system_prompt="sys",
+            user_content=[{"type": "text", "text": "hi"}],
+        )
+
+
+def test_completion_with_retry_still_passes_tool_calls_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The null-content guard lives in the text path only.
+
+    A tool call carries its payload in `tool_calls` with null content, and the
+    clustering caller raises its own domain error for an empty one — the shared
+    retry path must not preempt either.
+    """
+    from types import SimpleNamespace
+
+    calls = {"n": 0}
+
+    def tool_call_response(**kwargs: Any) -> Any:
+        calls["n"] += 1
+        call = SimpleNamespace(function=SimpleNamespace(name="emit", arguments="{}"))
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[call]))]
+        )
+
+    monkeypatch.setattr("litellm.completion", tool_call_response)
+
+    result = llm._completion_with_retry({"model": "gemini/gemini-2.5-pro", "messages": []})
+
+    assert calls["n"] == 1  # returned first time, never treated as empty
+    assert result.choices[0].message.tool_calls
