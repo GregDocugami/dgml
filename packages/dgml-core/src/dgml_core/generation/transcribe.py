@@ -808,11 +808,23 @@ def transcribe_document(
             # per-page recall rather than the midpoint, so the pages that
             # actually fell short are isolated and can be escalated to a
             # stronger model while healthy pages stay on the cheap one.
-            if gate_on and best[0] < _GATE_RECALL and len(page_indices) >= 2:
+            if gate_on and len(page_indices) >= 2:
                 recalls = _page_recalls(
                     best[2], [page_tokens[p] if p < len(page_tokens) else [] for p in page_indices]
                 )
                 segments = _recall_segments(page_indices, recalls, _GATE_RECALL)
+            else:
+                recalls, segments = [], []
+            # A window's mean recall hides a single bad page: AON w03 scores
+            # 0.86 and passes while its page 26 sits at 67% — the page holding
+            # the segment tables that never reached the DGML. So when an
+            # escalation model is configured, a deficient PAGE is enough to
+            # trigger the pass; without one the window-level gate stands and
+            # behaviour is unchanged.
+            page_short = any(deficient for _, deficient in segments)
+            if segments and (
+                best[0] < _GATE_RECALL or (escalate_config is not None and page_short)
+            ):
                 if len(segments) == 1:
                     # One segment means the whole window scored alike — either
                     # uniformly short or with nothing scoreable. Re-requesting
@@ -822,10 +834,11 @@ def transcribe_document(
                     mid = (len(page_indices) + 1) // 2
                     segments = [(page_indices[:mid], True), (page_indices[mid:], True)]
                 short = [f"{p[0] + 1}-{p[-1] + 1}" for p, d in segments if d]
+                why = "window short" if best[0] < _GATE_RECALL else "page(s) short"
                 log(
-                    f"{doc_name} {wlog}: still short after retry; re-requesting in "
+                    f"{doc_name} {wlog}: {why} at {best[0]:.0%}; re-requesting in "
                     f"{len(segments)} segment(s), short on page(s) {', '.join(short) or 'none'}"
-                    + (f" via {escalate_config.model}" if escalate_config else "")
+                    + (f" — escalating those to {escalate_config.model}" if escalate_config else "")
                 )
                 merged: dict[str, Any] | None = None
                 seg_context = context
@@ -845,13 +858,25 @@ def transcribe_document(
                     merged = part[2] if merged is None else _merge_payloads(merged, part[2])
                     seg_context = _payload_tail(part[2])
                 if merged is not None:
-                    merged_recall = _window_recall(merged, expected)
-                    if merged_recall > best[0]:
-                        best = (merged_recall, json.dumps(merged, ensure_ascii=False), merged)
-                        log(
-                            f"{doc_name} {wlog}: segmented pass covers "
-                            f"{merged_recall:.0%} — keeping it"
-                        )
+                    # Union, don't choose. The segmented pass exists to rescue a
+                    # region the earlier attempts skipped, and such a region is
+                    # usually small — so the pass can carry the only copy of it
+                    # while still scoring lower overall. Discarding it on recall
+                    # is the very failure this whole path is here to fix.
+                    before = best[0]
+                    best = _combine_attempts(
+                        best,
+                        (
+                            _window_recall(merged, expected),
+                            json.dumps(merged, ensure_ascii=False),
+                            merged,
+                        ),
+                        expected,
+                    )
+                    log(
+                        f"{doc_name} {wlog}: segmented pass folded in — "
+                        f"{before:.0%} -> {best[0]:.0%} page-word coverage"
+                    )
             recall, raw, payload = best
             if gate_on and recall < _GATE_RECALL:
                 log(f"{doc_name} {wlog}: keeping best attempt at {recall:.0%} page-word coverage")

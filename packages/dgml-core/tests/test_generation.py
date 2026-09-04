@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 import re
 from pathlib import Path
 from typing import Any
@@ -1940,6 +1941,73 @@ def test_transcribe_segments_without_an_escalation_model_stay_on_the_base(
         page_text_dir=pt_dir,
     )
     assert models == {"base/cheap"}
+
+
+def test_transcribe_page_trigger_needs_an_escalation_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window that PASSES the gate but hides a short page is re-requested only
+    when an escalation model is configured.
+
+    Modelled on AON w03: the window scores 0.86 and passes, while the page
+    carrying its segment tables sits at 67% — the content that never reached
+    the DGML. Without `escalate_config` the window-level gate stands.
+    """
+    from dgml_core.generation import document as document_mod
+    from dgml_core.generation import transcribe as transcribe_mod
+
+    # 9 pages fully transcribed, 1 page mostly dropped -> window ~0.9, page ~0.1.
+    pages = {n: [f"w{n}x{i:02d}" for i in range(40)] for n in range(1, 11)}
+    pt_dir = tmp_path / "page_text"
+    pt_dir.mkdir()
+    for n, words in pages.items():
+        (pt_dir / f"page_{n}.json").write_text(
+            json.dumps({"page": n, "words": [{"t": w} for w in words]})
+        )
+    monkeypatch.setattr(transcribe_mod, "pdf_page_count", lambda _p: 10)
+    monkeypatch.setattr(document_mod, "slice_pdf", lambda _b, idx: bytes(idx))
+
+    def make_call(seen: list[tuple[str, str]]) -> Callable[..., str]:
+        def fake_call(config: llm.LLMConfig, **kwargs: object) -> str:
+            instr = kwargs["user_content"][0]["text"]  # type: ignore[index]
+            rng = instr.split("pages ")[1].split()[0].rstrip(",.")
+            seen.append((config.model, rng))
+            first, last = (int(x) for x in rng.split("-"))
+            words: list[str] = []
+            for n in range(first, last + 1):
+                words += pages[n][:4] if n == 6 else pages[n]  # page 6 stays short
+            return _fake_window_json(words)
+
+        return fake_call
+
+    without: list[tuple[str, str]] = []
+    monkeypatch.setattr(llm, "call_continued", make_call(without))
+    transcribe_mod.transcribe_document(
+        b"%PDF-fake",
+        doc_name="a.pdf",
+        config=llm.LLMConfig(model="base/cheap"),
+        cache_dir=tmp_path / "a",
+        debug=True,
+        page_text_dir=pt_dir,
+    )
+    # Window passes the gate, so nothing beyond the single full-window call.
+    assert without == [("base/cheap", "1-10")]
+
+    with_esc: list[tuple[str, str]] = []
+    monkeypatch.setattr(llm, "call_continued", make_call(with_esc))
+    transcribe_mod.transcribe_document(
+        b"%PDF-fake",
+        doc_name="b.pdf",
+        config=llm.LLMConfig(model="base/cheap"),
+        cache_dir=tmp_path / "b",
+        debug=True,
+        page_text_dir=pt_dir,
+        escalate_config=llm.LLMConfig(model="strong/expensive"),
+    )
+    # The short page is isolated and escalated; its neighbours stay cheap.
+    assert ("strong/expensive", "6-6") in with_esc
+    assert ("base/cheap", "1-5") in with_esc
+    assert ("base/cheap", "7-10") in with_esc
 
 
 def test_salvage_window_json_recovers_complete_blocks() -> None:
