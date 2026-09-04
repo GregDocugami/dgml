@@ -27,7 +27,7 @@ import json
 import re
 import tempfile
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -474,6 +474,58 @@ def _window_recall(payload: dict[str, Any], expected: list[str]) -> float:
     return matched / len(expected)
 
 
+# ── recall-targeted retry segmentation ──────────────────────────────────────
+# A window that fails the gate almost never fails uniformly: measured across
+# the DocFinQA dev docset, 3-5 of a failing window's 10 pages are already at
+# 99-100% recall while the rest sit at 40-65% (INTC w03: pages 22-25 at
+# 99-100%, pages 27-29 at 43-50%). Re-requesting the whole window therefore
+# re-transcribes pages that were never in trouble, and does it on the same
+# model that just stopped early. Segment the window on per-page recall instead
+# and hand only the deficient runs to a stronger model.
+
+
+def _page_recalls(payload: dict[str, Any], page_tokens: list[list[str]]) -> list[float | None]:
+    """Recall of each page's words within the window's output.
+
+    ``None`` for a page with no extractable words — there is nothing to score,
+    so it can be neither deficient nor healthy.
+    """
+    have = Counter(coverage._tokenize(_payload_text(payload)))
+    out: list[float | None] = []
+    for tokens in page_tokens:
+        if not tokens:
+            out.append(None)
+            continue
+        pool = have.copy()
+        matched = 0
+        for tok in tokens:
+            if pool[tok] > 0:
+                pool[tok] -= 1
+                matched += 1
+        out.append(matched / len(tokens))
+    return out
+
+
+def _recall_segments(
+    pages: list[int], recalls: Sequence[float | None], threshold: float
+) -> list[tuple[list[int], bool]]:
+    """Split ``pages`` into contiguous runs of (pages, is_deficient).
+
+    Segments cover the window exactly and in order, so re-transcribing them and
+    concatenating the payloads reproduces the window's reading order — the
+    property the blind midpoint split already relied on. A page with no words
+    (``None``) joins whichever run precedes it rather than starting one.
+    """
+    segments: list[tuple[list[int], bool]] = []
+    for page, recall in zip(pages, recalls, strict=True):
+        deficient = recall is not None and recall < threshold
+        if segments and (recall is None or segments[-1][1] == deficient):
+            segments[-1][0].append(page)
+        else:
+            segments.append(([page], deficient))
+    return segments
+
+
 def _payload_tail(payload: dict[str, Any]) -> str:
     """Last ~300 chars a payload contributes — the next slice's continuation tail."""
     for b in reversed(payload.get("blocks", []) or []):
@@ -614,6 +666,7 @@ def transcribe_document(
     debug: bool = False,
     log: Callable[[str], None] = lambda _m: None,
     page_text_dir: Path | str | None = None,
+    escalate_config: llm.LLMConfig | None = None,
 ) -> list[Block]:
     """Transcribe one document into a flat block list (Pass A).
 
@@ -628,6 +681,12 @@ def transcribe_document(
     completeness-checked against the words its pages contain and retried up
     to ``_GATE_RETRIES`` times when recall falls below ``_GATE_RECALL`` — the
     guard against silent window early-stops. Without it behavior is unchanged.
+
+    ``escalate_config`` names a stronger model for the last resort. A window
+    that is still short after its retry is re-requested in contiguous segments
+    split on per-page recall; the segments that actually fell short go to this
+    model, healthy ones stay on ``config``. Without it the segmented pass still
+    runs, entirely on ``config``.
 
     A cached ``<stem>_blocks.json`` short-circuits the whole pass: the blocks
     are reloaded verbatim and no LLM call is made — so a re-run only pays for
@@ -652,13 +711,25 @@ def transcribe_document(
     with llm.record_usage_for(config):
 
         def run_attempts(
-            pages: list[int], context: str, wlog: str, wfile: str
+            pages: list[int],
+            context: str,
+            wlog: str,
+            wfile: str,
+            *,
+            cfg: llm.LLMConfig | None = None,
+            attempts: int | None = None,
         ) -> tuple[float, str, dict[str, Any]] | None:
-            """Gated attempt loop for one page range; best (recall, raw, payload)."""
+            """Gated attempt loop for one page range; best (recall, raw, payload).
+
+            ``cfg`` overrides the transcription model for this range — the
+            escalation pass hands deficient pages to a stronger one. ``attempts``
+            caps the loop (the escalated pass gets a single shot).
+            """
+            call_config = cfg or config
             pdf_slice = document.slice_pdf(pdf_bytes, pages)
             instr = _window_instruction(pages[0], pages[-1], total, context)
             exp = [t for p in pages if p < len(page_tokens) for t in page_tokens[p]]
-            n_attempts = 1 + (_GATE_RETRIES if len(exp) >= _GATE_MIN_TOKENS else 0)
+            n_attempts = attempts or 1 + (_GATE_RETRIES if len(exp) >= _GATE_MIN_TOKENS else 0)
             found: tuple[float, str, dict[str, Any]] | None = None
             for attempt in range(n_attempts):
                 # Retry-nudge: at temperature 0 an identical retry tends to
@@ -676,7 +747,7 @@ def transcribe_document(
                         )
                     )
                 raw = llm.call_continued(
-                    config,
+                    call_config,
                     system_prompt=SYSTEM_PROMPT,
                     user_content=llm.build_user_content(
                         instruction_text=attempt_instr, pdf_bytes=pdf_slice
@@ -732,22 +803,54 @@ def transcribe_document(
                 log(f"{doc_name} {wlog}: window skipped")
                 continue
             # Stage-2 fallback: a retry that reproduces the same early stop is
-            # anchored in the window's CONTENT, so change the INPUT — split
-            # the page range and transcribe the halves.
+            # anchored in the window's CONTENT, so change the INPUT — re-request
+            # the window in contiguous segments. Segment boundaries come from
+            # per-page recall rather than the midpoint, so the pages that
+            # actually fell short are isolated and can be escalated to a
+            # stronger model while healthy pages stay on the cheap one.
             if gate_on and best[0] < _GATE_RECALL and len(page_indices) >= 2:
-                log(f"{doc_name} {wlog}: still short after retry; splitting the window")
-                mid = (len(page_indices) + 1) // 2
-                half_a = run_attempts(page_indices[:mid], context, f"{wlog}a", f"{wfile}a")
-                context_b = _payload_tail(half_a[2]) if half_a else context
-                half_b = run_attempts(page_indices[mid:], context_b, f"{wlog}b", f"{wfile}b")
-                if half_a and half_b:
-                    merged = _merge_payloads(half_a[2], half_b[2])
+                recalls = _page_recalls(
+                    best[2], [page_tokens[p] if p < len(page_tokens) else [] for p in page_indices]
+                )
+                segments = _recall_segments(page_indices, recalls, _GATE_RECALL)
+                if len(segments) == 1:
+                    # One segment means the whole window scored alike — either
+                    # uniformly short or with nothing scoreable. Re-requesting
+                    # the identical range is what already failed twice, so fall
+                    # back to halving it, and treat both halves as deficient so
+                    # an escalation model (when configured) gets them.
+                    mid = (len(page_indices) + 1) // 2
+                    segments = [(page_indices[:mid], True), (page_indices[mid:], True)]
+                short = [f"{p[0] + 1}-{p[-1] + 1}" for p, d in segments if d]
+                log(
+                    f"{doc_name} {wlog}: still short after retry; re-requesting in "
+                    f"{len(segments)} segment(s), short on page(s) {', '.join(short) or 'none'}"
+                    + (f" via {escalate_config.model}" if escalate_config else "")
+                )
+                merged: dict[str, Any] | None = None
+                seg_context = context
+                for idx, (seg_pages, deficient) in enumerate(segments):
+                    tag = chr(ord("a") + idx) if idx < 26 else f"s{idx}"
+                    part = run_attempts(
+                        seg_pages,
+                        seg_context,
+                        f"{wlog}{tag}",
+                        f"{wfile}{tag}",
+                        cfg=escalate_config if (deficient and escalate_config) else None,
+                        attempts=1 if (deficient and escalate_config) else None,
+                    )
+                    if part is None:
+                        merged = None
+                        break
+                    merged = part[2] if merged is None else _merge_payloads(merged, part[2])
+                    seg_context = _payload_tail(part[2])
+                if merged is not None:
                     merged_recall = _window_recall(merged, expected)
                     if merged_recall > best[0]:
                         best = (merged_recall, json.dumps(merged, ensure_ascii=False), merged)
                         log(
-                            f"{doc_name} {wlog}: split halves cover "
-                            f"{merged_recall:.0%} — keeping the split"
+                            f"{doc_name} {wlog}: segmented pass covers "
+                            f"{merged_recall:.0%} — keeping it"
                         )
             recall, raw, payload = best
             if gate_on and recall < _GATE_RECALL:

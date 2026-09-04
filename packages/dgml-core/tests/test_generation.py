@@ -1796,6 +1796,152 @@ def test_combine_attempts_returns_the_base_untouched_when_nothing_is_new() -> No
     assert _combine_attempts(kept, fresh, expected) == kept
 
 
+def test_page_recalls_scores_each_page_against_the_window_output() -> None:
+    from dgml_core.generation.transcribe import _page_recalls
+
+    payload = _p("alpha bravo charlie", "delta echo foxtrot")
+    pages = [
+        ["alpha", "bravo", "charlie"],  # fully reproduced
+        ["delta", "echo", "golf"],  # two of three
+        [],  # no extractable words -> unscoreable
+    ]
+    assert _page_recalls(payload, pages) == [1.0, pytest.approx(2 / 3), None]
+
+
+def test_recall_segments_isolates_the_pages_that_fell_short() -> None:
+    from dgml_core.generation.transcribe import _recall_segments
+
+    pages = [20, 21, 22, 23, 24, 25]
+    # Modelled on INTC w03: a healthy head, then a deficient tail.
+    recalls = [1.0, 0.99, 1.0, 0.45, 0.5, 0.43]
+    assert _recall_segments(pages, recalls, 0.85) == [
+        ([20, 21, 22], False),
+        ([23, 24, 25], True),
+    ]
+
+
+def test_recall_segments_covers_every_page_in_order() -> None:
+    from dgml_core.generation.transcribe import _recall_segments
+
+    pages = [0, 1, 2, 3, 4]
+    recalls = [0.4, 0.9, 0.4, 0.4, 0.9]
+    segments = _recall_segments(pages, recalls, 0.85)
+    # Concatenating the segments must reproduce the window exactly — the
+    # property that lets the segmented pass merge payloads by position.
+    assert [p for seg, _ in segments for p in seg] == pages
+    assert [flag for _, flag in segments] == [True, False, True, False]
+
+
+def test_recall_segments_folds_unscoreable_pages_into_the_run_before_them() -> None:
+    from dgml_core.generation.transcribe import _recall_segments
+
+    pages = [0, 1, 2, 3]
+    recalls = [0.4, None, 0.9, None]
+    segments = _recall_segments(pages, recalls, 0.85)
+    assert segments == [([0, 1], True), ([2, 3], False)]
+
+
+def test_recall_segments_marks_everything_deficient_when_nothing_scores() -> None:
+    from dgml_core.generation.transcribe import _recall_segments
+
+    pages = [7, 8]
+    assert _recall_segments(pages, [0.1, 0.2], 0.85) == [([7, 8], True)]
+
+
+def test_transcribe_escalates_only_the_deficient_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window short on only some pages sends just those to the escalation
+    model, and leaves the healthy ones on the base model."""
+    from dgml_core.generation import document as document_mod
+    from dgml_core.generation import transcribe as transcribe_mod
+
+    pages = {n: [f"w{n}x{i:02d}" for i in range(40)] for n in (1, 2, 3, 4)}
+    pt_dir = tmp_path / "page_text"
+    pt_dir.mkdir()
+    for n, words in pages.items():
+        (pt_dir / f"page_{n}.json").write_text(
+            json.dumps({"page": n, "words": [{"t": w} for w in words]})
+        )
+    monkeypatch.setattr(transcribe_mod, "pdf_page_count", lambda _p: 4)
+    monkeypatch.setattr(document_mod, "slice_pdf", lambda _b, idx: bytes(idx))
+
+    seen: list[tuple[str, str]] = []
+
+    def fake_call(config: llm.LLMConfig, **kwargs: object) -> str:
+        instr = kwargs["user_content"][0]["text"]  # type: ignore[index]
+        rng = instr.split("pages ")[1].split()[0].rstrip(",.")
+        seen.append((config.model, rng))
+        if rng == "1-4":  # full window: pages 1-2 fine, 3-4 dropped
+            return _fake_window_json(pages[1] + pages[2])
+        first, last = (int(x) for x in rng.split("-"))
+        words: list[str] = []
+        for n in range(first, last + 1):
+            words += pages[n]
+        return _fake_window_json(words)
+
+    monkeypatch.setattr(llm, "call_continued", fake_call)
+    transcribe_mod.transcribe_document(
+        b"%PDF-fake",
+        doc_name="doc.pdf",
+        config=llm.LLMConfig(model="base/cheap"),
+        cache_dir=tmp_path,
+        debug=True,
+        page_text_dir=pt_dir,
+        escalate_config=llm.LLMConfig(model="strong/expensive"),
+    )
+    # Two full-window attempts on the base model, then the segmented pass:
+    # pages 1-2 stayed cheap, pages 3-4 escalated.
+    assert seen[:2] == [("base/cheap", "1-4"), ("base/cheap", "1-4")]
+    assert ("base/cheap", "1-2") in seen
+    assert ("strong/expensive", "3-4") in seen
+    # The healthy segment is never sent to the expensive model.
+    assert ("strong/expensive", "1-2") not in seen
+
+
+def test_transcribe_segments_without_an_escalation_model_stay_on_the_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without `escalate_config` the segmented pass runs entirely on `config`."""
+    from dgml_core.generation import document as document_mod
+    from dgml_core.generation import transcribe as transcribe_mod
+
+    pages = {n: [f"w{n}x{i:02d}" for i in range(40)] for n in (1, 2, 3, 4)}
+    pt_dir = tmp_path / "page_text"
+    pt_dir.mkdir()
+    for n, words in pages.items():
+        (pt_dir / f"page_{n}.json").write_text(
+            json.dumps({"page": n, "words": [{"t": w} for w in words]})
+        )
+    monkeypatch.setattr(transcribe_mod, "pdf_page_count", lambda _p: 4)
+    monkeypatch.setattr(document_mod, "slice_pdf", lambda _b, idx: bytes(idx))
+
+    models: set[str] = set()
+
+    def fake_call(config: llm.LLMConfig, **kwargs: object) -> str:
+        models.add(config.model)
+        instr = kwargs["user_content"][0]["text"]  # type: ignore[index]
+        rng = instr.split("pages ")[1].split()[0].rstrip(",.")
+        if rng == "1-4":
+            return _fake_window_json(pages[1] + pages[2])
+        first, last = (int(x) for x in rng.split("-"))
+        words: list[str] = []
+        for n in range(first, last + 1):
+            words += pages[n]
+        return _fake_window_json(words)
+
+    monkeypatch.setattr(llm, "call_continued", fake_call)
+    transcribe_mod.transcribe_document(
+        b"%PDF-fake",
+        doc_name="doc.pdf",
+        config=llm.LLMConfig(model="base/cheap"),
+        cache_dir=tmp_path,
+        debug=True,
+        page_text_dir=pt_dir,
+    )
+    assert models == {"base/cheap"}
+
+
 def test_salvage_window_json_recovers_complete_blocks() -> None:
     """A truncated transcription window keeps every block before the cut."""
     from dgml_core.generation.transcribe import _salvage_window_json

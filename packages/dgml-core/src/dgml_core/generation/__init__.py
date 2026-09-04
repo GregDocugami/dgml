@@ -33,6 +33,7 @@ from dgml_core.generation.config import (
     load_generation_config,
     resolve_generation_api_key,
     resolve_generation_label_api_key,
+    resolve_generation_retry_api_key,
     validate_generation_models,
 )
 from dgml_core.generation.label import label_documents
@@ -54,6 +55,7 @@ __all__ = [
     "render_xml",
     "resolve_generation_api_key",
     "resolve_generation_label_api_key",
+    "resolve_generation_retry_api_key",
     "transcribe_document",
     "validate_generation_models",
 ]

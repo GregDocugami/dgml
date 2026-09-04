@@ -2245,6 +2245,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         load_generation_config,
         resolve_generation_api_key,
         resolve_generation_label_api_key,
+        resolve_generation_retry_api_key,
         validate_generation_models,
     )
     from dgml_core.generation import coverage as cov_mod
@@ -2301,6 +2302,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     gen_api_base = gen_cfg.api_base
     label_api_key = resolve_generation_label_api_key(gen_cfg)
     label_api_base = gen_cfg.label_api_base
+    retry_api_key = resolve_generation_retry_api_key(gen_cfg)
 
     # Pre-flight — fail fast BEFORE any transcription spend on the two model
     # misconfigurations detectable offline: a malformed model string, or a
@@ -2775,6 +2777,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                     schema_seed=schema_seed,
                     parent_map=parent_map_seed or None,
                     progress=_diag,
+                    retry_model=gen_cfg.retry_model,
+                    retry_api_key=retry_api_key,
+                    retry_api_base=gen_cfg.retry_api_base,
                 )
                 convert_batch(
                     pdf_paths,

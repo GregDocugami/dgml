@@ -58,6 +58,11 @@ class GenerationConfig:
     ``*_api_key`` > ``*_api_key_env`` var lookup > ``None`` (litellm's
     per-provider env-var conventions). Setting both the literal and the env-name
     for one model is a config error.
+
+    ``retry_model`` is optional and has no tier: transcription escalating to a
+    stronger model is a deliberate spend, so it happens only when the field
+    names one. Unset, a window still short after its retry is re-requested in
+    segments on ``model`` exactly as before.
     """
 
     model: str
@@ -70,6 +75,11 @@ class GenerationConfig:
     label_api_key: str | None = None
     label_api_key_env: str | None = None
     label_api_base: str | None = None
+    # optional escalation model for windows still short after their retry
+    retry_model: str | None = None
+    retry_api_key: str | None = None
+    retry_api_key_env: str | None = None
+    retry_api_base: str | None = None
 
 
 def load_generation_config(workspace: Workspace) -> GenerationConfig:
@@ -99,6 +109,23 @@ def load_generation_config(workspace: Workspace) -> GenerationConfig:
         env_field="label_api_key_env",
         base_field="label_api_base",
     )
+    section = merged.get(ConfigSection.GENERATION) or {}
+    retry_named = isinstance(section, dict) and section.get("retry_model")
+    retry = (
+        resolve_tiered_model(
+            merged,
+            section_name=ConfigSection.GENERATION,
+            tier=Tier.ADVANCED,
+            invalid=GenerationConfigInvalid,
+            missing=GenerationConfigMissing,
+            model_field="retry_model",
+            key_field="retry_api_key",
+            env_field="retry_api_key_env",
+            base_field="retry_api_base",
+        )
+        if retry_named
+        else None
+    )
     return GenerationConfig(
         model=transcribe.model,
         label_model=label.model,
@@ -108,6 +135,10 @@ def load_generation_config(workspace: Workspace) -> GenerationConfig:
         label_api_key=label.api_key,
         label_api_key_env=label.api_key_env,
         label_api_base=label.api_base,
+        retry_model=retry.model if retry else None,
+        retry_api_key=retry.api_key if retry else None,
+        retry_api_key_env=retry.api_key_env if retry else None,
+        retry_api_base=retry.api_base if retry else None,
     )
 
 
@@ -133,6 +164,13 @@ def resolve_generation_label_api_key(config: GenerationConfig) -> str | None:
     """Resolve the labeling (``label_model``) API key."""
     return _resolve_key(
         config.label_api_key, config.label_api_key_env, "generation.label_api_key_env"
+    )
+
+
+def resolve_generation_retry_api_key(config: GenerationConfig) -> str | None:
+    """Resolve the escalation (``retry_model``) API key."""
+    return _resolve_key(
+        config.retry_api_key, config.retry_api_key_env, "generation.retry_api_key_env"
     )
 
 

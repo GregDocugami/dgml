@@ -108,6 +108,12 @@ class ConvertOptions:
     # provider's conventional env var.
     label_api_key: str | None = None
     label_api_base: str | None = None
+    # Optional escalation model: a window still short after its retry has its
+    # deficient page segments re-requested here instead of on `model`. None
+    # keeps the segmented pass entirely on `model`.
+    retry_model: str | None = None
+    retry_api_key: str | None = None
+    retry_api_base: str | None = None
     window_size: int = 10
     temperature: float = 0.0
     max_tokens: int = 32000
@@ -235,6 +241,20 @@ def convert_batch(
                 debug=opts.debug,
                 log=log,
                 page_text_dir=(opts.page_text_dirs or {}).get(path.name),
+                escalate_config=(
+                    llm.LLMConfig(
+                        model=opts.retry_model,
+                        api_key=opts.retry_api_key,
+                        api_base=opts.retry_api_base,
+                        temperature=opts.temperature,
+                        max_tokens=opts.max_tokens,
+                        workspace=opts.workspace,
+                        debug=opts.debug,
+                        operation=OPERATION_TRANSCRIBE,
+                    )
+                    if opts.retry_model
+                    else None
+                ),
             )
         except Exception as exc:
             log(f"[transcribe] {path.name} FAILED: {exc}; skipping")
