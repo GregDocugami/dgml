@@ -78,7 +78,7 @@ def test_a_listed_id_resolves_to_that_workspace(
 
 
 def test_a_minted_id_resolves_the_same_way(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The `ws_` prefix buys nothing at resolution any more — a minted id goes through
+    """The `ws_` prefix buys nothing at resolution any more — a generated id goes through
     exactly the steps a custom one does."""
     wid = new_workspace_id()
     root = _list_workspace(wid)

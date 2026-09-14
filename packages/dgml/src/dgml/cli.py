@@ -50,6 +50,7 @@ from dgml_core.errors import (
     short_error_message,
 )
 from dgml_core.files import AddFileResult, ConflictPolicy, FileStore
+from dgml_core.ids import RECORD_ID_SHAPE
 from dgml_core.migrations import (
     MigrationResult,
     migrate_workspace,
@@ -78,7 +79,7 @@ from dgml_core.storage_resolve import (
     verify_storage_fingerprint,
 )
 from dgml_core.text_extraction import TextMode
-from dgml_core.workspace_id import ID_SHAPE, is_workspace_id, mint_workspace_id
+from dgml_core.workspace_id import ID_SHAPE, generate_unique_workspace_id, is_workspace_id
 from dgml_core.workspaces_resolve import default_workspaces_store
 from dgml_core.workspaces_store import WorkspacesStore
 
@@ -342,11 +343,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="WORKSPACE_ID",
         help=(
-            f"Set the workspace's stable handle instead of minting one — {ID_SHAPE}, "
+            f"Set the workspace's stable handle instead of generating one — {ID_SHAPE}, "
             "e.g. 'my-workspace'. It is what --workspace and $DGML_HOME address the "
             "workspace by, and the folder name the local store of workspaces gives it. "
             "Fails with CONFLICT if this machine's store of workspaces already holds "
-            "that id. Omit it for a minted ws_… id."
+            "that id. Omit it for a generated ws_… id."
         ),
     )
     ws_create.add_argument(
@@ -611,6 +612,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "When PATH is a directory, descend into subdirectories. Ignored "
             "when PATH is a single file. Default: off (top-level only)."
+        ),
+    )
+    fl_add.add_argument(
+        "--id",
+        default=None,
+        metavar="FILE_ID",
+        help=(
+            f"Assign this id to the new File instead of generating one — {RECORD_ID_SHAPE}, "
+            "e.g. 'invoice-2024-q1'. Fails with CONFLICT if another File already holds "
+            "it with different content — no --on-conflict policy overrides that. "
+            "Re-adding identical content under the same id is a no-op. Not allowed when "
+            "PATH is a directory. Omit it for a generated 12-character id."
         ),
     )
     fl_add.add_argument(
@@ -1592,7 +1605,7 @@ def _import_one(
         # No identity anywhere: no `[workspace] workspace_id`, no `workspace.json`, and no
         # legacy index row. That is not a workspace dgml ever created — a directory with
         # `docsets/` and `files/` in it is not enough — so there is nothing to import it
-        # *as*, and minting an id here would adopt an arbitrary directory as a workspace.
+        # *as*, and generating an id here would adopt an arbitrary directory as a workspace.
         return {
             **row,
             "status": "failed",
@@ -1745,7 +1758,7 @@ def _requested_workspace_id(args: argparse.Namespace, ws: Workspace, *, listed: 
     """``workspace create --id``, validated against the workspace being created.
 
     Returns the id to use, or ``None`` when the caller passed none and one should be
-    minted. Everything here runs before the workspace's config, directory or store row
+    generated. Everything here runs before the workspace's config, directory or store row
     exists, so a rejected ``--id`` leaves nothing behind.
 
     Three ways it can fail, and they are different errors on purpose: a malformed id is
@@ -1766,10 +1779,7 @@ def _requested_workspace_id(args: argparse.Namespace, ws: Workspace, *, listed: 
         return None
     if not is_workspace_id(requested):
         raise InvalidArgument(
-            f"--id {requested!r} is not a well-formed workspace id: it must be "
-            f"{ID_SHAPE}. The id is this workspace's address (--workspace <id>) and the "
-            f"folder name its store of workspaces gives it, so it has to be a safe, "
-            f"unambiguous path segment."
+            f"--id {requested!r} is not a well-formed workspace id: it must be {ID_SHAPE}."
         )
 
     # What this workspace is *already* called, if anything: the id it is listed under,
@@ -1784,7 +1794,7 @@ def _requested_workspace_id(args: argparse.Namespace, ws: Workspace, *, listed: 
     # and the caller replaces it wholesale with one rooted at the new id. Reading an
     # identity off it would make `create --id` fail wherever a `./dgml-workspace`
     # happens to sit, complaining that "this workspace" has a different id, while the
-    # same command without `--id` cheerfully mints one and ignores that directory.
+    # same command without `--id` cheerfully generates one and ignores that directory.
     if listed and ws.workspaces_id is None:
         known = None
     else:
@@ -1865,7 +1875,7 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             # The id has to come first, because for a store-listed workspace the root is
             # derived from it — the reverse of the detached order.
             store = default_workspaces_store()
-            new_id = requested_id or mint_workspace_id(store)
+            new_id = requested_id or generate_unique_workspace_id(store)
             store.write_config(new_id, seed or "")
             ws = Workspace(root=store.workspace_root(new_id), workspaces_id=new_id)
         elif seed is not None and not ws.config_present:
@@ -1967,14 +1977,17 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         # command once the pointer became readable.
         ws.root.mkdir(parents=True, exist_ok=True)
         _write_workspace_config(ws, service, seed is not None)
-        # Reuse the id the config already carries; mint only for a genuinely new
+        # Reuse the id the config already carries; generate only for a genuinely new
         # workspace. Minting unconditionally broke the documented "idempotent and safe
         # to re-run" promise in two ways: re-running on the same machine forked the id
         # and left two rows for one workspace, and running it on a second machine
         # against a shared config changed the org's workspace identity — including the
         # `workspace` record in the remote doc store.
         workspace_id = (
-            ws.workspaces_id or recorded.workspace_id or requested_id or mint_workspace_id()
+            ws.workspaces_id
+            or recorded.workspace_id
+            or requested_id
+            or generate_unique_workspace_id()
         )
         wsconfig.write_identity(
             ws,
@@ -3881,9 +3894,19 @@ def _file_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     sub = args.file_command
     if sub == "add":
         if args.path.is_dir():
+            # Checked here rather than in FileStore.add: "directory" is a
+            # CLI-surface concept the store never sees (its is_file() check
+            # would fail first, with a misleading "does not exist").
+            if args.id is not None:
+                raise InvalidArgument(
+                    f"--id names one File and cannot be used when PATH is a directory "
+                    f"({args.path}) — a bulk run adds many. Add the files one at a time "
+                    f"to choose each id."
+                )
             return _file_add_bulk(args, ws, store, fmt)
         result = store.add(
             args.path,
+            file_id=args.id,
             on_conflict=ConflictPolicy(args.on_conflict),
             text_mode=TextMode(args.text_mode),
             dpi=args.dpi,

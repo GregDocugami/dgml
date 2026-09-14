@@ -61,6 +61,7 @@ from .file_attestation import (
     write_attestation,
 )
 from .files import AddFileResult, ConflictPolicy, FileStore
+from .ids import RECORD_ID_SHAPE, is_record_id
 from .layout import Collection
 from .migrations import (
     WORKSPACE_SCHEMA_VERSION,
@@ -90,7 +91,12 @@ from .storage_service import (
     StorageConfig,
 )
 from .workspace_config import WorkspaceIdentity
-from .workspace_id import ID_SHAPE, is_workspace_id, mint_workspace_id, new_workspace_id
+from .workspace_id import (
+    ID_SHAPE,
+    generate_unique_workspace_id,
+    is_workspace_id,
+    new_workspace_id,
+)
 from .workspace_ops import WorkspaceOps
 from .workspaces_local import LocalDirWorkspacesStore
 from .workspaces_resolve import (
@@ -108,6 +114,7 @@ __all__ = [
     "DEFAULT_STORAGE_SERVICE",
     "DEFAULT_WORKSPACES_PROVIDER",
     "ID_SHAPE",
+    "RECORD_ID_SHAPE",
     "WORKSPACE_SCHEMA_VERSION",
     "AddFileResult",
     "ArtifactKind",
@@ -167,6 +174,8 @@ __all__ = [
     "default_workspaces_root",
     "default_workspaces_store",
     "export_attestation",
+    "generate_unique_workspace_id",
+    "is_record_id",
     "is_workspace_id",
     "layout",
     "load_conversion_config",
@@ -178,7 +187,6 @@ __all__ = [
     "make_doc_store",
     "make_workspaces_store",
     "migrate_workspace",
-    "mint_workspace_id",
     "new_workspace_id",
     "pending_migrations",
     "read_attestation",

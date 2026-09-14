@@ -10,7 +10,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Workspace id minting and what makes an id valid."""
+"""Workspace id generating and what makes an id valid."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def test_new_workspace_id_shape_and_uniqueness() -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        "ws_abcdefghijklmnop",  # a minted id
+        "ws_abcdefghijklmnop",  # a generated id
         "ws_2345672345672345",
         "ws_fixturexxxxxxxxx",  # the CLI test fixture's id — must stay addressable
         "my-workspace",  # `workspace create --id` — no prefix required

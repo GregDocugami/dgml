@@ -37,7 +37,7 @@ from dgml_core.storage_resolve import (
     storage_fingerprint_pair,
     verify_storage_fingerprint,
 )
-from dgml_core.workspace_id import mint_workspace_id
+from dgml_core.workspace_id import generate_unique_workspace_id
 from dgml_core.workspaces_resolve import default_workspaces_store
 
 LOCAL = "dgml_core.storage_local:LocalStore"
@@ -76,7 +76,7 @@ def _ws(tmp_path: Path, text: str = "") -> Workspace:
     store code path is the one actually exercised."""
     if _BACKING[0] == "store":
         store = default_workspaces_store()
-        wid = mint_workspace_id(store)
+        wid = generate_unique_workspace_id(store)
         store.write_config(wid, text)
         return Workspace(root=store.workspace_root(wid), workspaces_id=wid)
     root = tmp_path / "ws"

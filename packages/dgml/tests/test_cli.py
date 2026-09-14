@@ -180,7 +180,7 @@ def test_workspace_create(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert payload["organization"] == "Acme"
     assert payload["name"] == "ws"  # defaults to the workspace directory name
     assert payload["config_present"] is True  # user config existed (init ran)
-    # A stable workspace_id is minted at create and echoed in the payload.
+    # A stable workspace_id is generated at create and echoed in the payload.
     workspace_id = payload["workspace_id"]
     assert workspace_id.startswith("ws_")
     # With no --storage it lands on the bundled default service.
@@ -246,7 +246,7 @@ def test_create_without_a_path_is_listed_and_opens_by_id(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Naming no path puts the workspace in this machine's store of workspaces, and the
-    minted id can then be used anywhere a path can."""
+    generated id can then be used anywhere a path can."""
     rc = main(["workspace", "create", "--organization", "Acme", "--name", "A"])
     assert rc == 0
     created = _read_stdout(capsys)
@@ -307,7 +307,7 @@ def test_an_unknown_id_is_an_error_not_a_new_directory(
 
 
 def test_create_with_a_chosen_id(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """`--id` sets the handle instead of minting one. It is the workspace's address and
+    """`--id` sets the handle instead of generating one. It is the workspace's address and
     the folder the store gives it, so all three have to agree."""
     rc = main(["workspace", "create", "--organization", "Acme", "--id", "my-workspace"])
     assert rc == 0
@@ -354,7 +354,7 @@ def test_create_with_an_id_ignores_an_unrelated_workspace_in_the_cwd(
 
     The regression: `create --id x` failed with INVALID_ARGUMENT wherever such a
     directory existed, complaining that "this workspace" already had a different id —
-    while the identical command *without* `--id` minted one and ignored the directory."""
+    while the identical command *without* `--id` generated one and ignored the directory."""
     monkeypatch.chdir(tmp_path)
     assert main(["workspace", "create", "./dgml-workspace", "--organization", "Old"]) == 0
     bystander = _read_stdout(capsys)["workspace_id"]
@@ -516,7 +516,7 @@ def test_workspace_list_does_not_show_a_workspace_addressed_by_path(
 
 
 def test_open_backfills_a_missing_id(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """A legacy workspace with no workspace_id gets one minted into workspace.json and
+    """A legacy workspace with no workspace_id gets one generated into workspace.json and
     mirrored into its config on first open — no manual step, idempotent on a second."""
     from dgml_core import workspace_config
 
@@ -5304,9 +5304,9 @@ def test_create_is_idempotent_and_preserves_identity(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`workspace create` is documented as safe to re-run. That means it must reuse the
-    identity its config already records, not mint a fresh one.
+    identity its config already records, not generate a fresh one.
 
-    Regression: it minted unconditionally, so re-running forked `workspace_id` and left
+    Regression: it generated unconditionally, so re-running forked `workspace_id` and left
     two index rows for one directory — and run on a second machine against a shared
     config it changed the whole organization's workspace identity, including the
     `workspace` record in the remote doc store.
@@ -5497,7 +5497,7 @@ def test_import_refuses_a_directory_with_no_config(
     """A directory with the right shape is not a workspace. Import can reconstruct a
     missing config — assuming local disk when nothing recorded a binding — but it cannot
     invent an *identity*: with no `workspace.json` and no legacy row there is nothing to
-    import this as, and minting an id would adopt an arbitrary directory as a workspace."""
+    import this as, and generating an id would adopt an arbitrary directory as a workspace."""
     bare = tmp_path / "bare"
     (bare / "docsets").mkdir(parents=True)
     (bare / "files").mkdir()
@@ -5778,7 +5778,7 @@ def _legacy_workspace(
     """A workspace as an older dgml left it: initialized, no `config.toml`, its binding
     (or not) recorded only in the per-machine index. Returns the id it was given.
 
-    The id is **minted**, not written as a literal: a hand-typed id is easy to get subtly
+    The id is **generated**, not written as a literal: a hand-typed id is easy to get subtly
     wrong (16 characters from [a-z2-7] exactly), and one character off silently produces a
     workspace nothing can address — which is the very failure the malformed-id test below
     covers. Pass ``workspace_id`` only to construct that bad case deliberately."""
@@ -5897,3 +5897,166 @@ def test_import_refuses_a_malformed_workspace_id(
 
     assert registry.registry_path().is_file()
     assert payload["imported"] == []
+
+
+# --------------------------------------------------------------------------
+# `dgml file add --id` — caller-supplied document ids.
+# These lock the JSON/exit-code contract; the rule matrix itself is covered in
+# dgml-core's test_files.py.
+# --------------------------------------------------------------------------
+
+
+@needs_gs
+def test_file_add_id_flag_sets_id(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+
+    assert main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--id", "my-report"]) == 0
+    payload = _read_stdout(capsys)
+    assert payload["file"]["id"] == "my-report"
+    assert payload["created"] is True
+    assert (ws / "files" / "my-report").is_dir()
+
+    assert main(_ws_args(ws) + ["file", "show", "my-report"]) == 0
+    assert _read_stdout(capsys)["id"] == "my-report"
+
+
+@pytest.mark.parametrize("bad", ["My_Report", "ab", "a b", "a/b"])
+def test_file_add_id_rejects_malformed(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str], bad: str
+) -> None:
+    """Exit 1 with a structured envelope — not argparse's exit 2."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+
+    rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--id", bad])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "INVALID_ARGUMENT"
+    assert not (ws / "files").exists()
+
+
+def test_file_add_id_uppercase_uuid_rejected(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A lowercase UUID is a valid id, so an uppercase one is the likely mistake.
+    It must come back as a structured envelope, and the message must say the rule
+    (letters lowercase) rather than leaving the caller to guess."""
+    import uuid
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+
+    rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--id", str(uuid.uuid4()).upper()])
+    assert rc == 1
+    err = _read_stderr(capsys)
+    assert err["error"]["code"] == "INVALID_ARGUMENT"
+    assert "lowercase" in err["error"]["message"]
+
+
+@needs_gs
+def test_file_add_id_conflict_envelope(
+    tmp_path: Path, sample_pdf: Path, sample_pdf_alt: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--id", "doc-1"])
+    original_sha = _read_stdout(capsys)["file"]["sha256"]
+
+    rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf_alt), "--id", "doc-1"])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "CONFLICT"
+
+    # The held record survived — the whole point of the id guard.
+    main(_ws_args(ws) + ["file", "show", "doc-1"])
+    assert _read_stdout(capsys)["sha256"] == original_sha
+
+
+def test_file_add_id_rejected_for_directory(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    src = tmp_path / "batch"
+    src.mkdir()
+    shutil.copy2(sample_pdf, src / "a.pdf")
+    capsys.readouterr()
+
+    rc = main(_ws_args(ws) + ["file", "add", str(src), "--id", "one-id"])
+    assert rc == 1
+    err = _read_stderr(capsys)
+    assert err["error"]["code"] == "INVALID_ARGUMENT"
+    assert "directory" in err["error"]["message"]
+
+    # The bulk run must never have started.
+    main(_ws_args(ws) + ["file", "list"])
+    assert _read_stdout(capsys)["files"] == []
+
+
+@needs_gs
+def test_file_add_id_idempotent_readd_with_skip(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--id", "doc-1"])
+    capsys.readouterr()
+
+    rc = main(
+        _ws_args(ws) + ["file", "add", str(sample_pdf), "--id", "doc-1", "--on-conflict", "skip"]
+    )
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["created"] is False
+    assert payload["file"]["id"] == "doc-1"
+
+    main(_ws_args(ws) + ["file", "list"])
+    assert len(_read_stdout(capsys)["files"]) == 1
+
+
+@needs_gs
+def test_file_add_id_unsatisfiable_under_skip(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The content is already present under a generated id, so `skip` would return
+    a record that is not the one the caller named."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
+    capsys.readouterr()
+
+    rc = main(
+        _ws_args(ws) + ["file", "add", str(sample_pdf), "--id", "other", "--on-conflict", "skip"]
+    )
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "INVALID_ARGUMENT"
+
+
+@needs_gs
+def test_file_add_id_duplicate_creates_second(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
+    capsys.readouterr()
+
+    rc = main(
+        _ws_args(ws)
+        + ["file", "add", str(sample_pdf), "--id", "copy-2", "--on-conflict", "duplicate"]
+    )
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["created"] is True
+    assert payload["file"]["id"] == "copy-2"
+
+    main(_ws_args(ws) + ["file", "list"])
+    assert len(_read_stdout(capsys)["files"]) == 2

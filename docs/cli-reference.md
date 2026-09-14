@@ -37,7 +37,7 @@ or after a command group (`dgml docset --format text list`).
 
 | Flag             | Description |
 |------------------|-------------|
-| `--workspace`    | Override the workspace to open — a filesystem path **or** a workspace id from `dgml workspace list`. An id is 3–40 chars from `[a-z0-9_-]` starting with a letter or digit (`my-workspace`, or a minted `ws_…`), so it can also be a directory name; the two are told apart by **looking**: a value the store of workspaces holds is that workspace, an existing directory of that name is a path, and a value that is neither fails with `WORKSPACE_NOT_FOUND` rather than being treated as a path to create. A listed id wins over a same-named directory — address the directory as `./name`. Anything carrying a separator, a dot or an uppercase letter is always a path. Default: `$DGML_HOME` (also either form) then `./dgml-workspace`. |
+| `--workspace`    | Override the workspace to open — a filesystem path **or** a workspace id from `dgml workspace list`. An id is 3 to 40 characters using only lowercase letters, digits, hyphens and underscores, starting with a letter or digit (`my-workspace`, or a generated `ws_…`), so it can also be a directory name; the two are told apart by **looking**: a value the store of workspaces holds is that workspace, an existing directory of that name is a path, and a value that is neither fails with `WORKSPACE_NOT_FOUND` rather than being treated as a path to create. A listed id wins over a same-named directory — address the directory as `./name`. Anything carrying a separator, a dot or an uppercase letter is always a path. Default: `$DGML_HOME` (also either form) then `./dgml-workspace`. |
 | `--workspace-config` | **Removed.** Still accepted so an existing caller gets a JSON error envelope instead of an argparse usage dump; passing it (or setting `$DGML_CONFIG`) fails with `INVALID_ARGUMENT` naming the replacement. It only ever worked as an address because the per-machine index recorded the location and handed it back on the next open. To start a workspace from a config you authored, use `dgml workspace create --from-config <path>`. |
 | `--format`       | `json` (default) or `text`. |
 | `--verbose`      | Emit informational diagnostics to stderr. Controls hybrid text-mode warnings (digital/OCR conflicts, OCR misses) and the per-page merge summary, plus the `docset generate` pipeline's progress lines. Off by default — stderr stays reserved for error envelopes. |
@@ -114,11 +114,11 @@ Steps:
    to whichever of the two places above applies. This happens **first**: everything
    after it is built through the backend that config names.
 2. Creates `docsets/` and `files/` on that storage service.
-3. Writes the workspace identity (`name` + `organization` + the minted stable
+3. Writes the workspace identity (`name` + `organization` + the generated stable
    `workspace_id`) to `workspace.json`, through the store.
 
 Re-running is safe: an existing `[storage.<service>]` is never overwritten, and the
-recorded `workspace_id`, `name` and `created_at` are reused rather than re-minted.
+recorded `workspace_id`, `name` and `created_at` are reused rather than regenerated.
 
 Note one consequence of the config *being* the record: for a listed workspace it must
 exist before any store can be built, so it can no longer be written last. An
@@ -146,14 +146,14 @@ the corpus across two namespaces with nothing to flag it later.
 `--name` is optional human-readable identity metadata; it likewise falls back to the
 recorded name, then to the workspace directory name.
 
-`--id WORKSPACE_ID` sets the workspace's stable handle instead of minting one — useful
+`--id WORKSPACE_ID` sets the workspace's stable handle instead of generating one — useful
 when the id is decided elsewhere (a tenant id, a fixture, an IaC template) or when a
-workspace is being re-created deterministically. It must be **3–40 characters from
-`[a-z0-9_-]`, starting with a lowercase letter or digit** — the id is what `--workspace`
-addresses the workspace by and the folder name the local store of workspaces gives it, so
-it has to be a safe, unambiguous path segment. Anything else fails with
-`INVALID_ARGUMENT`. No `ws_` prefix is required: `--id my-workspace` is as valid as the
-minted `ws_…` form.
+workspace is being re-created deterministically. It must be **3 to 40 characters using
+only lowercase letters, digits, hyphens and underscores, and starting with a letter or
+digit** — the id is what `--workspace` addresses the workspace by and the folder name the
+local store of workspaces gives it, so it has to be a safe, unambiguous path segment.
+Anything else fails with `INVALID_ARGUMENT`. No `ws_` prefix is required:
+`--id my-workspace` is as valid as the generated `ws_…` form.
 
 Three rules keep it from doing damage, all checked **before** anything is written, so a
 rejected `--id` never leaves a half-built workspace behind:
@@ -216,7 +216,7 @@ always names where that config lives, as a path or as `<store>/<workspace_id>`, 
 what error messages quote. `listed` says which of the two kinds of workspace this is.
 `config_path`/`config_present` refer to the **user-level** config.
 
-`workspace_id` is the stable handle for this workspace — minted (`ws_` + 16 base32
+`workspace_id` is the stable handle for this workspace — generated (`ws_` + 16 base32
 chars) unless `--id` supplied one; pass it to any command as `--workspace
 <workspace_id>`. It survives a directory rename, is written to `workspace.json`, and is
 how the store of workspaces keys it. `config_present` reports whether the user-level config exists. When it
@@ -287,11 +287,12 @@ Two things are still refused, because neither can be reconstructed:
 
 - **No workspace identity** — no `[workspace] workspace_id`, no `workspace.json`, and no
   legacy row. A directory that merely has `docsets/` and `files/` in it is not a
-  workspace; minting an id would adopt an arbitrary directory as one.
-- **A malformed `workspace_id`** — anything that is not 3–40 characters from `[a-z0-9_-]`
-  starting with a letter or digit. Such an id addresses nothing: the local backend filters
-  its folders by that same test, so the workspace would be written where `workspace list`
-  never looks and `--workspace <id>` never resolves. dgml's generator only emits
+  workspace; generating an id would adopt an arbitrary directory as one.
+- **A malformed `workspace_id`** — anything that is not 3 to 40 characters using only
+  lowercase letters, digits, hyphens and underscores, starting with a letter or digit.
+  Such an id addresses nothing: the local backend filters its folders by that same test,
+  so the workspace would be written where `workspace list` never looks and
+  `--workspace <id>` never resolves. dgml's generator only emits
   well-formed ids, so this is a hand-edited value; the failure names both places to
   correct it.
 
@@ -1200,7 +1201,7 @@ Errors across the group: `DOCSET_NOT_FOUND`, `FILE_NOT_FOUND`,
 
 ## File commands
 
-### `dgml file add <path> [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--dpi N] [--auto-classify]`
+### `dgml file add <path> [--id FILE_ID] [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--dpi N] [--auto-classify]`
 
 Add a File. The source is copied into the workspace, hashed, its pages
 are rendered to PNGs via `gs` (300 dpi by default — see `--dpi`), and
@@ -1220,6 +1221,19 @@ converter. See [Document conversion](conversion.md).
 added in a single run — see [Bulk add (a directory)](#bulk-add-a-directory)
 below. `--recursive` controls whether subdirectories are walked; it is
 ignored when `<path>` is a single file.
+
+`--id FILE_ID` sets the File's id instead of generating one — useful when the id is decided
+elsewhere (a tenant id, a source-system document number). It must be **3 to 40 characters
+using only lowercase letters, digits, hyphens and underscores, and starting with a letter
+or digit**. Omit it for a generated
+12-character id.
+
+Fails with `CONFLICT` if another File already holds the id with different content, under
+every `--on-conflict` policy — except when re-ingesting a revised document under its own
+id with `--on-conflict replace`, which keeps it. Re-adding identical content under the
+same id is a no-op. Fails with `INVALID_ARGUMENT` if the id is malformed, if `<path>` is
+a directory (one id cannot name many Files), or if `--on-conflict` would return an
+existing record that does not carry the requested id.
 
 | `--on-conflict` | Behavior |
 |---|---|
@@ -1255,6 +1269,8 @@ Conflict types recorded in the success payload as `conflict_kind`:
 - **`hash`** — exact byte-for-byte duplicate of an existing File.
 - **`path`** — different content but the same source path
   (`original_path`) as an existing File.
+- **`id`** — `--id` named an id another File already holds. Only ever a
+  `CONFLICT` error, never a success payload.
 
 The `dgml file add` response also includes:
 
@@ -1289,7 +1305,8 @@ Error codes that can come back on `file add`:
 | `UNSUPPORTED_FILE_TYPE` | Path is not a `.pdf` and is not a convertible source with a converter configured for its format family. |
 | `INVALID_PDF` | File does not start with the `%PDF-` magic. |
 | `CONVERSION_CONFIG_INVALID` | The `conversion` section of `<workspace>/config.toml` is malformed or names an unresolvable/invalid provider. |
-| `CONFLICT` | Hash- or path-conflict and `--on-conflict error`. (Also `workspace create --id <id>` when the store of workspaces already holds that id.) |
+| `CONFLICT` | Hash- or path-conflict and `--on-conflict error`; or `--id <id>` naming an id another File already holds (`conflict_kind: "id"`, under any policy). (Also `workspace create --id <id>` when the store of workspaces already holds that id.) |
+| `INVALID_ARGUMENT` | `--id` is malformed, was passed with a directory `<path>`, or cannot be honoured because `--on-conflict` would return an existing record with a different id. |
 | `CLASSIFICATION_CONFIG_MISSING` | `--auto-classify` was passed but `<workspace>/config.toml` is missing or has no `classification` section. |
 | `CLASSIFICATION_CONFIG_INVALID` | The `classification` section exists but a required field is missing or malformed. |
 
@@ -2083,14 +2100,14 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `LEGACY_CONFIG_PRESENT` | hard | A pre-migration `<workspace>/config.toml` is the only config present; the format is now TOML. Run `dgml init` to write `~/.config/dgml/config.toml`, then migrate any settings. |
 | `MODELS_CONFIG_INVALID` | hard | The `[models]` tier block is malformed (a tier is set to a non-string / empty value). |
 | `MISSING_EXTRA` | hard | A command needs an optional extra that isn't installed (e.g. `dgml[clustering]`). |
-| `INVALID_ARGUMENT` | hard | An argument is malformed or empty (e.g. blank `file_id`, unreadable `--proof`). |
+| `INVALID_ARGUMENT` | hard | An argument is malformed or empty (e.g. blank `file_id`, unreadable `--proof`, a `file add --id` that is malformed, passed with a directory, or unsatisfiable under the chosen `--on-conflict`). |
 | `INTERNAL_ERROR` | hard | Unexpected exception; the message is a short, single-line `<ExcType>: <msg>` (capped, whitespace collapsed). Pass `--verbose` (or set `DGML_DEBUG=1`) for the full stderr traceback. |
 | `NOT_FOUND` | hard | Generic not-found (base for the specific codes below). |
 | `DOCSET_NOT_FOUND` | hard | No DocSet with the given id. |
 | `FILE_NOT_FOUND` | hard / soft | A File id, assignment, or source is missing. Soft as a per-item `results` entry in `docset generate`/`ground`. |
 | `UNSUPPORTED_FILE_TYPE` | hard | `file add` path is neither a PDF nor a convertible source. |
 | `INVALID_PDF` | hard | File does not start with the `%PDF-` magic. |
-| `CONFLICT` | hard | Hash- or path-conflict under `--on-conflict error`, or `workspace create --id <id>` naming an id the store of workspaces already holds. |
+| `CONFLICT` | hard | Hash- or path-conflict under `--on-conflict error`; `file add --id <id>` naming an id another File already holds; or `workspace create --id <id>` naming an id the store of workspaces already holds. |
 | `CONVERSION_CONFIG_INVALID` | hard | The `conversion` config section is malformed. |
 | `CONVERSION_FAILED` | hard / soft | A docx/xlsx→PDF conversion failed (soft as `conversion_error` on a bulk add entry). |
 | `OCR_CONFIG_MISSING` | hard | `--text-mode ocr`/`hybrid` with no `ocr` config section. |

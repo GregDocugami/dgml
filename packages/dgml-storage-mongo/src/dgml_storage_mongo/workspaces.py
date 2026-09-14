@@ -320,7 +320,7 @@ class MongoWorkspacesStore(WorkspacesStore):
     # ---- overrides that avoid work the defaults would waste ----
 
     def exists(self, workspace_id: str) -> bool:
-        """Projected so a boolean does not fetch a whole config — minting an id calls
+        """Projected so a boolean does not fetch a whole config — generating an id calls
         this per candidate."""
         with self._reachable():
             return self._docs.find_one({"_id": workspace_id}, {"_id": 1}) is not None

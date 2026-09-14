@@ -370,7 +370,7 @@ class Workspace:
 
         Merge-preserving: reads the existing meta and updates only these fields, so
         it never drops ``schema_version`` (stamped by migrations) or an existing
-        ``workspace_id`` — pass ``workspace_id`` only when setting/minting one."""
+        ``workspace_id`` — pass ``workspace_id`` only when setting or generating one."""
         meta = dict(self.read_meta())
         meta["name"] = name
         meta["organization"] = organization

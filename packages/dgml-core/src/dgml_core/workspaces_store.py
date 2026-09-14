@@ -218,7 +218,7 @@ class WorkspacesStore(ProviderConfigFields, ABC):
         """Whether this store holds ``workspace_id``.
 
         Override when answering it is cheaper than a full fetch — this default pulls a
-        whole config to produce a boolean, and it is called per candidate when minting
+        whole config to produce a boolean, and it is called per candidate when generating
         an id."""
         return self.read_config(workspace_id) is not None
 

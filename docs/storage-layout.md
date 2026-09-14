@@ -21,7 +21,7 @@ The root is determined in this order:
 
 1. `--workspace <path-or-id>` CLI flag (or `Workspace.resolve(<path-or-id>)` in
    code). The argument is a filesystem path **or** a workspace id. Since an id needs no
-   distinguishing prefix (`my-workspace` is as valid as a minted `ws_qf7imkc7f6oqzfwt`)
+   distinguishing prefix (`my-workspace` is as valid as a generated `ws_qf7imkc7f6oqzfwt`)
    it is also a legal directory name, so the two are told apart in four steps:
 
    1. **Not a well-formed id** — it carries a separator, a dot, an uppercase letter, or
@@ -73,7 +73,7 @@ at all — see [storage services](#storage-services-storage).
 ├── config.toml                       # storage binding + settings — REQUIRED
 ├── usage.jsonl                       # LLM call event log (optional)
 ├── docsets/
-│   └── <docset_id>/                  # 12-char base-36 ID
+│   └── <docset_id>/                  # generated: 12-char base-36 ID
 │       ├── docset.json               # { id, name, description, key_questions }
 │       ├── extraction-schema.rnc      # grounded extraction schema, RELAX NG Compact (optional)
 │       ├── extraction-guidance.md     # docset-level extraction guidance shown to the LLM (optional)
@@ -88,7 +88,7 @@ at all — see [storage services](#storage-services-storage).
 │   ├── embeddings/                   #   excluded from the blob namespace and safe to delete
 │   └── staging/                      #   in-flight batch writes (page renders, text extraction)
 └── files/
-    └── <file_id>/                    # 12-char base-36 ID
+    └── <file_id>/                    # generated, or set by `file add --id`
         ├── <original_filename>       # source copied in (a .pdf, or a
         │                             #   convertible source like .docx/.xlsx)
         ├── <stem>.pdf                # converted PDF — only when the source was
@@ -105,8 +105,16 @@ at all — see [storage services](#storage-services-storage).
         └── errors.json               # recorded fatal errors (optional)
 ```
 
-IDs are 12 lowercase alphanumerics — `~62` bits of entropy each, generated
-with `secrets.choice` ([packages/dgml/src/dgml/ids.py](../packages/dgml/src/dgml/ids.py)).
+A generated ID is 12 lowercase alphanumerics — `~62` bits of entropy each, from
+`secrets.choice`
+([packages/dgml-core/src/dgml_core/ids.py](../packages/dgml-core/src/dgml_core/ids.py)).
+
+A File ID can also be **set by the caller** with `dgml file add --id`: 3 to 40
+characters using only lowercase letters, digits, hyphens and underscores, starting with a
+letter or digit. The generated form is a strict subset of that, so both shapes are valid
+everywhere an ID appears.
+
+DocSet IDs are always generated today.
 
 ## Page-image render cache (`$DGML_PAGE_CACHE`, optional)
 
@@ -143,8 +151,9 @@ The workspace identity, written by `dgml workspace create`:
 }
 ```
 
-- `workspace_id` — the workspace's **stable handle**: 3–40 characters from `[a-z0-9_-]`
-  starting with a letter or digit, so it is always a safe single path segment. Minted at
+- `workspace_id` — the workspace's **stable handle**: 3 to 40 characters using only
+  lowercase letters, digits, hyphens and underscores
+  starting with a letter or digit, so it is always a safe single path segment. Generated at
   `workspace create` as `ws_` + 16 lowercase base32 chars (80 bits from `secrets`) —
   opaque and non-semantic, so it survives a directory rename — or set outright with
   `workspace create --id my-workspace`. Carried here so the directory self-describes;
