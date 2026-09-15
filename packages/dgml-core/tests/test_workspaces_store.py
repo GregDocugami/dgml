@@ -28,7 +28,7 @@ import pytest
 from dgml_core.errors import CorruptMetadata, StorageProviderUnresolvable, WorkspacesConfigInvalid
 from dgml_core.provider import import_provider_class
 from dgml_core.storage_local import LocalStore
-from dgml_core.workspace_id import mint_workspace_id, new_workspace_id
+from dgml_core.workspace_id import generate_unique_workspace_id, new_workspace_id
 from dgml_core.workspaces_local import LocalDirWorkspacesStore
 from dgml_core.workspaces_resolve import (
     DEFAULT_WORKSPACES_PROVIDER,
@@ -310,7 +310,7 @@ def test_stray_directories_are_not_workspaces(tmp_path: Path) -> None:
 
 def test_a_prefix_free_id_round_trips(tmp_path: Path) -> None:
     """`workspace create --id my-workspace` names the folder, and the folder names the
-    workspace — the same identity the minted `ws_…` ids have always had."""
+    workspace — the same identity the generated `ws_…` ids have always had."""
     root = tmp_path / "workspaces"
     store = _local(root)
     store.write_config("my-workspace", CONFIG)
@@ -350,7 +350,7 @@ def test_delete_prunes_the_folder_when_nothing_remains(tmp_path: Path) -> None:
     assert not (root / wid).exists()
 
 
-# ------------------------------------------------------------------ minting ids
+# ------------------------------------------------------------------ generating ids
 
 
 def test_mint_rerolls_past_an_id_the_store_holds(
@@ -362,14 +362,14 @@ def test_mint_rerolls_past_an_id_the_store_holds(
     store.write_config(taken, CONFIG)
     rolls = iter([taken, free])
     monkeypatch.setattr("dgml_core.workspace_id.new_workspace_id", lambda: next(rolls))
-    assert mint_workspace_id(store) == free
+    assert generate_unique_workspace_id(store) == free
 
 
 def test_mint_without_a_store_does_not_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No store means no list to consult — an unchecked mint is the honest answer, not
+    """No store means no list to consult — an unchecked generate is the honest answer, not
     a silent fallback to some other list."""
     monkeypatch.setattr("dgml_core.workspace_id.new_workspace_id", lambda: "ws_aaaaaaaaaaaaaaaa")
-    assert mint_workspace_id() == "ws_aaaaaaaaaaaaaaaa"
+    assert generate_unique_workspace_id() == "ws_aaaaaaaaaaaaaaaa"
 
 
 # ---------------------------------------------------------------- configuration
@@ -501,7 +501,7 @@ def test_workspace_root_honors_a_declared_workspace_path(tmp_path: Path) -> None
 
 def test_workspace_root_falls_back_for_an_unknown_workspace(tmp_path: Path) -> None:
     """Asked about a workspace it does not hold, the store still answers where one would
-    go — `workspace create` needs that to derive a root from a freshly minted id."""
+    go — `workspace create` needs that to derive a root from a freshly generated id."""
     store = _local(tmp_path / "workspaces")
     wid = new_workspace_id()
     assert store.workspace_root(wid) == tmp_path / "workspaces" / wid

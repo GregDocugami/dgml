@@ -164,7 +164,7 @@ class LocalDirWorkspacesStore(WorkspacesStore):
 
     def exists(self, workspace_id: str) -> bool:
         """Overridden to one ``is_file()`` — the default would read a whole config to
-        answer a boolean, and minting an id calls this per candidate."""
+        answer a boolean, and generating an id calls this per candidate."""
         return self._config_path(workspace_id).is_file()
 
     def delete(self, workspace_id: str) -> bool:

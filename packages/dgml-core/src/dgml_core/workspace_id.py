@@ -10,11 +10,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Workspace ids: what makes one valid, and minting them.
+"""Workspace ids: what makes one valid, and generating them.
 
 A ``workspace_id`` is a workspace's stable name — 3-40 characters from ``[a-z0-9_-]``,
 starting with a letter or digit — and is how ``--workspace`` addresses a workspace in
-the machine's store of workspaces. :func:`new_workspace_id` mints ``ws_`` + 16 base32
+the machine's store of workspaces. :func:`new_workspace_id` generates ``ws_`` + 16 base32
 characters, but the prefix is not required: ``workspace create --id my-workspace`` is
 just as valid.
 
@@ -23,7 +23,7 @@ path is :meth:`dgml_core.storage.Workspace._from_workspaces_store`'s question �
 a distinguishing prefix, answering it takes the store of workspaces, which this module
 deliberately knows nothing about.
 
-Its own module, depending on nothing, deliberately: id minting is needed by the
+Its own module, depending on nothing, deliberately: id generation is needed by the
 workspaces store, by the CLI, *and* by :mod:`dgml_core.migrations` (which backfills
 an id into a pre-id workspace). Leaving it in the store's module would make a
 migration that never touches the store import one anyway.
@@ -36,9 +36,9 @@ import re
 import secrets
 from typing import Protocol
 
-#: Prefix on every id :func:`new_workspace_id` mints. No longer *required* of an id —
+#: Prefix on every id :func:`new_workspace_id` generates. No longer *required* of an id —
 #: a caller-supplied one need not carry it — and no longer meaningful to resolution;
-#: it survives because it makes a minted id self-describing at a glance.
+#: it survives because it makes a generated id self-describing at a glance.
 ID_PREFIX = "ws_"
 
 #: What a workspace id may look like. Lowercase because the local store of workspaces
@@ -50,29 +50,32 @@ _ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{2,39}\Z")
 
 #: The rule in :data:`_ID_RE`, in words. One source of truth for every message that has
 #: to tell a caller why their id was rejected.
-ID_SHAPE = "3-40 characters from [a-z0-9_-], starting with a lowercase letter or digit"
+ID_SHAPE = (
+    "3 to 40 characters using only lowercase letters, digits, hyphens and "
+    "underscores, and starting with a letter or digit"
+)
 
 
 def new_workspace_id() -> str:
     """A fresh opaque workspace id: ``ws_`` + 16 lowercase base32 chars (80 bits).
 
     Non-semantic (survives a directory rename) and hyphen/separator-free. Not
-    collision-checked — use :func:`mint_workspace_id` when assigning an id to a
+    collision-checked — use :func:`generate_unique_workspace_id` when assigning an id to a
     workspace."""
     slug = base64.b32encode(secrets.token_bytes(10)).decode("ascii").lower().rstrip("=")
     return f"{ID_PREFIX}{slug}"
 
 
 class SupportsExists(Protocol):
-    """The one thing :func:`mint_workspace_id` needs of a store of workspaces.
+    """The one thing :func:`generate_unique_workspace_id` needs of a store of workspaces.
 
     A structural type rather than an import, so this module keeps its "depends on
-    nothing" property and a migration that mints an id never pulls a store in."""
+    nothing" property and a migration that generates an id never pulls a store in."""
 
     def exists(self, workspace_id: str) -> bool: ...
 
 
-def mint_workspace_id(store: SupportsExists | None = None) -> str:
+def generate_unique_workspace_id(store: SupportsExists | None = None) -> str:
     """A fresh workspace id, re-rolled while ``store`` already holds it.
 
     80 bits from :func:`secrets` will not collide in practice; the re-roll is
@@ -81,9 +84,9 @@ def mint_workspace_id(store: SupportsExists | None = None) -> str:
 
     Passing a ``store`` makes the check **authoritative and complete** for workspaces
     that store lists — including ones created on another machine, when the store is
-    shared. Without one it is an unchecked mint, which is the honest answer for a
+    shared. Without one it is an unchecked generate, which is the honest answer for a
     detached workspace or an id backfilled by a migration: there is no list to consult.
-    A store that can be raced (two machines minting in the same instant) should also
+    A store that can be raced (two machines generating in the same instant) should also
     make its insert conditional, since no pre-check can close that window."""
     wid = new_workspace_id()
     if store is None:

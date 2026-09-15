@@ -222,7 +222,7 @@ GridFS addresses a blob by `filename` **plus** `uploadDate`; a `BlobStore`
 addresses it by key alone. Reconciling those is the substance of this class, and
 both halves are measured rather than assumed:
 
-1. **GridFS versions instead of replacing.** `upload_from_stream(name, …)` mints a
+1. **GridFS versions instead of replacing.** `upload_from_stream(name, …)` generates a
    new file id and leaves the prior revision in place. So `put_blob` captures the
    prior revision ids before uploading and deletes them after, and `list_blobs`
    de-duplicates across revisions. A port that forgets either grows one revision
