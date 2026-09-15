@@ -21,7 +21,7 @@ Two modes, same tests:
 
 The fallback matters: a suite that skips when Docker is not running looks like
 coverage without being any. The default ``uv run pytest`` always runs the whole
-thing; CI additionally runs it against MinIO.
+thing; CI additionally runs it against SeaweedFS.
 
 Every test gets its own bucket, so runs never share state. The document half of a
 workspace uses the bundled local store here, so these tests need no Mongo.

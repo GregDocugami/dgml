@@ -13,8 +13,8 @@
 """The point of the split: **S3 blobs + Mongo docs** composed into one workspace.
 
 Both sample packages are workspace members, so both import in the shared venv.
-Uses moto (from the package's autouse fixture) + mongomock, or the real MinIO +
-MongoDB when DGML_TEST_S3_ENDPOINT / DGML_TEST_MONGO_URI are set.
+Uses moto (from the package's autouse fixture) + mongomock, or the real S3 server
+and MongoDB when DGML_TEST_S3_ENDPOINT / DGML_TEST_MONGO_URI are set.
 """
 
 from __future__ import annotations
