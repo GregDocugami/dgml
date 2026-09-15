@@ -657,8 +657,8 @@ dgml docset generate <docset_id> [--window-size <n>] [--max-tokens <n>] [...]
 **Auto-extract on assignment.** When the target DocSet has an extraction
 schema set (`extraction-schema.rnc`), every assignment path fires value
 extraction on the newly-assigned file: `docset add-file`, `file add
---auto-classify` (existing-DocSet decisions — a `"none"` decision assigns
-nothing, so nothing is extracted), and `cluster` (existing-DocSet
+--auto-classify` (existing-DocSet decisions, which is every decision under
+`--auto-classify existing`), and `cluster` (existing-DocSet
 matches — a DocSet created mid-run can't have a schema yet). The payload
 gains an `extraction` block; extraction failures are **soft** (the error
 lands in `extraction.error`, the assignment stands, exit stays 0). No schema
@@ -1280,9 +1280,8 @@ The `dgml file add` response also includes:
   File record is still created (with `page_count: null`) and a permanent error
   is recorded. `null` for PDFs and successful conversions.
 - `classification` — present **only** when `--auto-classify` is passed.
-  `decision` is `"existing"`, `"new"`, or `"none"` (no DocSet fit and
-  `--auto-classify existing` forbade creating one). See
-  "Auto-classification" below.
+  `decision` is `"existing"` or `"new"` (always `"existing"` under
+  `--auto-classify existing`). See "Auto-classification" below.
 
 Error codes that can come back on `file add`:
 
@@ -1297,12 +1296,14 @@ Error codes that can come back on `file add`:
 | `CONFLICT` | Hash- or path-conflict and `--on-conflict error`. (Also `workspace create --id <id>` when the store of workspaces already holds that id.) |
 | `CLASSIFICATION_CONFIG_MISSING` | `--auto-classify` was passed but `<workspace>/config.toml` is missing or has no `classification` section. |
 | `CLASSIFICATION_CONFIG_INVALID` | The `classification` section exists but a required field is missing or malformed. |
+| `NO_EXISTING_DOCSETS` | `--auto-classify existing` was passed but the workspace has no DocSets to assign to. |
 
 The classification config is a precondition for `--auto-classify`, so a
 missing/invalid one is a **hard** error (exit 1) rather than a per-file
-soft error — every file would otherwise report the same thing. For a bulk
-directory add the config is checked once up front, so the run aborts before
-any file is added.
+soft error — every file would otherwise report the same thing. Having at
+least one DocSet is the same kind of precondition for `--auto-classify
+existing`, and is treated the same way. For a bulk directory add both are
+checked once up front, so the run aborts before any file is added.
 
 Soft-fail codes recorded on the File rather than returned as an envelope (OCR/hybrid-specific):
 
@@ -1333,8 +1334,8 @@ bulk flag — it makes re-runs idempotent. With `--auto-classify`, a
 DocSet created for one file becomes visible to the files processed
 after it, so similar PDFs in the batch cluster into the same DocSet.
 Under `--auto-classify existing` no DocSets are created, so that in-run
-growth doesn't happen: every file is matched against the same curated
-set, and unmatched ones come back as `decision: "none"`.
+growth doesn't happen: every file is assigned within the same curated set
+the run started with.
 
 Each file commits independently: a single bad PDF (or a conflict under
 `--on-conflict error`) is recorded in its entry and the run continues.
@@ -1411,13 +1412,19 @@ The flag takes an optional `MODE`:
 |---|---|
 | `--auto-classify` | Same as `existing-or-new` — the historical default. |
 | `--auto-classify existing-or-new` | Assign to an existing DocSet if one fits; otherwise create one. |
-| `--auto-classify existing` | Assign to an existing DocSet if one fits; otherwise **leave the file unassigned**. Never creates a DocSet. |
+| `--auto-classify existing` | Always assign to an existing DocSet — the best-fitting one. Never creates a DocSet, and never declines. |
 
 Use `existing` when the workspace's DocSets are curated and an ingest run
 must not grow new ones — otherwise one odd file anchors a one-document
-DocSet that someone has to notice and clean up. The tradeoff is that
-unmatched files accumulate unassigned; sweep them up afterwards with
-`dgml cluster`, or assign them by hand.
+DocSet that someone has to notice and clean up.
+
+> **`existing` assumes the files belong.** The LLM is required to return a
+> DocSet, so a document whose type isn't represented in the workspace is
+> assigned to the closest one anyway rather than flagged. Only pass
+> `existing` when you already know each file fits one of the DocSets; for a
+> mixed or unknown batch use `existing-or-new`, or `dgml cluster`. With no
+> DocSets to choose from the command fails with `NO_EXISTING_DOCSETS`
+> (exit 1) instead of guessing.
 
 > **Argument order matters.** `MODE` is optional, so the parser takes the
 > *next* token as its value. Put `<path>` **before** the flag —
@@ -1462,18 +1469,22 @@ The LLM is forced to pick exactly one of two tools:
   document type can answer. The `key_questions` are persisted on the
   new DocSet and shown to future classifications.
 
-In `--auto-classify existing` mode the second tool is replaced by
-`leave_unassigned()`, which takes no arguments and yields
-`decision: "none"`. It has to be an offered tool rather than an absence:
-the call is made with `tool_choice="required"`, so a menu of
-`assign_to_existing_docset` alone would force the LLM into a poor match.
-A model that calls `create_new_docset` anyway — it was not offered — is
-refused with `CLASSIFICATION_FAILED` rather than obeyed.
+In `--auto-classify existing` mode `create_new_docset` is not offered at
+all, leaving `assign_to_existing_docset` as the sole tool. Since the call
+is made with `tool_choice="required"`, that is what forces a choice: the
+LLM is told a perfect fit is not required and to return the closest
+DocSet. The decision is therefore always `"existing"`. A model that calls
+`create_new_docset` anyway — it was not offered — is refused with
+`CLASSIFICATION_FAILED` rather than obeyed.
 
-With `--auto-classify existing` in a workspace that has **no** DocSets at
-all, the outcome is settled before asking, so no LLM call is made:
-`performed` is `false` with
-`reason: "no existing DocSets to assign to"`.
+With `--auto-classify existing` in a workspace that has **no** DocSets,
+the mode has no outcome it could produce, so the command fails with
+`NO_EXISTING_DOCSETS` (exit 1) and makes no LLM call. Unlike the other
+`file add` hard errors, `existing` mode validates both its preconditions
+(the classification config, and at least one DocSet) **before** the file
+is ingested — for a single add as well as a bulk one — so a failed run
+adds nothing. Erroring out after the add would leave behind exactly the
+unassigned file this mode is chosen to avoid.
 
 Classification runs **after** the file is added, and only when `created`
 is `true`. Re-runs on a duplicate (`--on-conflict skip`) skip the LLM
@@ -1504,25 +1515,11 @@ The `classification` payload block:
 is `"new"`, this is the list the LLM just proposed and that has been
 persisted on the freshly-created DocSet.
 
-When `--auto-classify existing` was passed and nothing fit, the file is
-added and joins no DocSet. This is a normal outcome, not a failure — the
-add succeeded, `error` stays `null`, and the exit code is 0:
+Under `--auto-classify existing` the block looks the same as the
+`"existing"` example above; `decision` is never `"new"` and never
+anything else, since the assign tool is the only one offered.
 
-```json
-"classification": {
-  "performed": true,
-  "model": "gemini/gemini-flash-lite-latest",
-  "decision": "none",
-  "docset_id": null,
-  "docset_created": false,
-  "docset_name": null,
-  "docset_key_questions": [],
-  "error": null
-}
-```
-
-When the file already existed (`created: false`), or `--auto-classify
-existing` was passed to a workspace with no DocSets:
+When the file already existed (`created: false`):
 
 ```json
 "classification": {
@@ -2165,6 +2162,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `CLASSIFICATION_CONFIG_MISSING` | hard | `--auto-classify` with no `classification` config. |
 | `CLASSIFICATION_CONFIG_INVALID` | hard | The `classification` config has a missing/invalid field. |
 | `CLASSIFICATION_FAILED` | soft | The classification LLM call failed; lands in `classification.error`. |
+| `NO_EXISTING_DOCSETS` | hard | `--auto-classify existing` in a workspace with no DocSets to assign to. |
 | `CLUSTERING_CONFIG_INVALID` | hard | The optional `clustering` config section failed validation. |
 | `GROUNDING_FAILED` | soft | Grounding a file failed; surfaces as `grounded: false` with a `grounding_error` on that file's `docset generate` result entry. |
 | `LABEL_MODEL_UNREACHABLE` | soft | A file's labeling could not reach the `label_model` at all (auth / bad model id / network); surfaces as a `label_error` on that file's `docset generate` result entry. The file still converts, unlabeled. |

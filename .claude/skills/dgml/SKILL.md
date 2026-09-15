@@ -142,18 +142,22 @@ uv run dgml docset create --name "Lease Abstract" \
 For that curated case, pass `--auto-classify existing` so the run can
 only *route into* those DocSets, never invent more. Without it, one
 document that matches nothing anchors a brand-new one-file DocSet that
-someone has to notice and clean up. Unmatched files come back as
-`decision: "none"` and stay unassigned — collect them and decide
-deliberately (assign by hand, or let `dgml cluster` propose DocSets for
-the leftovers as a batch, which names them from the whole group rather
-than from whichever file happened to arrive first):
+someone has to notice and clean up:
 
 ```bash
 payload=$(uv run dgml file add --workspace "$wid" /path/to/docs \
             --recursive --on-conflict skip --auto-classify existing)
-# Files that matched nothing — route these deliberately, don't re-run blind.
-jq -r '.results[] | select(.classification.decision == "none") | .path' <<<"$payload"
+jq -r '.results[] | "\(.classification.docset_name)\t\(.path)"' <<<"$payload"
 ```
+
+⚠️ **Only use `existing` when you already know every file belongs in one
+of the workspace's DocSets.** The LLM is *required* to return a DocSet —
+it is offered no other action — so an off-type document is filed under
+the closest DocSet rather than flagged. For a mixed or unknown batch use
+bare `--auto-classify` (which can create DocSets) or `dgml cluster`
+(which groups the batch and names each group from the whole group).
+Silently mis-filed documents are harder to notice later than an extra
+DocSet is.
 
 ⚠️ `--auto-classify` takes an *optional* MODE, so the parser eats the
 next token. Always put PATH **before** the flag (as above), or name the
@@ -164,12 +168,11 @@ mode explicitly (`--auto-classify existing /path/doc.pdf`).
 Key contract points:
 - `--auto-classify` (bare) == `--auto-classify existing-or-new`: assign
   if something fits, else create. `--auto-classify existing` never
-  creates: a file matching nothing is added, left unassigned, and
-  reported as `decision: "none"` with `error: null` and exit 0 — a
-  normal outcome, not a failure, so don't treat it as one.
-- In `existing` mode against a workspace with **no** DocSets, no LLM
-  call is made at all (`performed: false`,
-  `reason: "no existing DocSets to assign to"`). Seed the DocSets first.
+  creates and never declines — `decision` is always `"existing"`, so
+  every file lands in a DocSet whether or not it truly fits.
+- In `existing` mode against a workspace with **no** DocSets, the command
+  is a **hard** error (exit 1, `NO_EXISTING_DOCSETS`) and makes no LLM
+  call — there is nothing it could assign to. Seed the DocSets first.
 - A missing or invalid `classification` config is a **hard** error
   (exit 1, `CLASSIFICATION_CONFIG_MISSING` / `_INVALID`): config is a
   precondition, so the command aborts rather than recording the same
@@ -226,7 +229,7 @@ summing to `total`) is the quick health read; report it to the user.
 
 Variants:
 - **Add to an existing DocSet:** skip the `docset create` step; pass its known ID as `$ds`. Find it with `uv run dgml docset list | jq -r '.docsets[] | select(.name=="…") | .id'`.
-- **Auto-route heterogeneous PDFs into DocSets**: drop the `docset create` step and the `docset add-file` loop; pass `--auto-classify` to `file add` instead. Each file lands in the best-fitting existing DocSet, or in a new one the LLM proposes — and DocSets created mid-run are visible to later files in the same batch, so similar PDFs cluster. Requires `classification` config in `<workspace>/config.toml`; see the one-shot example above. Read each file's `.results[].classification` block for the outcome. Use `--auto-classify existing` instead when the workspace's DocSets are curated and the run must not create more — unmatched files come back as `decision: "none"` and stay unassigned.
+- **Auto-route heterogeneous PDFs into DocSets**: drop the `docset create` step and the `docset add-file` loop; pass `--auto-classify` to `file add` instead. Each file lands in the best-fitting existing DocSet, or in a new one the LLM proposes — and DocSets created mid-run are visible to later files in the same batch, so similar PDFs cluster. Requires `classification` config in `<workspace>/config.toml`; see the one-shot example above. Read each file's `.results[].classification` block for the outcome. Use `--auto-classify existing` instead when the workspace's DocSets are curated, the run must not create more, and you already know every file belongs in one of them — that mode forces the LLM to pick the closest DocSet for every file, so it mis-files an off-type document rather than flagging it.
 - **Recurse into subdirectories:** add `--recursive`.
 - **Hidden errors:** a PDF that fails to parse, render, or extract digital text still produces an entry — `soft_failed` (the `page_*`/`text_extraction_error` fields are set on its `file` entry) or `hard_failed` (the entry has an `error` object and no `file`). `dgml check` afterward is the authoritative whole-workspace health signal.
 

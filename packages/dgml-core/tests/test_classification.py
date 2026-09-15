@@ -33,6 +33,7 @@ from dgml_core.errors import (
     ClassificationConfigInvalid,
     ClassificationConfigMissing,
     ClassificationFailed,
+    NoExistingDocSets,
 )
 from dgml_core.models import FileRecord
 from dgml_core.storage import Workspace
@@ -595,13 +596,10 @@ def _tool_names(mock_completion: Any) -> list[str]:
     return [t["function"]["name"] for t in mock_completion.call_args.kwargs["tools"]]
 
 
-def test_classify_file_existing_only_offers_assign_and_leave_unassigned(
-    workspace: Workspace,
-) -> None:
-    """create_new_docset must not be on the menu — the whole point of the mode
-    is that the LLM cannot reach for it. leave_unassigned takes its slot,
-    because tool_choice="required" means offering assign alone would force a
-    bad match."""
+def test_classify_file_existing_only_offers_assign_alone(workspace: Workspace) -> None:
+    """The assign tool is the *only* tool offered. Combined with
+    tool_choice="required" that is what forces a pick: there is nothing else
+    the LLM can call, so every file lands in a DocSet."""
     existing_id, new_id = _seed_for_classify(workspace)
     cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
     response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
@@ -609,7 +607,7 @@ def test_classify_file_existing_only_offers_assign_and_leave_unassigned(
     with patch("litellm.completion", return_value=response) as mock_completion:
         classify_file(workspace, new_id, config=cfg, allow_new=False)
 
-    assert _tool_names(mock_completion) == ["assign_to_existing_docset", "leave_unassigned"]
+    assert _tool_names(mock_completion) == ["assign_to_existing_docset"]
     assert mock_completion.call_args.kwargs["tool_choice"] == "required"
 
 
@@ -638,17 +636,48 @@ def test_classify_file_existing_only_assigns(workspace: Workspace) -> None:
     assert decision == ClassificationDecision(decision="existing", existing_docset_id=existing_id)
 
 
-def test_classify_file_existing_only_leave_unassigned(workspace: Workspace) -> None:
-    """No fit → decision "none", with nothing else populated. The caller reads
-    this as "add the file, assign it to nothing"."""
-    _, new_id = _seed_for_classify(workspace)
+def test_classify_file_existing_only_assigns_marginal_fit(workspace: Workspace) -> None:
+    """A poor fit is still assigned. The mode's contract is that every file
+    lands somewhere, so a marginal match is an ordinary success — not an error
+    and not a decision the caller has to interpret."""
+    existing_id, new_id = _seed_for_classify(workspace)
     cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
-    response = _tool_call_response("leave_unassigned", {})
+    # The seeded DocSet is Invoices; the LLM picks it for an off-type document
+    # because it is the closest available.
+    response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
 
     with patch("litellm.completion", return_value=response):
         decision = classify_file(workspace, new_id, config=cfg, allow_new=False)
 
-    assert decision == ClassificationDecision(decision="none")
+    assert decision == ClassificationDecision(decision="existing", existing_docset_id=existing_id)
+
+
+def test_classify_file_existing_only_raises_without_docsets(workspace: Workspace) -> None:
+    """No DocSets to choose from → NoExistingDocSets, and no LLM call. The mode
+    must assign, so there is no outcome it could produce; degrading to
+    "unassigned" is exactly what it exists to prevent."""
+    _seed_file(workspace, "lonefid", filename="thing.pdf")
+    _seed_page_image(workspace, "lonefid", 1, b"\xff\xd8\xff\xe0fake")
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+
+    with patch("litellm.completion") as mock_completion:
+        with pytest.raises(NoExistingDocSets):
+            classify_file(workspace, "lonefid", config=cfg, allow_new=False)
+    mock_completion.assert_not_called()
+
+
+def test_classify_file_default_mode_allows_no_docsets(workspace: Workspace) -> None:
+    """The guard is specific to assign-only mode — the default still handles an
+    empty workspace by creating the first DocSet."""
+    _seed_file(workspace, "lonefid", filename="thing.pdf")
+    _seed_page_image(workspace, "lonefid", 1, b"\xff\xd8\xff\xe0fake")
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("create_new_docset", _create_new_args())
+
+    with patch("litellm.completion", return_value=response):
+        decision = classify_file(workspace, "lonefid", config=cfg)
+
+    assert decision.decision == "new"
 
 
 def test_classify_file_existing_only_rejects_create_call(workspace: Workspace) -> None:
@@ -663,22 +692,11 @@ def test_classify_file_existing_only_rejects_create_call(workspace: Workspace) -
             classify_file(workspace, new_id, config=cfg, allow_new=False)
 
 
-def test_classify_file_leave_unassigned_rejected_in_default_mode(workspace: Workspace) -> None:
-    """leave_unassigned isn't offered in the default mode, so a call to it is
-    an unexpected tool name — not a silent no-op."""
-    _, new_id = _seed_for_classify(workspace)
-    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
-    response = _tool_call_response("leave_unassigned", {})
-
-    with patch("litellm.completion", return_value=response):
-        with pytest.raises(ClassificationFailed, match="unexpected tool name"):
-            classify_file(workspace, new_id, config=cfg)
-
-
-def test_classify_file_existing_only_prompt_keeps_docset_context(workspace: Workspace) -> None:
-    """The restricted prompt keeps the part that makes assignment good — the
-    existing DocSets and their key questions — and drops only the instruction
-    to create one."""
+def test_classify_file_existing_only_prompt_requires_a_pick(workspace: Workspace) -> None:
+    """The restricted prompt keeps what makes assignment good — the existing
+    DocSets and their key questions — while telling the LLM a choice is
+    mandatory and a perfect fit is not required. It must not mention creating
+    a DocSet, which is not on offer."""
     existing_id, new_id = _seed_for_classify(workspace)
     cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
     response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
@@ -694,8 +712,12 @@ def test_classify_file_existing_only_prompt_keeps_docset_context(workspace: Work
         "What is the invoice date?",
     ):
         assert q in prompt_text
-    assert "leave_unassigned" in prompt_text
+    assert "You must choose one" in prompt_text
+    assert "perfect fit is not" in prompt_text
     assert "create_new_docset" not in prompt_text
+    # The default mode's pass/fail framing would tell the LLM to refuse a
+    # choice it has no way to refuse.
+    assert "Topical similarity is NOT enough" not in prompt_text
 
 
 # ---------------------------------------------------------------------------
