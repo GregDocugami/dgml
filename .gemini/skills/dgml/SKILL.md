@@ -173,6 +173,14 @@ Key contract points:
 - In `existing` mode against a workspace with **no** DocSets, the command
   is a **hard** error (exit 1, `NO_EXISTING_DOCSETS`) and makes no LLM
   call — there is nothing it could assign to. Seed the DocSets first.
+- In `existing` mode against a workspace with exactly **one** DocSet, the
+  file is assigned to it **without** an LLM call — one answer, no way to
+  decline, nothing to decide. The block carries the usual
+  `decision: "existing"` plus `reason: "only one DocSet in the
+  workspace; assigned without an LLM call"`. That mode creates no
+  DocSets, so a whole bulk run over a one-DocSet workspace costs nothing
+  in tokens. Bare `--auto-classify` still calls the LLM here, since it
+  could create a second DocSet instead.
 - A missing or invalid `classification` config is a **hard** error
   (exit 1, `CLASSIFICATION_CONFIG_MISSING` / `_INVALID`): config is a
   precondition, so the command aborts rather than recording the same

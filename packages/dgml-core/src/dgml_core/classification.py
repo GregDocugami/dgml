@@ -22,7 +22,8 @@ When ``dgml file add --auto-classify`` is used, this module:
    default (``existing-or-new``) it picks between assign-to-existing and
    propose-a-new-one; in ``existing`` mode only the assign tool is offered,
    so the LLM must place the file in the best-fitting existing DocSet even
-   when the fit is imperfect.
+   when the fit is imperfect. That mode skips step 3 entirely when the
+   workspace holds a single DocSet — the answer is already determined.
 
 The CLI treats every failure path here as a *soft fail*: the file record
 is kept, ``classification.error`` is populated in the response payload,
@@ -207,6 +208,11 @@ def classify_file(
     file is known to belong in one of them — nothing here detects an off-type
     document, it just picks the least-bad home for it.
 
+    With exactly one DocSet that mode has only one answer available, so the
+    LLM is not called at all — asking a vision model to pick from a list of
+    one costs a call and some latency to arrive where the caller already is.
+    The decision is indistinguishable from one the model would have returned.
+
     ``docsets`` is the list of existing DocSets to classify against. When
     omitted it is read fresh from the workspace. Bulk callers (e.g.
     ``dgml file add <dir> --auto-classify``) pass an explicit list they
@@ -224,11 +230,20 @@ def classify_file(
     """
     if docsets is None:
         docsets = DocSetStore(workspace).list_all()
-    if not allow_new and not docsets:
-        raise NoExistingDocSets(
-            "no DocSets exist to assign to; create one first, or allow "
-            "classification to propose a new DocSet"
-        )
+    if not allow_new:
+        if not docsets:
+            raise NoExistingDocSets(
+                "no DocSets exist to assign to; create one first, or allow "
+                "classification to propose a new DocSet"
+            )
+        if len(docsets) == 1:
+            # Only one possible answer, so there is nothing to decide. Note
+            # this is sound *only* because this mode always assigns: were
+            # declining an option, the LLM would still have a judgement to
+            # make here.
+            return ClassificationDecision(
+                decision="existing", existing_docset_id=docsets[0].id
+            )
     response = _vision_tool_call(
         workspace,
         [file_id],

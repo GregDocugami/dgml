@@ -259,10 +259,18 @@ def test_gather_pages_returns_all_when_fewer_than_max(workspace: Workspace) -> N
 
 
 def _seed_for_classify(workspace: Workspace) -> tuple[str, str]:
-    """Common setup: one docset with one file (so the prompt has context),
-    one new file ready to be classified. Returns (existing_docset_id, new_file_id).
+    """Common setup: **two** docsets, the first holding one file (so the prompt
+    has context), plus one new file ready to be classified. Returns
+    (invoices_docset_id, new_file_id).
+
+    Two, not one, because :func:`classify_file` skips the LLM entirely when an
+    assign-only workspace holds a single DocSet — with one seeded DocSet these
+    tests would assert against a shortcut instead of the model path. The second
+    is a decoy of a clearly different document type, so it never becomes the
+    right answer. See ``test_classify_file_existing_only_single_docset_*`` for
+    the shortcut itself.
     """
-    docset = DocSetStore(workspace).create(
+    invoices = DocSetStore(workspace).create(
         name="Invoices",
         description="vendor invoices",
         key_questions=[
@@ -271,21 +279,20 @@ def _seed_for_classify(workspace: Workspace) -> tuple[str, str]:
             "What is the invoice date?",
         ],
     )
-    docset = DocSetStore(workspace).create(
-        name="Invoices",
-        description="vendor invoices",
+    DocSetStore(workspace).create(
+        name="Safety Datasheets",
+        description="chemical safety datasheets",
         key_questions=[
-            "What is the vendor name?",
-            "What is the invoice total?",
-            "What is the invoice date?",
+            "What substance does this cover?",
+            "What are the handling precautions?",
         ],
     )
     _seed_file(workspace, "existingfid", filename="invoice-acme.pdf")
-    DocSetStore(workspace).add_file(docset.id, "existingfid")
+    DocSetStore(workspace).add_file(invoices.id, "existingfid")
 
     _seed_file(workspace, "newfid", filename="incoming.pdf")
     _seed_page_image(workspace, "newfid", 1, b"\x89PNG\r\n\x1a\nfake-png")
-    return docset.id, "newfid"
+    return invoices.id, "newfid"
 
 
 _DEFAULT_NEW_QUESTIONS = [
@@ -650,6 +657,57 @@ def test_classify_file_existing_only_assigns_marginal_fit(workspace: Workspace) 
         decision = classify_file(workspace, new_id, config=cfg, allow_new=False)
 
     assert decision == ClassificationDecision(decision="existing", existing_docset_id=existing_id)
+
+
+def test_classify_file_existing_only_single_docset_skips_llm(workspace: Workspace) -> None:
+    """One DocSet and no option to decline leaves exactly one possible answer,
+    so no model is asked for it."""
+    only = DocSetStore(workspace).create(
+        name="Invoices", description="vendor invoices", key_questions=["Who billed?"]
+    )
+    _seed_file(workspace, "newfid", filename="incoming.pdf")
+    _seed_page_image(workspace, "newfid", 1, b"\x89PNG\r\n\x1a\nfake-png")
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+
+    with patch("litellm.completion") as mock_completion:
+        decision = classify_file(workspace, "newfid", config=cfg, allow_new=False)
+
+    mock_completion.assert_not_called()
+    assert decision == ClassificationDecision(decision="existing", existing_docset_id=only.id)
+
+
+def test_classify_file_single_docset_still_calls_llm_in_default_mode(
+    workspace: Workspace,
+) -> None:
+    """The shortcut is specific to assign-only mode. With creation allowed, one
+    DocSet is not one answer — the LLM still has to judge whether the file
+    belongs in it or needs a new one."""
+    DocSetStore(workspace).create(
+        name="Invoices", description="vendor invoices", key_questions=["Who billed?"]
+    )
+    _seed_file(workspace, "newfid", filename="incoming.pdf")
+    _seed_page_image(workspace, "newfid", 1, b"\x89PNG\r\n\x1a\nfake-png")
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("create_new_docset", _create_new_args())
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        decision = classify_file(workspace, "newfid", config=cfg)
+
+    mock_completion.assert_called_once()
+    assert decision.decision == "new"
+
+
+def test_classify_file_existing_only_two_docsets_calls_llm(workspace: Workspace) -> None:
+    """Two DocSets is a real choice, so the shortcut must not fire."""
+    existing_id, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        decision = classify_file(workspace, new_id, config=cfg, allow_new=False)
+
+    mock_completion.assert_called_once()
+    assert decision.existing_docset_id == existing_id
 
 
 def test_classify_file_existing_only_raises_without_docsets(workspace: Workspace) -> None:

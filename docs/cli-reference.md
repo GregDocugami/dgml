@@ -1494,6 +1494,19 @@ DocSet. The decision is therefore always `"existing"`. A model that calls
 `create_new_docset` anyway — it was not offered — is refused with
 `CLASSIFICATION_FAILED` rather than obeyed.
 
+**Single-DocSet shortcut.** When the workspace holds exactly one DocSet,
+`--auto-classify existing` assigns to it **without calling the LLM** —
+one possible answer and no option to decline leaves nothing to decide.
+The `classification` block is exactly the one the model would have
+produced (`decision: "existing"`, the DocSet's id and key questions);
+only the API call and its latency are skipped. Since this mode never
+creates a DocSet, a single-DocSet workspace stays that way, so a bulk run
+over it makes no LLM calls at all.
+
+The shortcut does **not** apply to `existing-or-new`: there, one DocSet
+is not one answer — the LLM still has to judge whether the file belongs
+in it or needs a new one.
+
 With `--auto-classify existing` in a workspace that has **no** DocSets,
 the mode has no outcome it could produce, so the command fails with
 `NO_EXISTING_DOCSETS` (exit 1) and makes no LLM call. Unlike the other
