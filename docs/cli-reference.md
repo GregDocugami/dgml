@@ -1486,35 +1486,23 @@ The LLM is forced to pick exactly one of two tools:
   document type can answer. The `key_questions` are persisted on the
   new DocSet and shown to future classifications.
 
-In `--auto-classify existing` mode `create_new_docset` is not offered at
-all, leaving `assign_to_existing_docset` as the sole tool. Since the call
-is made with `tool_choice="required"`, that is what forces a choice: the
-LLM is told a perfect fit is not required and to return the closest
-DocSet. The decision is therefore always `"existing"`. A model that calls
-`create_new_docset` anyway — it was not offered — is refused with
-`CLASSIFICATION_FAILED` rather than obeyed.
+`--auto-classify existing` offers only `assign_to_existing_docset`, so
+with `tool_choice="required"` a choice is forced: the LLM is told a
+perfect fit isn't required and to return the closest DocSet. `decision`
+is therefore always `"existing"`. A model that calls `create_new_docset`
+anyway is refused with `CLASSIFICATION_FAILED`.
 
-**Single-DocSet shortcut.** When the workspace holds exactly one DocSet,
-`--auto-classify existing` assigns to it **without calling the LLM** —
-one possible answer and no option to decline leaves nothing to decide.
-The `classification` block is exactly the one the model would have
-produced (`decision: "existing"`, the DocSet's id and key questions);
-only the API call and its latency are skipped. Since this mode never
-creates a DocSet, a single-DocSet workspace stays that way, so a bulk run
-over it makes no LLM calls at all.
+Two cases skip the LLM entirely, since neither leaves anything to decide:
 
-The shortcut does **not** apply to `existing-or-new`: there, one DocSet
-is not one answer — the LLM still has to judge whether the file belongs
-in it or needs a new one.
-
-With `--auto-classify existing` in a workspace that has **no** DocSets,
-the mode has no outcome it could produce, so the command fails with
-`NO_EXISTING_DOCSETS` (exit 1) and makes no LLM call. Unlike the other
-`file add` hard errors, `existing` mode validates both its preconditions
-(the classification config, and at least one DocSet) **before** the file
-is ingested — for a single add as well as a bulk one — so a failed run
-adds nothing. Erroring out after the add would leave behind exactly the
-unassigned file this mode is chosen to avoid.
+- **Exactly one DocSet** — the file is assigned to it, with the same
+  payload the model would have returned. This mode creates no DocSets,
+  so a whole bulk run over a one-DocSet workspace costs no LLM calls.
+  (`existing-or-new` still calls here — it may need a new DocSet.)
+- **No DocSets** — the command fails with `NO_EXISTING_DOCSETS`
+  (exit 1). Both preconditions (config, and at least one DocSet) are
+  checked *before* the file is ingested, single and bulk alike, so a
+  failed run adds nothing — erroring after the add would leave behind
+  the unassigned file this mode exists to avoid.
 
 Classification runs **after** the file is added, and only when `created`
 is `true`. Re-runs on a duplicate (`--on-conflict skip`) skip the LLM

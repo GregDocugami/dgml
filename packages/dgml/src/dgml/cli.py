@@ -3829,11 +3829,8 @@ def _require_existing_docsets(docsets: list[DocSet]) -> None:
     """
     if not docsets:
         raise NoExistingDocSets(
-            f"--auto-classify {ClassifyMode.EXISTING} must assign every file to an "
-            "existing DocSet, but this workspace has none. Create one "
-            "(`dgml docset create`), or use "
-            f"`--auto-classify {ClassifyMode.EXISTING_OR_NEW}` to let "
-            "classification propose DocSets."
+            "no DocSets to assign to; create one with `dgml docset create`, "
+            f"or use `--auto-classify {ClassifyMode.EXISTING_OR_NEW}`"
         )
 
 
@@ -4012,9 +4009,9 @@ def _auto_classify(
     return the best-fitting DocSet even when the fit is poor. With no DocSets
     to choose from the mode has no possible outcome, so it is a **hard** error
     (``NO_EXISTING_DOCSETS``) — a precondition on the request rather than a
-    failure of the classification call, so it is raised outside the soft-fail
-    block below. Callers check it before adding any file; see
-    :func:`_require_existing_docsets`.
+    failure of the classification call. Callers check it via
+    :func:`_require_existing_docsets` before adding any file; the re-raise
+    below keeps it hard if one ever doesn't.
 
     A missing or invalid classification config is a **hard** failure: when
     ``config`` is not supplied it is loaded here via
@@ -4043,14 +4040,6 @@ def _auto_classify(
     if config is None:
         config = load_classification_config(ws)
 
-    if not allow_new:
-        # Both call sites already checked this before adding anything; repeated
-        # here so the invariant holds for any future caller, and raised outside
-        # the soft-fail block below so it stays a hard error.
-        if docsets is None:
-            docsets = DocSetStore(ws).list_all()
-        _require_existing_docsets(docsets)
-
     file_id = result.record.id
     block: dict[str, Any] = {
         "performed": True,
@@ -4067,6 +4056,11 @@ def _auto_classify(
         decision = classify_file(
             ws, file_id, config=config, docsets=docsets, allow_new=allow_new, debug=debug
         )
+    except NoExistingDocSets:
+        # A precondition on the request, not a failure of the call — callers
+        # check it before ingesting anything. Kept hard even if one didn't:
+        # soft-failing would leave the unassigned file this mode prevents.
+        raise
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
         return block

@@ -209,9 +209,7 @@ def classify_file(
     document, it just picks the least-bad home for it.
 
     With exactly one DocSet that mode has only one answer available, so the
-    LLM is not called at all — asking a vision model to pick from a list of
-    one costs a call and some latency to arrive where the caller already is.
-    The decision is indistinguishable from one the model would have returned.
+    LLM is not called at all.
 
     ``docsets`` is the list of existing DocSets to classify against. When
     omitted it is read fresh from the workspace. Bulk callers (e.g.
@@ -233,17 +231,12 @@ def classify_file(
     if not allow_new:
         if not docsets:
             raise NoExistingDocSets(
-                "no DocSets exist to assign to; create one first, or allow "
+                "no DocSets to assign to; create one first, or allow "
                 "classification to propose a new DocSet"
             )
         if len(docsets) == 1:
-            # Only one possible answer, so there is nothing to decide. Note
-            # this is sound *only* because this mode always assigns: were
-            # declining an option, the LLM would still have a judgement to
-            # make here.
-            return ClassificationDecision(
-                decision="existing", existing_docset_id=docsets[0].id
-            )
+            # Only one possible answer, so there is nothing to decide.
+            return ClassificationDecision(decision="existing", existing_docset_id=docsets[0].id)
     response = _vision_tool_call(
         workspace,
         [file_id],
@@ -470,11 +463,11 @@ def _build_prompt(docsets: list[DocSet], *, allow_new: bool = True) -> str:
             "belong in **different** DocSets. Use the document type, not the topic."
         )
     else:
-        # Same rubric, but as a *ranking* criterion: this mode has no
+        # Same rubric, but as a matter of degree: this mode has no
         # create-a-DocSet option, so the strict gate above would only tell the
         # LLM to refuse a choice it is required to make.
         lines.append(
-            "Use that as a ranking criterion, not a pass/fail gate: you will "
+            "Treat that as a matter of degree, not a pass/fail gate: you will "
             "be asked to choose the closest DocSet from a fixed list, so judge "
             "by document type rather than by topic. A property tax bill and a "
             "tax abatement (PILOT) agreement both concern property taxes but "
@@ -517,9 +510,9 @@ def _build_prompt(docsets: list[DocSet], *, allow_new: bool = True) -> str:
             "fits the new file. You must choose one: there is no option to "
             "create a DocSet and no option to decline. A perfect fit is not "
             "required — if none of them matches the new file's document type "
-            "exactly, pick whichever is closest rather than refusing. Use the "
-            "criterion above to rank them: prefer the DocSet whose key "
-            "questions the new file can best answer."
+            "exactly, pick whichever is closest rather than refusing. Apply "
+            "the criterion above: prefer the DocSet whose key questions the "
+            "new file can best answer."
         )
     lines.extend(["", "Call exactly one tool."])
     return "\n".join(lines)
