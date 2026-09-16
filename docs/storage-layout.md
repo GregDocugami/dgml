@@ -697,8 +697,10 @@ code `STYLE_CONFIG_INVALID`. A disabled section is never validated, so shipping
 
 ### `clustering` (optional)
 
-Overrides for the bundled clustering defaults used by `dgml cluster`
-(and the auto-cluster step of `dgml file add --auto-classify`). The
+Overrides for the bundled clustering defaults used by `dgml cluster`.
+(`dgml file add --auto-classify` does *not* read this section — it
+classifies one file at a time via the `classification` section below,
+and never runs the clustering pipeline.) The
 shipped defaults live in
 [packages/dgml-core/src/dgml_core/clustering_config.json](../packages/dgml-core/src/dgml_core/clustering_config.json)
 and stand on their own — this section only needs to spell out the

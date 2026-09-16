@@ -257,6 +257,18 @@ class ClassificationFailed(DgmlError):
     code = "CLASSIFICATION_FAILED"
 
 
+class NoExistingDocSets(DgmlError):
+    """Assign-only classification was asked for in a workspace with no DocSets.
+
+    A precondition, not a runtime failure: ``--auto-classify existing`` must
+    place the file in an existing DocSet, so with none to choose from there is
+    no outcome it could produce. Raised rather than silently degrading to
+    "unassigned", which is what the mode exists to avoid.
+    """
+
+    code = "NO_EXISTING_DOCSETS"
+
+
 class ClusteringConfigInvalid(DgmlError):
     code = "CLUSTERING_CONFIG_INVALID"
 

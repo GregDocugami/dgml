@@ -1952,6 +1952,278 @@ def test_file_add_without_auto_classify_omits_block(
     assert "classification" not in payload
 
 
+def _seed_docset_and_config(
+    ws: Path, capsys: pytest.CaptureFixture[str], name: str = "Contracts"
+) -> str:
+    """One DocSet plus a classification config; returns the DocSet id.
+
+    Note `--auto-classify existing` skips the LLM against a single-DocSet
+    workspace — use :func:`_seed_two_docsets_and_config` for tests that need
+    the model path.
+    """
+    main(
+        _ws_args(ws)
+        + [
+            "docset",
+            "create",
+            "--name",
+            name,
+            "--key-question",
+            "What is the agreement date?",
+            "--key-question",
+            "Who are the parties?",
+        ]
+    )
+    existing_id: str = _read_stdout(capsys)["id"]
+    write_classification_config(
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+    )
+    return existing_id
+
+
+def _seed_two_docsets_and_config(ws: Path, capsys: pytest.CaptureFixture[str]) -> tuple[str, str]:
+    """Two DocSets plus a classification config, so assign-only classification
+    has a real choice to make and actually calls the LLM. Returns both ids."""
+    first = _seed_docset_and_config(ws, capsys)
+    main(
+        _ws_args(ws)
+        + [
+            "docset",
+            "create",
+            "--name",
+            "Safety Datasheets",
+            "--key-question",
+            "What substance does this cover?",
+        ]
+    )
+    second: str = _read_stdout(capsys)["id"]
+    return first, second
+
+
+@needs_gs
+def test_file_add_auto_classify_explicit_existing_or_new_matches_bare(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--auto-classify existing-or-new` is the bare flag said out loud: same
+    tool menu, same decision."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    existing_id = _seed_docset_and_config(ws, capsys)
+    response = _tool_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        rc = main(
+            _ws_args(ws) + ["file", "add", str(sample_pdf), "--auto-classify", "existing-or-new"]
+        )
+    assert rc == 0
+    cls = _read_stdout(capsys)["classification"]
+    assert cls["decision"] == "existing"
+    assert cls["docset_id"] == existing_id
+    offered = [t["function"]["name"] for t in mock_completion.call_args.kwargs["tools"]]
+    assert offered == ["assign_to_existing_docset", "create_new_docset"]
+
+
+@needs_gs
+def test_file_add_auto_classify_existing_assigns(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The assign tool is the *only* one offered, so the LLM has no way to
+    create a DocSet and no way to decline — the file lands in the curated set
+    and that set never grows."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    existing_id, other_id = _seed_two_docsets_and_config(ws, capsys)
+    response = _tool_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--auto-classify", "existing"])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    cls = payload["classification"]
+    assert cls["performed"] is True
+    assert cls["decision"] == "existing"
+    assert cls["docset_id"] == existing_id
+    assert cls["docset_created"] is False
+    assert cls["error"] is None
+    offered = [t["function"]["name"] for t in mock_completion.call_args.kwargs["tools"]]
+    assert offered == ["assign_to_existing_docset"]
+
+    rc = main(_ws_args(ws) + ["docset", "list-files", existing_id])
+    assert rc == 0
+    assert _read_stdout(capsys)["file_ids"] == [payload["file"]["id"]]
+
+    # No third DocSet appeared — only the two that were seeded.
+    rc = main(_ws_args(ws) + ["docset", "list"])
+    assert rc == 0
+    assert sorted(d["id"] for d in _read_stdout(capsys)["docsets"]) == sorted(
+        [existing_id, other_id]
+    )
+
+
+@needs_gs
+def test_file_add_auto_classify_existing_single_docset_skips_llm(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One DocSet and no option to decline means one possible answer, so the
+    file is assigned without a vision call. The payload is the same one the
+    model would have produced."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    only_id = _seed_docset_and_config(ws, capsys)
+
+    with patch("litellm.completion") as mock_completion:
+        rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--auto-classify", "existing"])
+    assert rc == 0
+    mock_completion.assert_not_called()
+
+    payload = _read_stdout(capsys)
+    cls = payload["classification"]
+    assert cls["performed"] is True
+    assert cls["decision"] == "existing"
+    assert cls["docset_id"] == only_id
+    assert cls["docset_created"] is False
+    assert cls["error"] is None
+
+    # The assignment is real, not just reported.
+    rc = main(_ws_args(ws) + ["docset", "list-files", only_id])
+    assert rc == 0
+    assert _read_stdout(capsys)["file_ids"] == [payload["file"]["id"]]
+
+
+@needs_gs
+def test_file_add_auto_classify_default_mode_single_docset_still_calls_llm(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The shortcut is assign-only. With creation allowed, one DocSet is not
+    one answer — the LLM still decides whether the file belongs in it."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    only_id = _seed_docset_and_config(ws, capsys)
+    response = _tool_response("assign_to_existing_docset", {"docset_id": only_id})
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--auto-classify"])
+    assert rc == 0
+    mock_completion.assert_called_once()
+    assert _read_stdout(capsys)["classification"]["decision"] == "existing"
+
+
+@needs_gs
+def test_file_add_auto_classify_existing_errors_when_no_docsets(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Nothing to assign to → hard error (exit 1) and no LLM call. The mode
+    must place the file in an existing DocSet, so with none there is no
+    outcome; silently leaving the file unassigned is what it exists to
+    prevent."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    write_classification_config(
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+    )
+
+    with patch("litellm.completion") as mock_completion:
+        rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--auto-classify", "existing"])
+    assert rc == 1
+    err = _read_stderr(capsys)
+    assert err["error"]["code"] == "NO_EXISTING_DOCSETS"
+    assert "docset create" in err["error"]["message"]
+    mock_completion.assert_not_called()
+
+    # The precondition is checked before ingesting: a failed run must not
+    # leave behind the unassigned file this mode exists to prevent.
+    rc = main(_ws_args(ws) + ["file", "list"])
+    assert rc == 0
+    assert _read_stdout(capsys)["files"] == []
+
+
+@needs_gs
+def test_file_add_auto_classify_default_mode_handles_empty_workspace(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The NO_EXISTING_DOCSETS precondition is specific to `existing` mode —
+    the bare flag still creates the workspace's first DocSet."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    write_classification_config(
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+    )
+    response = _tool_response(
+        "create_new_docset",
+        {
+            "name": "Receipts",
+            "description": "expense receipts",
+            "key_questions": ["Who?", "How much?", "When?"],
+        },
+    )
+
+    with patch("litellm.completion", return_value=response):
+        rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--auto-classify"])
+    assert rc == 0
+    assert _read_stdout(capsys)["classification"]["decision"] == "new"
+
+
+@needs_gs
+def test_file_add_auto_classify_existing_hard_fails_when_no_config(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The classification config is a precondition in `existing` mode too."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+
+    with patch("litellm.completion") as mock_completion:
+        rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--auto-classify", "existing"])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "CLASSIFICATION_CONFIG_MISSING"
+    mock_completion.assert_not_called()
+
+
+def test_file_add_auto_classify_rejects_unknown_mode(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as excinfo:
+        main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--auto-classify", "bogus"])
+    assert excinfo.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_file_add_auto_classify_before_path_is_rejected(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--auto-classify takes an optional MODE, so argparse consumes the next
+    token. `--auto-classify <path>` therefore fails loudly rather than
+    silently reading the path as a mode — the one invocation form that changed
+    when the flag stopped being a boolean. `choices=` is what makes it loud;
+    dropping it would turn this into a confusing "path is required"."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as excinfo:
+        main(_ws_args(ws) + ["file", "add", "--auto-classify", str(sample_pdf)])
+    assert excinfo.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+    # The documented spelling — path first — still works.
+    capsys.readouterr()
+    existing_id = _seed_docset_and_config(ws, capsys)
+    with patch(
+        "litellm.completion",
+        return_value=_tool_response("assign_to_existing_docset", {"docset_id": existing_id}),
+    ):
+        rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--auto-classify", "existing"])
+    assert rc == 0
+
+
 def _init_with_docset(ws: Path, capsys: pytest.CaptureFixture[str], name: str = "X") -> str:
     """Init workspace, create one docset, return its id, drain stdout.
 
@@ -2919,6 +3191,113 @@ def test_file_add_directory_auto_classify_amortizes_docsets(
     assert len(docsets) == 1
     main(_ws_args(ws) + ["docset", "list-files", new_id])
     assert len(_read_stdout(capsys)["file_ids"]) == 2
+
+
+def test_file_add_directory_auto_classify_existing_assigns_every_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Bulk run in `existing` mode: every file is assigned within the curated
+    set — including one the LLM only picks as the closest available — and the
+    set never grows."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    existing_id, other_id = _seed_two_docsets_and_config(ws, capsys)
+
+    src = tmp_path / "pdfs"
+    src.mkdir()
+    _write_text_pdf(src / "a.pdf", ["Alpha page one", "Alpha page two"])
+    _write_text_pdf(src / "b.pdf", ["Bravo page one", "Bravo page two"])
+
+    def fake_completion(**kwargs: Any) -> SimpleNamespace:
+        # The assign tool is the only one offered, on every call — that is
+        # what leaves the LLM no way to create a DocSet or decline.
+        assert [t["function"]["name"] for t in kwargs["tools"]] == ["assign_to_existing_docset"]
+        return _tool_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with patch("litellm.completion", side_effect=fake_completion) as mock_completion:
+        rc = main(_ws_args(ws) + ["file", "add", str(src), "--auto-classify", "existing"])
+    assert rc == 0
+    assert mock_completion.call_count == 2  # per file; no shortcut with two DocSets
+    payload = _read_stdout(capsys)
+    assert payload["summary"]["added"] == 2
+    assert payload["summary"]["soft_failed"] == 0
+
+    for entry in payload["results"]:
+        assert entry["classification"]["decision"] == "existing"
+        assert entry["classification"]["docset_id"] == existing_id
+        assert entry["classification"]["docset_created"] is False
+        assert entry["classification"]["error"] is None
+
+    # Still exactly the two curated DocSets, one of them holding both files.
+    main(_ws_args(ws) + ["docset", "list"])
+    assert sorted(d["id"] for d in _read_stdout(capsys)["docsets"]) == sorted(
+        [existing_id, other_id]
+    )
+    main(_ws_args(ws) + ["docset", "list-files", existing_id])
+    assert len(_read_stdout(capsys)["file_ids"]) == 2
+
+
+def test_file_add_directory_auto_classify_existing_single_docset_skips_llm(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The shortcut holds for every file in a bulk run: assign-only mode never
+    creates a DocSet, so a single-DocSet workspace stays single-DocSet and no
+    file ever has a choice to make."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    only_id = _seed_docset_and_config(ws, capsys)
+
+    src = tmp_path / "pdfs"
+    src.mkdir()
+    _write_text_pdf(src / "a.pdf", ["Alpha page one"])
+    _write_text_pdf(src / "b.pdf", ["Bravo page one"])
+
+    with patch("litellm.completion") as mock_completion:
+        rc = main(_ws_args(ws) + ["file", "add", str(src), "--auto-classify", "existing"])
+    assert rc == 0
+    mock_completion.assert_not_called()
+
+    payload = _read_stdout(capsys)
+    assert payload["summary"]["added"] == 2
+    for entry in payload["results"]:
+        assert entry["classification"]["decision"] == "existing"
+        assert entry["classification"]["docset_id"] == only_id
+        assert entry["classification"]["docset_created"] is False
+        assert entry["classification"]["error"] is None
+
+    main(_ws_args(ws) + ["docset", "list-files", only_id])
+    assert len(_read_stdout(capsys)["file_ids"]) == 2
+
+
+def test_file_add_directory_auto_classify_existing_aborts_before_adding(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The no-DocSets precondition is checked once up front, so a bulk run
+    aborts before any file is added rather than on the first one."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    write_classification_config(
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+    )
+
+    src = tmp_path / "pdfs"
+    src.mkdir()
+    _write_text_pdf(src / "a.pdf", ["Alpha page one"])
+    _write_text_pdf(src / "b.pdf", ["Bravo page one"])
+
+    with patch("litellm.completion") as mock_completion:
+        rc = main(_ws_args(ws) + ["file", "add", str(src), "--auto-classify", "existing"])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "NO_EXISTING_DOCSETS"
+    mock_completion.assert_not_called()
+
+    # Nothing was ingested — the abort happened before the first add.
+    rc = main(_ws_args(ws) + ["file", "list"])
+    assert rc == 0
+    assert _read_stdout(capsys)["files"] == []
 
 
 def test_file_add_directory_auto_classify_hard_fails_without_config(
