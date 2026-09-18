@@ -2010,6 +2010,34 @@ def test_transcribe_page_trigger_needs_an_escalation_model(
     assert ("base/cheap", "7-10") in with_esc
 
 
+def test_docset_slug_yields_a_valid_uri_segment() -> None:
+    """A DocSet name is free text; the slug it produces goes in a namespace URI.
+
+    An em-dash in "DocFinQA Rerun — AON" produced `.../DocfinqaRerun—Aon`, which
+    lxml rejects — and only at the END of a run, after transcription, labeling
+    and grounding had all completed.
+    """
+    from dgml_core.generation.semantic_transform import docset_slug
+
+    assert docset_slug("DocFinQA Rerun — AON") == "DocfinqaRerunAon"
+    assert docset_slug("café & co") == "CafCo"
+    assert docset_slug("—") == "DocSet"  # nothing legal left
+    # Ordinary names are untouched, so existing namespaces do not shift.
+    assert docset_slug("DocFinQA Dev") == "DocfinqaDev"
+    assert docset_slug("Q2 contracts") == "Q2Contracts"
+    assert docset_slug("a/b_c-d") == "ABCD"
+
+
+def test_docset_slug_output_is_always_uri_safe() -> None:
+    """Whatever the name, the header it builds must parse as XML."""
+    from dgml_core.generation.to_semantic import build_header
+    from lxml import etree
+
+    for name in ("DocFinQA Rerun — AON", "café & co", "a b/c", "!!!", "Q2 contracts"):
+        xml = build_header("Docugami", name) + "</dg:chunk>"
+        etree.fromstring(xml.encode())  # raises XMLSyntaxError on an invalid ns URI
+
+
 def test_salvage_window_json_recovers_complete_blocks() -> None:
     """A truncated transcription window keeps every block before the cut."""
     from dgml_core.generation.transcribe import _salvage_window_json

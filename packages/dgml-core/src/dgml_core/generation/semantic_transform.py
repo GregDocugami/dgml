@@ -397,8 +397,23 @@ def _transform_element(
 
 
 def docset_slug(name: str) -> str:
-    """Return a PascalCase slug for use in namespace URIs."""
-    return "".join(w.capitalize() for w in re.split(r"[\s\-_/]+", name) if w)
+    """Return a PascalCase slug for use in namespace URIs.
+
+    The slug is embedded in ``http://dgml.io/<org>/<DocSetSlug>``, so — exactly
+    as for :func:`org_ns_segment` — it has to be a legal URI path segment. A
+    DocSet name is free text, and anything outside the URI *unreserved* set
+    (``A-Za-z0-9-._~``) makes the namespace invalid: an em-dash in
+    ``"DocFinQA Rerun — AON"`` yielded ``…/DocfinqaRerun—Aon``, which lxml
+    rejects. That failure surfaced only at the very END of a run, after
+    transcription, labeling and grounding had all completed, so the whole
+    document's work was lost to a character in its name.
+
+    Names made of ordinary word characters are unchanged, so existing
+    namespaces do not shift. Falls back to ``"DocSet"`` if nothing legal
+    remains.
+    """
+    pascal = "".join(w.capitalize() for w in re.split(r"[\s\-_/]+", name) if w)
+    return re.sub(r"[^A-Za-z0-9\-._~]", "", pascal) or "DocSet"
 
 
 def org_ns_segment(org: str) -> str:
