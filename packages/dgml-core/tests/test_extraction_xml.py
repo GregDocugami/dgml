@@ -676,6 +676,118 @@ def test_defaulted_value_never_carries_inputs() -> None:
     assert back["LateFeeGraceDays"] == {"text": "0", "value": "0", "method": "defaulted"}
 
 
+# ── evidence: inputs that aren't schema fields become dg:chunk (rule 7) ──────
+
+
+def _end_date_vocab() -> Vocabulary:
+    return Vocabulary(
+        namespace_uri="http://www.dgml.io/acme/contracts#",
+        roots=[
+            Tag(name="Party", kind="field"),
+            Tag(name="EndDate", kind="field", value_type="date"),
+        ],
+    )
+
+
+def _end_date_values() -> dict[str, object]:
+    return {
+        "Party": {
+            "text": "Acme",
+            "locations": [{"page_number": 1, "bounding_box": [10, 10, 90, 40]}],
+        },
+        "EndDate": {
+            "text": "2028-01-14",
+            "value": "2028-01-14",
+            "method": "calculated",
+            "evidence": [
+                {
+                    "text": "January 15, 2026",
+                    "locations": [{"page_number": 1, "bounding_box": [300, 410, 620, 450]}],
+                },
+                {
+                    "text": "a term of twenty-four (24) months",
+                    "locations": [{"page_number": 1, "bounding_box": [300, 520, 980, 560]}],
+                },
+            ],
+        },
+    }
+
+
+def test_evidence_emits_anonymous_chunks_named_in_inputs() -> None:
+    """The spec's EndDate example: a calculated value whose inputs are
+    printed text the schema doesn't extract. Each becomes a dg:chunk with an
+    xml:id, its boxes and its text, ahead of the field that names it."""
+    xml = standalone_extraction_doc(_end_date_values(), vocab=_end_date_vocab())
+    assert (
+        '<dg:chunk xml:id="end-date--in-0" dg:origin="1 300 410 620 450">'
+        "January 15, 2026</dg:chunk>"
+    ) in xml
+    assert (
+        '<dg:chunk xml:id="end-date--in-1" dg:origin="1 300 520 980 560">'
+        "a term of twenty-four (24) months</dg:chunk>"
+    ) in xml
+    assert (
+        '<docset:EndDate xsi:type="date" dg:value="2028-01-14" '
+        'dg:inputs="#end-date--in-0; #end-date--in-1" dg:method="calculated">'
+    ) in xml
+    assert xml.index("end-date--in-1") < xml.index("<docset:EndDate")
+    assert provenance_issues(xml) == []
+
+
+def test_evidence_round_trips() -> None:
+    vocab = _end_date_vocab()
+    values = _end_date_values()
+    back = dgml_xml_to_values(standalone_extraction_doc(values, vocab=vocab), vocab=vocab)
+    assert back == values
+    # Inferred from the XML alone, too: the chunks are not mistaken for fields.
+    assert dgml_xml_to_values(standalone_extraction_doc(values, vocab=vocab)) == back
+
+
+def test_evidence_mixes_with_field_inputs() -> None:
+    vocab = _end_date_vocab()
+    values = _end_date_values()
+    end = values["EndDate"]
+    assert isinstance(end, dict)
+    end["inputs"] = ["Party"]
+    xml = standalone_extraction_doc(values, vocab=vocab)
+    assert 'dg:inputs="#party; #end-date--in-0; #end-date--in-1"' in xml
+    back = dgml_xml_to_values(xml, vocab=vocab)
+    assert back["EndDate"]["inputs"] == ["Party"]
+    assert [e["text"] for e in back["EndDate"]["evidence"]] == [
+        "January 15, 2026",
+        "a term of twenty-four (24) months",
+    ]
+
+
+def test_evidence_without_a_box_is_dropped_and_counted() -> None:
+    """Evidence phases 2/3 couldn't box has nothing to crop: no chunk. With
+    no evidence left the value can't keep its method."""
+    vocab = _end_date_vocab()
+    values = _end_date_values()
+    end = values["EndDate"]
+    assert isinstance(end, dict)
+    for item in end["evidence"]:
+        item["locations"] = [{"page_number": 1}]
+    assert count_dropped_inputs(values) == 2
+    xml = standalone_extraction_doc(values, vocab=vocab)
+    assert "<dg:chunk xml:id" not in xml
+    assert "dg:inputs" not in xml and "dg:method" not in xml
+
+
+def test_structural_chunks_are_not_read_as_evidence() -> None:
+    """A document tree's own dg:chunks (unnamed scaffolding) stay out of the
+    projection's evidence; only chunks named in dg:inputs are evidence."""
+    vocab = _end_date_vocab()
+    core = (
+        '<dg:chunk xmlns:dg="http://dgml.io/ns/dg#">'
+        '<dg:chunk xml:id="c1" dg:origin="1 1 1 2 2">a heading</dg:chunk>'
+        "</dg:chunk>"
+    )
+    xml = embed_extraction_into(core, _end_date_values(), vocab=vocab)
+    back = dgml_xml_to_values(xml, vocab=vocab)
+    assert back == _end_date_values()
+
+
 def test_carry_extraction_over_moves_element_verbatim() -> None:
     """The dg:extraction element (values, origins, hrefs, xml:ids) survives a
     fresh tree render byte-identically in content."""

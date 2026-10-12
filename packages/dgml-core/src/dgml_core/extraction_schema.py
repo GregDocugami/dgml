@@ -148,6 +148,22 @@ EXTRACTED_VALUE: dict[str, Any] = {
                 "from these. Without: it is calculated or inferred from them."
             ),
         },
+        "evidence": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "locations": _LOCATIONS_SCHEMA,
+                },
+                "required": ["text", "locations"],
+            },
+            "description": (
+                "Printed text the result used that no schema field extracts "
+                "(e.g. 'a term of twenty-four (24) months'), verbatim, with "
+                "the page it is on."
+            ),
+        },
         "method": {
             "type": "string",
             "enum": list(METHODS),
@@ -493,7 +509,7 @@ def _properties_to_tags(properties: Any) -> list[Tag]:
 # Property names an object schema may use and still be a *leaf* (one extracted
 # value) rather than a container of fields. Matches EXTRACTED_VALUE's shape.
 _LEAF_SHAPE_KEYS = frozenset(
-    {"text", "value", "locations", "inputs", "method", "derived_from", "computed"}
+    {"text", "value", "locations", "inputs", "evidence", "method", "derived_from", "computed"}
 )
 
 # Annotation keys a $ref node may carry as siblings; they are merged over the

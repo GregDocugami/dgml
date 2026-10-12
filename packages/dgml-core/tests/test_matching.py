@@ -1139,12 +1139,18 @@ def test_walk_unprinted_leaves_complements_walk_leaves() -> None:
         # Printed in part: grounded like any leaf, and it has inputs.
         "start": {"text": "3/1", "locations": [{"page_number": 1}], "inputs": ["title"]},
     }
+    values["end"] = {
+        "text": "2028-01-14",
+        "method": "calculated",
+        "evidence": [{"text": "24 months", "locations": [{"page_number": 1}]}],
+    }
     grounded = {path for path, _ in _walk_leaves(values)}
     unprinted = {path for path, _ in walk_unprinted_leaves(values)}
     with_inputs = {path for path, _ in walk_input_leaves(values)}
-    assert grounded == {("title",), ("items", 0, "qty"), ("start",)}
-    assert unprinted == {("items", 1, "qty"), ("grace",)}
-    assert with_inputs == {("items", 1, "qty"), ("start",)}
+    # An unprinted leaf's evidence is grounded even though the leaf isn't.
+    assert grounded == {("title",), ("items", 0, "qty"), ("start",), ("end", "evidence", 0)}
+    assert unprinted == {("items", 1, "qty"), ("grace",), ("end",)}
+    assert with_inputs == {("items", 1, "qty"), ("start",), ("end",)}
 
 
 @pytest.mark.parametrize(

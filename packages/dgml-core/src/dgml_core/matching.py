@@ -211,12 +211,13 @@ def is_unprinted_leaf(value: dict[str, Any]) -> bool:
     A leaf printed only in part (the "3/1" of a period start whose year comes
     from the commencement date) carries ``locations`` *and* ``inputs``; it is
     grounded like any other leaf, not unprinted."""
-    return "locations" not in value and ("inputs" in value or "method" in value)
+    return "locations" not in value and any(k in value for k in ("inputs", "evidence", "method"))
 
 
 def has_inputs(value: dict[str, Any]) -> bool:
-    """True for a leaf whose value names the values it used (``inputs``)."""
-    return isinstance(value.get("inputs"), list) and bool(value["inputs"])
+    """True for a leaf whose value names what it used: other values
+    (``inputs``) or printed text the schema doesn't extract (``evidence``)."""
+    return any(isinstance(value.get(k), list) and bool(value[k]) for k in ("inputs", "evidence"))
 
 
 def _walk_leaves(values: Any, path: LeafPath = ()) -> Iterable[tuple[LeafPath, dict[str, Any]]]:
@@ -225,19 +226,41 @@ def _walk_leaves(values: Any, path: LeafPath = ()) -> Iterable[tuple[LeafPath, d
     A leaf is recognized by having both ``text`` and ``locations`` keys
     on a dict. Walking stops descending once a leaf is recognized so
     nested dicts inside the locations array don't confuse the walker.
-    Unprinted leaves (see :func:`is_unprinted_leaf`) are skipped entirely —
-    they have nothing to ground."""
+    Unprinted leaves (see :func:`is_unprinted_leaf`) have nothing of their
+    own to ground and are skipped.
+
+    A leaf's ``evidence`` items — printed text the value used that is not a
+    schema field (see :func:`walk_evidence`) — are grounded like leaves too,
+    at path ``(*leaf_path, "evidence", i)``, whether or not the leaf itself
+    is printed."""
     if isinstance(values, dict):
-        if "text" in values and "locations" in values:
-            yield path, values
-            return
-        if "text" in values and is_unprinted_leaf(values):
+        if "text" in values and ("locations" in values or is_unprinted_leaf(values)):
+            if "locations" in values:
+                yield path, values
+            yield from walk_evidence(values, path)
             return
         for k, v in values.items():
             yield from _walk_leaves(v, path + (k,))
     elif isinstance(values, list):
         for i, v in enumerate(values):
             yield from _walk_leaves(v, path + (i,))
+
+
+def walk_evidence(
+    leaf: dict[str, Any], path: LeafPath
+) -> Iterable[tuple[LeafPath, dict[str, Any]]]:
+    """Yield ``(path, item)`` for each groundable ``evidence`` item of *leaf*.
+
+    An evidence item is ``{"text", "locations"}``: verbatim printed text the
+    value used that the schema doesn't extract (the "a term of twenty-four
+    (24) months" an EndDate is calculated from). It serializes as an
+    anonymous ``dg:chunk`` next to the field, named in its ``dg:inputs``."""
+    evidence = leaf.get("evidence")
+    if not isinstance(evidence, list):
+        return
+    for i, item in enumerate(evidence):
+        if isinstance(item, dict) and isinstance(item.get("text"), str) and "locations" in item:
+            yield path + ("evidence", i), item
 
 
 def walk_all_leaves(values: Any, path: LeafPath = ()) -> Iterable[tuple[LeafPath, dict[str, Any]]]:

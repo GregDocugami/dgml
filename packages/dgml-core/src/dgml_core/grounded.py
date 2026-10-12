@@ -1145,14 +1145,13 @@ def extract_values(
         # locations — phases 2 and 3 never see them; counted here so the
         # stats file can attest they were deliberate, not dropped. Partly
         # printed leaves are grounded as usual and also name their inputs.
-        # dropped_inputs counts inputs entries that won't resolve to a
-        # dg:inputs target — incomplete provenance that would otherwise
-        # vanish silently at serialization.
+        # dropped_inputs (counted after grounding, below) is inputs that
+        # won't resolve to a dg:inputs target — incomplete provenance that
+        # would otherwise vanish silently at serialization.
         unprinted_fields = sum(1 for _ in walk_unprinted_leaves(phase1_values))
         partly_printed_fields = sum(
             1 for _, leaf in walk_input_leaves(phase1_values) if "locations" in leaf
         )
-        dropped_inputs = count_dropped_inputs(phase1_values)
         # Enum leaves whose normalized value isn't one of the schema's tokens
         # serialize text-only; count them so misses are visible in stats.
         unnormalized_enums = count_unnormalized_enum_values(phase1_values, vocab)
@@ -1200,6 +1199,9 @@ def extract_values(
             )
         unmatched_count = phase2_result.stats.unmatched_locations - phase3_matched
         phase3_duration = round(time.monotonic() - phase3_started, 3)
+        # After grounding, so evidence that never got a box (and so emits no
+        # dg:chunk) counts as dropped too.
+        dropped_inputs = count_dropped_inputs(final_values)
 
         # Extracted values live as a dg:extraction element in the file's core
         # <stem>.dgml.xml (spec §13): added as a sibling of an existing document
@@ -2826,6 +2828,30 @@ def _describe_text_reply(result: CallResult) -> str:
     return shown + _no_text_detail(result.response)
 
 
+def _normalized_evidence(raw: Any) -> list[dict[str, Any]]:
+    """The usable ``evidence`` items of a phase-1 leaf: non-empty verbatim
+    ``text`` with at least one location naming a page. Anything else can't
+    be grounded, so it can't become a ``dg:chunk`` a verifier could crop."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        locations = item.get("locations")
+        if not isinstance(text, str) or not text.strip() or not isinstance(locations, list):
+            continue
+        pages = [
+            loc
+            for loc in locations
+            if isinstance(loc, dict) and isinstance(loc.get("page_number"), int)
+        ]
+        if pages:
+            out.append({"text": text, "locations": pages})
+    return out
+
+
 def _normalize_leaf_provenance(values: Any) -> None:
     """Enforce the DGML 0.71 provenance invariants on phase-1 leaves, in place.
 
@@ -2836,14 +2862,17 @@ def _normalize_leaf_provenance(values: Any) -> None:
     * the 0.7 keys are read as their 0.71 form — ``derived_from`` becomes
       ``inputs`` and ``computed`` is dropped;
     * ``inputs`` is a non-empty list of strings, or absent;
+    * ``evidence`` (printed text the value used that the schema doesn't
+      extract) is a non-empty list of ``{text, locations}`` items, each with
+      a page to ground on, or absent;
     * ``method`` is one of ``calculated``/``inferred``/``defaulted``, or absent;
     * a leaf with at least one usable location is printed (in full, or in part
       when it also has ``inputs``) and never carries a ``method``;
     * a leaf with no usable location loses its ``locations`` key. A
-      ``defaulted`` one loses its ``inputs``; one with ``inputs`` and no method
-      is ``inferred`` (the safe reading); ``calculated``/``inferred`` with no
-      ``inputs`` lose the method, leaving an unsupported value the
-      consistency check reports;
+      ``defaulted`` one loses its ``inputs`` and ``evidence``; one with
+      either and no method is ``inferred`` (the safe reading);
+      ``calculated``/``inferred`` with neither lose the method, leaving an
+      unsupported value the consistency check reports;
     * an empty-string ``value`` is removed.
     """
     if isinstance(values, list):
@@ -2867,6 +2896,11 @@ def _normalize_leaf_provenance(values: Any) -> None:
             values["inputs"] = inputs
         else:
             values.pop("inputs", None)
+        evidence = _normalized_evidence(values.get("evidence"))
+        if evidence:
+            values["evidence"] = evidence
+        else:
+            values.pop("evidence", None)
         if values.get("method") not in METHODS:
             values.pop("method", None)
         locations = values.get("locations")
@@ -2878,11 +2912,13 @@ def _normalize_leaf_provenance(values: Any) -> None:
             return
         values.pop("locations", None)
         method = values.get("method")
+        used = bool(inputs or evidence)
         if method == METHOD_DEFAULTED:
             values.pop("inputs", None)
-        elif inputs and method is None:
+            values.pop("evidence", None)
+        elif used and method is None:
             values["method"] = METHOD_INFERRED
-        elif not inputs and method is not None:
+        elif not used and method is not None:
             del values["method"]
         return
     for child in values.values():

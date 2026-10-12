@@ -2480,6 +2480,73 @@ def test_extract_values_counts_dropped_inputs_in_stats(workspace: Workspace) -> 
     assert stats["matching"]["dropped_inputs"] == 2
 
 
+def test_extract_values_grounds_evidence_into_chunks(workspace: Workspace) -> None:
+    """Evidence (printed text no schema field extracts) is grounded by phase 2
+    like any leaf and lands as a dg:chunk the value names in dg:inputs."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)  # "Hello", "world"
+    store = DocSetStore(workspace)
+    ds = store.create(name="Test")
+    store.set_schema(ds.id, _COMPUTED_RNC)
+    store.add_file(ds.id, fid)
+
+    phase1_values = {
+        "word_count": {
+            "text": "2",
+            "value": "2",
+            "method": "calculated",
+            "evidence": [{"text": "Hello world", "locations": [{"page_number": 1}]}],
+        },
+    }
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch(
+        "litellm.completion",
+        return_value=_tool_call_response("submit_values", {"values": phase1_values}),
+    ) as mock_completion:
+        result = extract_values(workspace, ds.id, fid, config=config)
+
+    assert mock_completion.call_count == 1  # phase 2 boxed the evidence
+    xml = workspace.blobs.get_blob(result.xml_key).decode("utf-8")
+    assert '<dg:chunk xml:id="word_count--in-0" dg:origin="1 ' in xml
+    assert ">Hello world</dg:chunk>" in xml
+    assert 'dg:inputs="#word_count--in-0" dg:method="calculated"' in xml
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds.id}/{fid}")
+    assert stats is not None
+    assert stats["matching"]["unprinted_fields"] == 1
+    assert stats["matching"]["dropped_inputs"] == 0
+    assert stats["matching"]["matched_phase2"] == 1
+
+
+def test_normalize_leaf_provenance_keeps_only_groundable_evidence() -> None:
+    from dgml_core.grounded import _normalize_leaf_provenance
+
+    values: dict[str, Any] = {
+        "End": {
+            "text": "2028-01-14",
+            "evidence": [
+                {"text": "a term of 24 months", "locations": [{"page_number": 1}]},
+                {"text": "", "locations": [{"page_number": 1}]},  # nothing to match
+                {"text": "no page", "locations": []},  # nowhere to ground it
+                "not an object",
+            ],
+        },
+        # defaulted forbids evidence as it forbids inputs
+        "Grace": {
+            "text": "0",
+            "method": "defaulted",
+            "evidence": [{"text": "x", "locations": [{"page_number": 1}]}],
+        },
+    }
+    _normalize_leaf_provenance(values)
+    assert values["End"] == {
+        "text": "2028-01-14",
+        "evidence": [{"text": "a term of 24 months", "locations": [{"page_number": 1}]}],
+        "method": "inferred",
+    }
+    assert values["Grace"] == {"text": "0", "method": "defaulted"}
+
+
 # ── Merged-leaf provenance normalization & enum tool-schema specialization ───
 
 

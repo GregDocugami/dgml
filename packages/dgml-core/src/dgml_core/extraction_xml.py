@@ -180,12 +180,21 @@ def _collect_ref_ids(values: dict[str, Any]) -> dict[LeafPath, str]:
 def count_dropped_inputs(values: dict[str, Any]) -> int:
     """Number of ``inputs`` entries across all leaves that will NOT emit a
     ``dg:inputs`` target — malformed path, non-string entry, or a path that
-    dangles in *values*. Mirrors the drop logic in
-    :func:`_collect_ref_ids`/:func:`_resolved_inputs`; surfaced in
-    ``extraction_stats.json`` so incomplete provenance is visible instead of
-    silently shrinking the inputs list."""
+    dangles in *values* — plus ``evidence`` items with no bounding box, which
+    emit no ``dg:chunk``. Mirrors the drop logic in
+    :func:`_collect_ref_ids`/:func:`_resolved_inputs`/:func:`_add_evidence`;
+    surfaced in ``extraction_stats.json`` so incomplete provenance is visible
+    instead of silently shrinking the inputs list."""
     dropped = 0
     for _path, leaf in walk_input_leaves(values):
+        evidence = leaf.get("evidence")
+        if isinstance(evidence, list):
+            dropped += sum(
+                1
+                for item in evidence
+                if not isinstance(item, dict)
+                or _origin_from_locations(item.get("locations")) is None
+            )
         refs = leaf.get("inputs")
         if not isinstance(refs, list):
             continue
@@ -234,7 +243,8 @@ def check_derivations(values: dict[str, Any]) -> tuple[int, int]:
     checked = 0
     mismatched = 0
     for _path, leaf in walk_input_leaves(values):
-        if leaf.get("method") != METHOD_CALCULATED:
+        if leaf.get("method") != METHOD_CALCULATED or leaf.get("evidence"):
+            # Evidence is printed text, not a number to add up.
             continue
         refs = leaf.get("inputs")
         if not isinstance(refs, list) or not refs:
@@ -518,12 +528,44 @@ def _resolved_inputs(value: dict[str, Any], ids: dict[LeafPath, str]) -> list[st
     return out
 
 
+def _add_evidence(parent: etree._Element, value: dict[str, Any], path: LeafPath) -> list[str]:
+    """Emit each grounded ``evidence`` item of *value* as an anonymous
+    ``<dg:chunk xml:id dg:origin>text</dg:chunk>`` under *parent* (so, ahead
+    of the field element that uses it) and return their ``#id`` references.
+
+    ``dg:chunk`` already means "this boundary is real, the name is not": the
+    text is printed and a verifier can crop it, but the schema has no field
+    for it. Ids are the field's path id plus ``--in-<n>``; a double hyphen
+    never comes out of :func:`_id_for_path`, so they can't collide with a
+    field's. Items without a box are dropped (and counted by
+    :func:`count_dropped_inputs`)."""
+    evidence = value.get("evidence")
+    if not isinstance(evidence, list) or value.get("method") == METHOD_DEFAULTED:
+        return []
+    refs: list[str] = []
+    base = _id_for_path(path)
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        origin = _origin_from_locations(item.get("locations"))
+        if origin is None:
+            continue
+        chunk_id = f"{base}--in-{len(refs)}"
+        chunk = etree.SubElement(parent, CHUNK_TAG)
+        chunk.set(f"{{{XML_NS}}}id", chunk_id)
+        chunk.set(f"{{{DG_NS}}}origin", origin)
+        chunk.text = str(item.get("text", ""))
+        refs.append(f"#{chunk_id}")
+    return refs
+
+
 def _set_unprinted_attrs(
     el: etree._Element,
     value: dict[str, Any],
     value_type: str | None,
     ids: dict[LeafPath, str],
     enum_values: list[str] | None = None,
+    evidence_refs: list[str] | None = None,
 ) -> None:
     """Emit the attribute set of a value the page doesn't print (DGML 0.71):
     a mandatory ``dg:value`` (the model's canonical ``value``, normalized),
@@ -565,7 +607,9 @@ def _set_unprinted_attrs(
     el.set(f"{{{DG_NS}}}value", dg_value)
 
     method = value.get("method")
-    inputs = [] if method == METHOD_DEFAULTED else _resolved_inputs(value, ids)
+    inputs = (
+        [] if method == METHOD_DEFAULTED else _resolved_inputs(value, ids) + (evidence_refs or [])
+    )
     if inputs:
         el.set(INPUTS_ATTR, format_refs(inputs))
     if method == METHOD_DEFAULTED or (method in METHODS and inputs):
@@ -584,6 +628,7 @@ def _add_field(
     ids: dict[LeafPath, str] | None = None,
 ) -> None:
     ids = ids or {}
+    evidence_refs = _add_evidence(parent, value, path)
     el = etree.SubElement(parent, f"{{{docset_ns}}}{tag_name}")
     _maybe_set_id(el, path, ids)
     text = value.get("text")
@@ -591,7 +636,7 @@ def _add_field(
     if text_str:
         el.text = text_str
     if is_unprinted_leaf(value):
-        _set_unprinted_attrs(el, value, value_type, ids, enum_values)
+        _set_unprinted_attrs(el, value, value_type, ids, enum_values, evidence_refs)
         return
     # Grounded leaf: the model-returned normalized `value` wins when it
     # validates (an enum token from the schema's closed set, or a value the
@@ -630,7 +675,7 @@ def _add_field(
         el.set(f"{{{DG_NS}}}origin", origin)
     # Printed in part: the boxes say where the printed text is, dg:inputs
     # what completed it. A boxed value never carries dg:method.
-    inputs = _resolved_inputs(value, ids)
+    inputs = _resolved_inputs(value, ids) + evidence_refs
     if inputs:
         el.set(INPUTS_ATTR, format_refs(inputs))
 
@@ -825,13 +870,36 @@ class _ParseAcc:
     """Per-parse collector for ``dg:inputs`` resolution.
 
     ``id_paths`` maps every ``xml:id`` seen to its values-tree path;
-    ``with_inputs`` holds the leaves whose ``inputs`` still carry raw ``#id``
-    references. :meth:`resolve` rewrites those back to dotted paths once the
-    whole tree has been walked."""
+    ``chunks`` maps each evidence ``dg:chunk`` id to its ``{text,
+    locations}``; ``with_inputs`` holds the leaves whose ``inputs`` still
+    carry raw ``#id`` references. :meth:`resolve` rewrites those once the
+    whole tree has been walked: a chunk reference moves to the leaf's
+    ``evidence``, a field reference becomes its dotted path."""
 
     def __init__(self) -> None:
         self.id_paths: dict[str, LeafPath] = {}
+        self.chunks: dict[str, dict[str, Any]] = {}
         self.with_inputs: list[dict[str, Any]] = []
+
+    def record_chunks(self, container: etree._Element) -> None:
+        """Collect the evidence chunks: ``dg:chunk``\s some ``dg:inputs``
+        under *container* names. Structural chunks of a document tree are
+        not evidence and stay where they are."""
+        referenced = {
+            ref.xml_id
+            for el in container.iter()
+            if isinstance(el.tag, str)
+            for token in effective_inputs(el)
+            if (ref := parse_ref(token)) is not None and ref.local
+        }
+        for chunk in container.iter(CHUNK_TAG):
+            xml_id = chunk.get(f"{{{XML_NS}}}id")
+            if chunk is container or xml_id not in referenced:
+                continue
+            self.chunks[xml_id] = {
+                "text": (chunk.text or "").strip(),
+                "locations": _locations_from_origin(chunk.get(f"{{{DG_NS}}}origin")),
+            }
 
     def record(self, el: etree._Element, path: LeafPath) -> None:
         xml_id = el.get(f"{{{XML_NS}}}id")
@@ -840,12 +908,22 @@ class _ParseAcc:
 
     def resolve(self) -> None:
         for leaf in self.with_inputs:
-            leaf["inputs"] = [
-                path_to_str(self.id_paths[raw[1:]])
-                if raw.startswith("#") and raw[1:] in self.id_paths
-                else raw
-                for raw in leaf["inputs"]
-            ]
+            inputs: list[str] = []
+            evidence: list[dict[str, Any]] = []
+            for raw in leaf["inputs"]:
+                local = raw[1:] if raw.startswith("#") else None
+                if local is not None and local in self.chunks:
+                    evidence.append(dict(self.chunks[local]))
+                elif local is not None and local in self.id_paths:
+                    inputs.append(path_to_str(self.id_paths[local]))
+                else:
+                    inputs.append(raw)
+            if inputs:
+                leaf["inputs"] = inputs
+            else:
+                del leaf["inputs"]
+            if evidence:
+                leaf["evidence"] = evidence
 
 
 def _leaf_value(
@@ -893,7 +971,7 @@ def _element_to_value_vocab(
         if acc is not None:
             acc.record(el, path)
         item_name = (tag.item.name if tag.item else None) or tag.item_name or tag.name
-        items = [c for c in el if isinstance(c.tag, str) and _local_name(c) == item_name]
+        items = [c for c in _value_children(el, acc) if _local_name(c) == item_name]
         if tag.item is not None and tag.item.kind == "field":
             return [_leaf_value(c, path + (i,), acc) for i, c in enumerate(items)]
         return [
@@ -908,7 +986,7 @@ def _container_to_value(
 ) -> dict[str, Any]:
     if acc is not None:
         acc.record(el, path)
-    by_name = {_local_name(c): c for c in el if isinstance(c.tag, str)}
+    by_name = {_local_name(c): c for c in _value_children(el, acc)}
     out: dict[str, Any] = {}
     for child in children:
         match = by_name.get(child.name)
@@ -917,8 +995,20 @@ def _container_to_value(
     return out
 
 
+def _value_children(el: etree._Element, acc: _ParseAcc | None) -> list[etree._Element]:
+    """*el*'s element children, minus the evidence ``dg:chunk``\s, which
+    belong to the field that names them in ``dg:inputs``, not the tree."""
+    chunks = acc.chunks if acc is not None else {}
+    return [
+        c
+        for c in el
+        if isinstance(c.tag, str)
+        and not (c.tag == CHUNK_TAG and c.get(f"{{{XML_NS}}}id") in chunks)
+    ]
+
+
 def _element_to_value(el: etree._Element, path: LeafPath = (), acc: _ParseAcc | None = None) -> Any:
-    children = [c for c in el if isinstance(c.tag, str)]
+    children = _value_children(el, acc)
     if not children:
         return _leaf_value(el, path, acc)
     if acc is not None:
@@ -968,11 +1058,10 @@ def dgml_xml_to_values(xml: str, *, vocab: Vocabulary | None = None) -> dict[str
     container = next((c for c in root if c.tag == EXTRACTION_TAG), root)
     out: dict[str, Any] = {}
     acc = _ParseAcc()
+    acc.record_chunks(container)
     if vocab is not None:
         by_name = {t.name: t for t in vocab.roots}
-        for child in container:
-            if not isinstance(child.tag, str):
-                continue
+        for child in _value_children(container, acc):
             name = _local_name(child)
             tag = by_name.get(name)
             out[name] = (
@@ -982,9 +1071,7 @@ def dgml_xml_to_values(xml: str, *, vocab: Vocabulary | None = None) -> dict[str
             )
         acc.resolve()
         return out
-    for child in container:
-        if not isinstance(child.tag, str):
-            continue
+    for child in _value_children(container, acc):
         name = _local_name(child)
         out[name] = _element_to_value(child, (name,), acc)
     acc.resolve()

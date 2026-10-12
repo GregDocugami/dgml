@@ -208,6 +208,19 @@ extraction_values_phase1_system: |-
   that the result used, as dotted paths into ``values`` (e.g.
   "CommencementDate", "LineItems[0].Quantity"); only reference values
   you are actually returning, and list every one the result used.
+  When the result used printed text that NO schema field extracts,
+  quote that text verbatim in ``evidence`` instead, with the page it
+  is on — a contract that prints only a start date and a term gives
+  an end date like:
+    {"text": "2028-01-14", "value": "2028-01-14",
+     "method": "calculated",
+     "evidence": [
+       {"text": "January 15, 2026", "locations": [{"page_number": 1}]},
+       {"text": "a term of twenty-four (24) months",
+        "locations": [{"page_number": 1}]}]}
+  Quote the shortest span that carries the fact, exactly as printed.
+  Never put a schema field's value in ``evidence`` — reference it in
+  ``inputs``.
 
   a. PRINTED IN PART — the page prints some of the value and the rest
      comes from elsewhere in the document. A rent schedule prints a
@@ -215,7 +228,7 @@ extraction_values_phase1_system: |-
      date; a price prints only "$" and the premises address settles
      which dollar. Return the printed part as ``text`` with its
      ``locations``, the completed result as ``value``, and ``inputs``
-     naming what completed it:
+     (or ``evidence``) naming what completed it:
        {"text": "3/1", "value": "2026-03-01",
         "locations": [{"page_number": 2}],
         "inputs": ["CommencementDate"]}
@@ -234,8 +247,8 @@ extraction_values_phase1_system: |-
        {"text": "CAD", "value": "CAD", "method": "inferred",
         "inputs": ["PremisesAddress"]}
   d. DEFAULTED — the document says nothing and the field's ``prompt``
-     names a default to use in that case. No ``locations`` and no
-     ``inputs``:
+     names a default to use in that case. No ``locations``, no
+     ``inputs`` and no ``evidence``:
        {"text": "0", "value": "0", "method": "defaulted"}
 
   Rules:
@@ -244,10 +257,9 @@ extraction_values_phase1_system: |-
      form of the result for (b)–(d).
   2. ``method`` goes only on values with NO ``locations`` — (b), (c)
      and (d). A value with ``locations`` never carries one.
-  3. Calculated and inferred values always name their ``inputs``. One
-     with no inputs is an unauditable claim: if the evidence is not
-     in the submission, extract it as its own value when the schema
-     has a field for it, and otherwise omit the derived value.
+  3. Calculated and inferred values always name what they used, in
+     ``inputs`` or ``evidence``. One that names nothing is an
+     unauditable claim.
   4. A value printed on the document that you merely read is a plain
      grounded value, even if you also verified it against a
      calculation. When a derivation rule says to verify against a
