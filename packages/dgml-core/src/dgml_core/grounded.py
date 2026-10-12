@@ -90,6 +90,7 @@ from .extraction_xml import (
     check_invariants,
     count_dropped_inputs,
     count_unnormalized_enum_values,
+    count_unsupported_claims,
     embed_extraction_into,
     has_document_tree,
     standalone_extraction_doc,
@@ -966,6 +967,7 @@ def extract_values(
     unprinted_fields = 0
     partly_printed_fields = 0
     dropped_inputs = 0
+    unsupported_values = 0
     unnormalized_enums = 0
     derivations_checked = 0
     derivations_mismatched = 0
@@ -1140,14 +1142,18 @@ def extract_values(
         # The merged extracted_value leaf shape lets a sloppy model blur the
         # printed/unprinted boundary; normalize before phases 2/3 (and the
         # serializer) so their invariants hold regardless.
-        _normalize_leaf_provenance(phase1_values)
+        demoted_claims = _normalize_leaf_provenance(phase1_values)
+        unsupported_values = demoted_claims
         # Unprinted leaves (calculated, inferred, defaulted) carry no
         # locations — phases 2 and 3 never see them; counted here so the
         # stats file can attest they were deliberate, not dropped. Partly
         # printed leaves are grounded as usual and also name their inputs.
-        # dropped_inputs (counted after grounding, below) is inputs that
-        # won't resolve to a dg:inputs target — incomplete provenance that
-        # would otherwise vanish silently at serialization.
+        # dropped_inputs is inputs that won't resolve to a dg:inputs target —
+        # incomplete provenance that would otherwise vanish silently at
+        # serialization. Counted for paths now, so a later phase failing
+        # still leaves it in the stats, and again after grounding to add the
+        # evidence that never got a box.
+        dropped_inputs = count_dropped_inputs(phase1_values, evidence=False)
         unprinted_fields = sum(1 for _ in walk_unprinted_leaves(phase1_values))
         partly_printed_fields = sum(
             1 for _, leaf in walk_input_leaves(phase1_values) if "locations" in leaf
@@ -1200,8 +1206,10 @@ def extract_values(
         unmatched_count = phase2_result.stats.unmatched_locations - phase3_matched
         phase3_duration = round(time.monotonic() - phase3_started, 3)
         # After grounding, so evidence that never got a box (and so emits no
-        # dg:chunk) counts as dropped too.
+        # dg:chunk) counts as dropped too — and a calculated or inferred value
+        # left with nothing it used is an unsupported claim.
         dropped_inputs = count_dropped_inputs(final_values)
+        unsupported_values = demoted_claims + count_unsupported_claims(final_values)
 
         # Extracted values live as a dg:extraction element in the file's core
         # <stem>.dgml.xml (spec §13): added as a sibling of an existing document
@@ -1305,6 +1313,7 @@ def extract_values(
                     unprinted_fields=unprinted_fields,
                     partly_printed_fields=partly_printed_fields,
                     dropped_inputs=dropped_inputs,
+                    unsupported_values=unsupported_values,
                     unnormalized_enums=unnormalized_enums,
                     derivations_checked=derivations_checked,
                     derivations_mismatched=derivations_mismatched,
@@ -1376,6 +1385,7 @@ def _write_extraction_stats(
     unprinted_fields: int,
     partly_printed_fields: int,
     dropped_inputs: int,
+    unsupported_values: int,
     unnormalized_enums: int,
     derivations_checked: int,
     derivations_mismatched: int,
@@ -1447,6 +1457,10 @@ def _write_extraction_stats(
             "unprinted_fields": unprinted_fields,
             "partly_printed_fields": partly_printed_fields,
             "dropped_inputs": dropped_inputs,
+            # Values claimed as calculated/inferred that named nothing they
+            # used (or whose inputs all dropped): written with no dg:method,
+            # so the XML can't tell them from a value grounding missed.
+            "unsupported_values": unsupported_values,
             "unnormalized_enum_values": unnormalized_enums,
             "derivations_checked": derivations_checked,
             "derivations_mismatched": derivations_mismatched,
@@ -2852,8 +2866,12 @@ def _normalized_evidence(raw: Any) -> list[dict[str, Any]]:
     return out
 
 
-def _normalize_leaf_provenance(values: Any) -> None:
+def _normalize_leaf_provenance(values: Any) -> int:
     """Enforce the DGML 0.71 provenance invariants on phase-1 leaves, in place.
+
+    Returns the number of unsupported claims it demoted: values the model
+    marked as calculated or inferred (or 0.7 ``computed``) without naming
+    anything they used.
 
     The merged ``extracted_value`` leaf shape lets a sloppy model return
     combinations the format can't express. Phases 2/3 and the XML serializer
@@ -2872,22 +2890,21 @@ def _normalize_leaf_provenance(values: Any) -> None:
       ``defaulted`` one loses its ``inputs`` and ``evidence``; one with
       either and no method is ``inferred`` (the safe reading);
       ``calculated``/``inferred`` with neither lose the method, leaving an
-      unsupported value the consistency check reports;
+      unsupported value (counted in the return value, and so in
+      ``extraction_stats.json``'s ``unsupported_values``);
     * an empty-string ``value`` is removed.
     """
     if isinstance(values, list):
-        for entry in values:
-            _normalize_leaf_provenance(entry)
-        return
+        return sum(_normalize_leaf_provenance(entry) for entry in values)
     if not isinstance(values, dict):
-        return
+        return 0
     if isinstance(values.get("text"), str):
         # A leaf (only leaves carry a lowercase "text" key — tag names are
         # PascalCase). Normalize in place; never descend further.
         if values.get("value") == "":
             del values["value"]
         legacy_refs = values.pop("derived_from", None)
-        values.pop("computed", None)
+        claimed = bool(values.pop("computed", None))
         refs = values.get("inputs", legacy_refs)
         inputs = (
             [r for r in refs if isinstance(r, str) and r.strip()] if isinstance(refs, list) else []
@@ -2909,26 +2926,28 @@ def _normalize_leaf_provenance(values: Any) -> None:
         )
         if grounded:
             values.pop("method", None)
-            return
+            return 0
         values.pop("locations", None)
         method = values.get("method")
         used = bool(inputs or evidence)
         if method == METHOD_DEFAULTED:
             values.pop("inputs", None)
             values.pop("evidence", None)
-        elif used and method is None:
+            return 0
+        if used and method is None:
             values["method"] = METHOD_INFERRED
         elif not used and method is not None:
             del values["method"]
-        return
-    for child in values.values():
-        _normalize_leaf_provenance(child)
+            return 1
+        return 1 if claimed and not used else 0
+    return sum(_normalize_leaf_provenance(child) for child in values.values())
 
 
 def _drop_bboxes_from_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of the schema with ``bounding_box`` stripped from the
     leaf definition's ``locations[]`` (``extracted_value``, plus the legacy
-    ``grounded_field`` for older exported schemas).
+    ``grounded_field`` for older exported schemas) and from the
+    ``locations[]`` of its ``evidence`` items.
 
     Phase-1 extraction shows the model this slimmer shape so it focuses
     on getting the text and page numbers right without the bbox burden.
@@ -2942,15 +2961,26 @@ def _drop_bboxes_from_schema(schema: dict[str, Any]) -> dict[str, Any]:
         leaf_def = defs.get(def_name)
         if not isinstance(leaf_def, dict):
             continue
-        locs = leaf_def.get("properties", {}).get("locations", {})
-        items = locs.get("items", {})
-        props = items.get("properties")
-        if isinstance(props, dict) and "bounding_box" in props:
-            del props["bounding_box"]
-        required = items.get("required")
-        if isinstance(required, list):
-            items["required"] = [r for r in required if r != "bounding_box"]
+        props = leaf_def.get("properties", {})
+        _drop_bbox_from_locations(props.get("locations"))
+        evidence = props.get("evidence")
+        if isinstance(evidence, dict):
+            item_props = evidence.get("items", {}).get("properties", {})
+            _drop_bbox_from_locations(item_props.get("locations"))
     return out
+
+
+def _drop_bbox_from_locations(locs: Any) -> None:
+    """Strip ``bounding_box`` from a ``locations`` array schema, in place."""
+    if not isinstance(locs, dict):
+        return
+    items = locs.get("items", {})
+    props = items.get("properties")
+    if isinstance(props, dict) and "bounding_box" in props:
+        del props["bounding_box"]
+    required = items.get("required")
+    if isinstance(required, list):
+        items["required"] = [r for r in required if r != "bounding_box"]
 
 
 def _values_phase1_user_prompt(schema: dict[str, Any], guidance: str | None = None) -> str:

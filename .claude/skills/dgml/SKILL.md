@@ -705,9 +705,10 @@ text a value used that no schema field extracts comes back as `evidence`
 field. When writing a derivation `## Prompt:`, prefer making every input it
 mentions an extracted field of its own. Unresolvable inputs, and evidence
 that couldn't be boxed, are counted as `matching.dropped_inputs` in
-`extraction_stats.json`. `dgml check` flags extracted values with no origin,
-inputs or method as `value_unsupported`, and also reports `method_misplaced`,
-`inputs_dangling` and `inputs_cycle`. 0.7 files (`dg:origin="computed"` +
+`extraction_stats.json`, and calculated or inferred values that named nothing
+as `matching.unsupported_values`. `dgml check` reports `method_misplaced`,
+`inputs_dangling` and `inputs_cycle`, and `value_unsupported` for a 0.7
+computed element with no `dg:href`. 0.7 files (`dg:origin="computed"` +
 `dg:href`) still read, with the href targets as inputs. Errors are the
 usual envelope: `SCHEMA_NOT_FOUND` (no schema set), `GUIDANCE_NOT_FOUND`
 (no guidance set), `NO_FILES` (empty docset, no `--from-file`),

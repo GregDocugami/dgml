@@ -265,9 +265,10 @@ def walk_evidence(
 
 def walk_all_leaves(values: Any, path: LeafPath = ()) -> Iterable[tuple[LeafPath, dict[str, Any]]]:
     """Yield ``(path, leaf)`` for every leaf, grounded or not. Leaves are
-    recognized by their lowercase ``text`` key (tag names are PascalCase)."""
+    recognized by their lowercase ``text`` key (tag names are PascalCase),
+    as :func:`_walk_leaves` does."""
     if isinstance(values, dict):
-        if isinstance(values.get("text"), str):
+        if "text" in values:
             yield path, values
             return
         for k, v in values.items():

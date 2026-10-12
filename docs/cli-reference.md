@@ -444,7 +444,7 @@ Walk the workspace and report inconsistencies. Issue kinds emitted today:
 | `text_extraction_failed` | file | pdfminer.six failed to extract any words (records a permanent error so future checks skip retry) |
 | `text_extraction_failed_permanent` | file | A previous extraction recorded a permanent failure; not retried without `--retry-errors` |
 | `dangling_file_reference` | docset | DocSet references a File ID that doesn't exist |
-| `value_unsupported` | docset | An extracted value in a file's DGML XML has no `dg:origin`, no `dg:inputs` and no `dg:method` — nothing a verifier can check (DGML 0.71). Replaces `computed_field_unattributed`; a 0.7 `dg:origin="computed"` element with no `dg:href` is reported here |
+| `value_unsupported` | docset | A 0.7 `dg:origin="computed"` element in a file's DGML XML has no `dg:href` sources, so it claims a derivation and names nothing a verifier can check. This replaces `computed_field_unattributed`. A 0.71 value with no `dg:origin`, `dg:inputs` or `dg:method` isn't flagged, because the XML can't tell it apart from a printed value grounding couldn't box; extraction counts those as `unsupported_values` in `extraction_stats.json` |
 | `method_misplaced` | docset | A `dg:method` that contradicts the element: on an element with `dg:origin`, an unknown method, `defaulted` with `dg:inputs`, or `calculated`/`inferred` without them |
 | `inputs_dangling` | docset | A `dg:inputs` target (`#id`) names an `xml:id` no element in the file carries. Cross-file (`fileid#id`) inputs are not checked |
 | `inputs_cycle` | docset | An element is its own input, directly or through other inputs |
@@ -1403,7 +1403,7 @@ That gives four cases:
 | | No inputs | Has inputs |
 | --- | --- | --- |
 | **Has `locations`** | Read from its printed text ("$4,200.00" → `4200.00`) | Printed in part, completed from the inputs ("3/1" + the commencement year) |
-| **No `locations`** | `method: "defaulted"`: the field's stated default. Without a method: unsupported (`dgml check` reports `value_unsupported`) | `method: "calculated"` (recomputable) or `"inferred"` (a judgment). Without a method: read as `inferred` |
+| **No `locations`** | `method: "defaulted"`: the field's stated default. Without a method: unsupported (extraction counts it in `matching.unsupported_values`) | `method: "calculated"` (recomputable) or `"inferred"` (a judgment). Without a method: read as `inferred` |
 
 A value printed in part keeps its boxes **and** names its inputs, so one
 element holds the whole fact:
@@ -1466,7 +1466,8 @@ recorded as `evidence` text. An `inputs` entry that doesn't resolve is
 dropped from `dg:inputs`, and so is `evidence` that phases 2/3 couldn't box.
 Both are counted in `extraction_stats.json` under `matching.dropped_inputs`
 (written under `--debug`). A calculated or inferred value left with nothing
-loses its method and is flagged by `dgml check` as `value_unsupported`.
+loses its method, since both require inputs, and is counted under
+`matching.unsupported_values`.
 
 Extraction asks each model for its own maximum output (128K on current
 frontier Claude/Gemini, 64K on Haiku 4.5 — read from the provider's model
@@ -1579,7 +1580,8 @@ resolve are recomputed; a leaf mismatches when its value agrees with neither
 the sum, the count, nor any single input within $0.05; `inferred` values and
 values calculated from `evidence` text are not recomputed). It also counts
 `unprinted_fields` (values with no `locations`), `partly_printed_fields`
-(`locations` plus `inputs`) and `dropped_inputs`. These replace 0.7's
+(`locations` plus `inputs`), `dropped_inputs` and `unsupported_values`
+(calculated or inferred values that named nothing they used). These replace 0.7's
 `computed_fields` and `dropped_refs`. The top-level
 `phase1_tool_schema` field records whether the docset schema rode inside the
 `submit_values` tool parameter (`"inlined"`, provider-enforced shape) or

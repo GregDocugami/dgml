@@ -743,10 +743,6 @@ def _check_dgml_xml(ws: Workspace, *, docset_id: str, file_id: str, report: Chec
     Malformed XML is skipped throughout: XML validity is owned by the
     generation/extraction writers, not this check.
     """
-    # Every workspace file is a PDF with rendered pages, so a value with no
-    # dg:origin is never source data here. (In a born-digital document it
-    # would be: provenance_issues takes has_pages=False for that case.)
-    has_pages = True
     for key in sorted(ws.blobs.list_blobs(layout.docset_pair_prefix(docset_id, file_id))):
         if not key.endswith(".dgml.xml"):
             continue
@@ -760,27 +756,25 @@ def _check_dgml_xml(ws: Workspace, *, docset_id: str, file_id: str, report: Chec
             docset_id=docset_id,
             file_id=file_id,
             name=name,
-            has_pages=has_pages,
             report=report,
         )
         _check_semantic_links(xml, docset_id=docset_id, file_id=file_id, name=name, report=report)
 
 
 def _check_provenance(
-    xml: bytes, *, docset_id: str, file_id: str, name: str, has_pages: bool, report: CheckReport
+    xml: bytes, *, docset_id: str, file_id: str, name: str, report: CheckReport
 ) -> None:
-    """Flag values whose provenance a verifier can't follow (DGML 0.71).
-
-    A value is checkable through its ``dg:origin`` boxes, its ``dg:inputs``,
-    or a ``dg:method`` saying it was defaulted. An extracted value with none
-    of them is an unsupported claim — usually the model derived it from
-    document content the schema never extracted. ``dg:method`` placement,
-    dangling inputs and input cycles are reported too. See
+    """Flag provenance a verifier can't follow (DGML 0.71): ``dg:method``
+    that contradicts the element, ``dg:inputs`` that dangle or loop, and 0.7
+    computed elements that name no sources. A bare value (no boxes, inputs
+    or method) is not flagged here — in the XML it looks the same as one
+    grounding couldn't box; extraction counts the unsupported ones in
+    ``extraction_stats.json``. See
     :func:`dgml_core.extraction_xml.provenance_issues`."""
     from .extraction_xml import provenance_issues
 
     try:
-        found = provenance_issues(xml, has_pages=has_pages)
+        found = provenance_issues(xml)
     except Exception:
         return
     by_kind: dict[str, list[str]] = {}
@@ -799,7 +793,7 @@ def _check_provenance(
 
 
 _PROVENANCE_MESSAGES = {
-    "value_unsupported": "value(s) with no dg:origin, dg:inputs or dg:method",
+    "value_unsupported": 'value(s) with dg:origin="computed" that name no sources',
     "method_misplaced": "dg:method that contradicts the element's other attributes",
     "inputs_dangling": "dg:inputs target(s) with no element",
     "inputs_cycle": "element(s) that are their own input",

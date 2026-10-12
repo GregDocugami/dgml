@@ -65,12 +65,14 @@ from .dg_refs import (
     METHOD_ATTR,
     METHOD_CALCULATED,
     METHOD_DEFAULTED,
+    METHOD_INFERRED,
     METHODS,
-    VALUE_ATTR,
+    ORIGIN_ATTR,
     effective_inputs,
     effective_method,
     effective_origin,
     format_refs,
+    is_legacy_computed,
     parse_ref,
 )
 from .extraction_schema import Tag, Vocabulary, parse_invariant, resolve_invariant_path
@@ -81,6 +83,7 @@ from .matching import (
     is_unprinted_leaf,
     parse_path,
     path_to_str,
+    walk_all_leaves,
     walk_input_leaves,
 )
 
@@ -177,21 +180,24 @@ def _collect_ref_ids(values: dict[str, Any]) -> dict[LeafPath, str]:
     return ids
 
 
-def count_dropped_inputs(values: dict[str, Any]) -> int:
+def count_dropped_inputs(values: dict[str, Any], *, evidence: bool = True) -> int:
     """Number of ``inputs`` entries across all leaves that will NOT emit a
     ``dg:inputs`` target — malformed path, non-string entry, or a path that
     dangles in *values* — plus ``evidence`` items with no bounding box, which
     emit no ``dg:chunk``. Mirrors the drop logic in
     :func:`_collect_ref_ids`/:func:`_resolved_inputs`/:func:`_add_evidence`;
     surfaced in ``extraction_stats.json`` so incomplete provenance is visible
-    instead of silently shrinking the inputs list."""
+    instead of silently shrinking the inputs list.
+
+    ``evidence=False`` skips the evidence items: before phases 2/3 none has a
+    box yet."""
     dropped = 0
     for _path, leaf in walk_input_leaves(values):
-        evidence = leaf.get("evidence")
-        if isinstance(evidence, list):
+        items = leaf.get("evidence") if evidence else None
+        if isinstance(items, list):
             dropped += sum(
                 1
-                for item in evidence
+                for item in items
                 if not isinstance(item, dict)
                 or _origin_from_locations(item.get("locations")) is None
             )
@@ -206,6 +212,33 @@ def count_dropped_inputs(values: dict[str, Any]) -> int:
             if path is None or get_at_path(values, path) is None:
                 dropped += 1
     return dropped
+
+
+def count_unsupported_claims(values: dict[str, Any]) -> int:
+    """Number of calculated/inferred leaves that will be written with nothing
+    they used: every ``inputs`` path dangles and no ``evidence`` item has a
+    box. The serializer drops their ``dg:method`` (both require inputs), which
+    leaves a bare value the XML alone can't tell from a grounding miss — so
+    extraction, which can tell, counts them."""
+    count = 0
+    for _path, leaf in walk_all_leaves(values):
+        if "locations" in leaf or leaf.get("method") not in (METHOD_CALCULATED, METHOD_INFERRED):
+            continue
+        refs = leaf.get("inputs")
+        resolvable = isinstance(refs, list) and any(
+            isinstance(raw, str)
+            and (path := parse_path(raw)) is not None
+            and get_at_path(values, path) is not None
+            for raw in refs
+        )
+        items = leaf.get("evidence")
+        boxed = isinstance(items, list) and any(
+            isinstance(item, dict) and _origin_from_locations(item.get("locations")) is not None
+            for item in items
+        )
+        if not resolvable and not boxed:
+            count += 1
+    return count
 
 
 _DERIVATION_TOLERANCE = Decimal("0.05")
@@ -416,17 +449,18 @@ def count_unnormalized_enum_values(values: dict[str, Any], vocab: Vocabulary) ->
     return count
 
 
-def provenance_issues(xml: str | bytes, *, has_pages: bool = True) -> list[tuple[str, str, str]]:
+def provenance_issues(xml: str | bytes) -> list[tuple[str, str, str]]:
     """Check every ``dg:value`` element's provenance against DGML 0.71.
 
     Returns ``(kind, local_name, detail)`` triples, used by the workspace
     consistency check:
 
-    * ``value_unsupported`` — an extracted value (inside ``dg:extraction``)
-      with no boxes, no inputs and no method: nothing a verifier can check.
-      Only for files with page images (*has_pages*); in a born-digital
-      document such a value is source data. Document-tree elements are not
-      held to this: grounding them is best-effort.
+    * ``value_unsupported`` — a 0.7 ``dg:origin="computed"`` element with no
+      ``dg:href``: a value that claims to be derived and names nothing it
+      used. (In 0.71 a bare value — no boxes, inputs or method — is
+      indistinguishable from one grounding couldn't box, so the XML alone
+      can't call it unsupported; extraction counts those itself, as
+      ``unsupported_values`` in ``extraction_stats.json``.)
     * ``method_misplaced`` — ``dg:method`` on a boxed element, an unknown
       method, ``defaulted`` with inputs, or ``calculated``/``inferred``
       without them.
@@ -442,9 +476,6 @@ def provenance_issues(xml: str | bytes, *, has_pages: bool = True) -> list[tuple
     root = etree.fromstring(xml.encode("utf-8") if isinstance(xml, str) else xml)
     elements = [el for el in root.iter() if isinstance(el.tag, str)]
     by_id = {xid: el for el in elements if (xid := el.get(f"{{{XML_NS}}}id"))}
-    extracted = {
-        id(el) for ext in root.iter(EXTRACTION_TAG) for el in ext.iter() if isinstance(el.tag, str)
-    }
     out: list[tuple[str, str, str]] = []
     edges: dict[str, list[str]] = {}
     for el in elements:
@@ -461,15 +492,8 @@ def provenance_issues(xml: str | bytes, *, has_pages: bool = True) -> list[tuple
                 out.append(("method_misplaced", name, "defaulted value with dg:inputs"))
             elif method != METHOD_DEFAULTED and not tokens:
                 out.append(("method_misplaced", name, f"{method} value with no dg:inputs"))
-        if (
-            has_pages
-            and id(el) in extracted
-            and el.get(VALUE_ATTR) is not None
-            and not boxed
-            and not tokens
-            and method is None
-        ):
-            out.append(("value_unsupported", name, "no dg:origin, dg:inputs or dg:method"))
+        if is_legacy_computed(el) and not tokens:
+            out.append(("value_unsupported", name, 'dg:origin="computed" with no dg:href'))
         local: list[str] = []
         for token in tokens:
             ref = parse_ref(token)
@@ -553,7 +577,7 @@ def _add_evidence(parent: etree._Element, value: dict[str, Any], path: LeafPath)
         chunk_id = f"{base}--in-{len(refs)}"
         chunk = etree.SubElement(parent, CHUNK_TAG)
         chunk.set(f"{{{XML_NS}}}id", chunk_id)
-        chunk.set(f"{{{DG_NS}}}origin", origin)
+        chunk.set(ORIGIN_ATTR, origin)
         chunk.text = str(item.get("text", ""))
         refs.append(f"#{chunk_id}")
     return refs
@@ -882,7 +906,7 @@ class _ParseAcc:
         self.with_inputs: list[dict[str, Any]] = []
 
     def record_chunks(self, container: etree._Element) -> None:
-        """Collect the evidence chunks: ``dg:chunk``\s some ``dg:inputs``
+        """Collect the evidence chunks: ``dg:chunk``\\s some ``dg:inputs``
         under *container* names. Structural chunks of a document tree are
         not evidence and stay where they are."""
         referenced = {
@@ -898,7 +922,7 @@ class _ParseAcc:
                 continue
             self.chunks[xml_id] = {
                 "text": (chunk.text or "").strip(),
-                "locations": _locations_from_origin(chunk.get(f"{{{DG_NS}}}origin")),
+                "locations": _locations_from_origin(chunk.get(ORIGIN_ATTR)),
             }
 
     def record(self, el: etree._Element, path: LeafPath) -> None:
@@ -996,7 +1020,7 @@ def _container_to_value(
 
 
 def _value_children(el: etree._Element, acc: _ParseAcc | None) -> list[etree._Element]:
-    """*el*'s element children, minus the evidence ``dg:chunk``\s, which
+    """*el*'s element children, minus the evidence ``dg:chunk``\\s, which
     belong to the field that names them in ``dg:inputs``, not the tree."""
     chunks = acc.chunks if acc is not None else {}
     return [

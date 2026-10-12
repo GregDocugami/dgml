@@ -34,7 +34,7 @@ from dgml_core.errors import (
     ValuesExtractionFailed,
     append_recorded_error,
 )
-from dgml_core.extraction_schema import parse_rnc
+from dgml_core.extraction_schema import EXTRACTED_VALUE, parse_rnc
 from dgml_core.extraction_xml import dgml_xml_to_values
 from dgml_core.files import FileStore
 from dgml_core.grounded import (
@@ -42,6 +42,7 @@ from dgml_core.grounded import (
     _SCHEMA_TREE_MAX_DEPTH,
     DEFAULT_MAX_TOOL_ITERS,
     GroundedConfig,
+    _drop_bboxes_from_schema,
     _empty_totals,
     _field_node_schema,
     _pdf_bytes,
@@ -1538,6 +1539,7 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
         "unprinted_fields": 0,
         "partly_printed_fields": 0,
         "dropped_inputs": 0,
+        "unsupported_values": 0,
         "unnormalized_enum_values": 0,
         "derivations_checked": 0,
         "derivations_mismatched": 0,
@@ -2298,6 +2300,17 @@ def test_expand_refs_chained_definitions() -> None:
     assert expanded["properties"]["a"]["properties"]["v"] == {"type": "string"}
 
 
+def test_phase1_schema_strips_bbox_from_evidence_locations() -> None:
+    """Evidence items are grounded by phases 2/3 like any leaf, so phase 1
+    must not demand their bounding boxes either, even when the schema has
+    been through JSON (no shared ``locations`` object left to alias)."""
+    schema = json.loads(json.dumps({"definitions": {"extracted_value": EXTRACTED_VALUE}}))
+    leaf = _drop_bboxes_from_schema(schema)["definitions"]["extracted_value"]["properties"]
+    for locs in (leaf["locations"], leaf["evidence"]["items"]["properties"]["locations"]):
+        assert "bounding_box" not in locs["items"]["properties"]
+        assert locs["items"]["required"] == ["page_number"]
+
+
 def test_extract_values_phase1_submit_tool_strips_bbox(workspace: Workspace) -> None:
     """Phase 1's ``submit_values`` tool inlines the expanded docset schema
     with ``bounding_box`` stripped from ``extracted_value.locations`` — the
@@ -2435,6 +2448,7 @@ def test_extract_values_calculated_field_end_to_end(workspace: Workspace) -> Non
         "unprinted_fields": 1,
         "partly_printed_fields": 0,
         "dropped_inputs": 0,
+        "unsupported_values": 0,
         "unnormalized_enum_values": 0,
         "derivations_checked": 0,
         "derivations_mismatched": 0,
@@ -2614,7 +2628,7 @@ def test_normalize_leaf_provenance_enforces_method_rules() -> None:
         "Region": {"text": "EMEA", "method": "guessed", "inputs": ["Hq"]},
         "Kept": {"text": "12", "method": "calculated", "inputs": ["Start", "End"]},
     }
-    _normalize_leaf_provenance(values)
+    assert _normalize_leaf_provenance(values) == 1  # Months: a claim naming nothing
     assert values["Grace"] == {"text": "0", "method": "defaulted"}
     assert values["Months"] == {"text": "12"}
     assert values["Region"] == {"text": "EMEA", "inputs": ["Hq"], "method": "inferred"}

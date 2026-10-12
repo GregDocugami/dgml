@@ -17,6 +17,7 @@ from dgml_core.extraction_schema import Tag, Vocabulary, json_schema_to_rnc, par
 from dgml_core.extraction_xml import (
     carry_extraction_over,
     count_dropped_inputs,
+    count_unsupported_claims,
     dgml_xml_to_values,
     embed_extraction_into,
     has_extraction,
@@ -496,21 +497,36 @@ def test_count_dropped_inputs() -> None:
     assert count_dropped_inputs(values) == 3
 
 
-def test_provenance_issues_flags_unsupported_extracted_values() -> None:
-    """A value with inputs (or boxes) passes; one whose inputs all dangle is
-    written with neither, so it reads as unsupported."""
+def test_unsupported_claims_are_counted_not_flagged_in_xml() -> None:
+    """A calculated value whose inputs all dangle is written bare (no
+    dg:method — calculated requires inputs). In the XML that looks the same as
+    a printed value grounding couldn't box, so provenance_issues leaves it
+    alone and extraction counts it instead."""
     vocab = parse_rnc(_INVOICE_RNC)
-    xml = standalone_extraction_doc(_invoice_values(), vocab=vocab)
-    assert provenance_issues(xml) == []
-
     values = _invoice_values()
+    assert count_unsupported_claims(values) == 0
     invoice = values["Invoice"]
     assert isinstance(invoice, dict)
     invoice["InvoiceTotal"]["inputs"] = ["Invoice.Bogus"]  # all inputs dangle
+    assert count_unsupported_claims(values) == 1
     xml = standalone_extraction_doc(values, vocab=vocab)
-    assert [(k, t) for k, t, _ in provenance_issues(xml)] == [("value_unsupported", "InvoiceTotal")]
-    # In a born-digital document a value with no boxes is source data.
-    assert provenance_issues(xml, has_pages=False) == []
+    assert provenance_issues(xml) == []
+
+
+def test_boxing_miss_is_not_an_issue() -> None:
+    """A printed value phases 2/3 couldn't box keeps its dg:value with no
+    dg:origin. That is a grounding miss, not an unsupported claim."""
+    vocab = Vocabulary(
+        namespace_uri="http://www.dgml.io/acme/leases#",
+        roots=[Tag(name="StartDate", kind="field", value_type="date")],
+    )
+    values = {
+        "StartDate": {"text": "3/1/2026", "value": "2026-03-01", "locations": [{"page_number": 1}]}
+    }
+    xml = standalone_extraction_doc(values, vocab=vocab)
+    assert 'dg:value="2026-03-01"' in xml and "dg:origin" not in xml
+    assert provenance_issues(xml) == []
+    assert count_unsupported_claims(values) == 0
 
 
 def _ext(body: str) -> str:
