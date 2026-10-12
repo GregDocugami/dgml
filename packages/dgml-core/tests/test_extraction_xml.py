@@ -747,6 +747,15 @@ def test_citation_matches_the_normalized_value_too() -> None:
     assert _verify(["Items[0].Amount=12.75"]) == (["Items[0].Amount"], (0, 0))
 
 
+def test_numeric_citation_matches_by_value() -> None:
+    """A leading-zero or thousands-separator difference is the same number."""
+    values = _bill()
+    values["Items"][3]["Amount"] = {"text": "$0.45", "value": "0.45"}
+    values["Tax"]["inputs"] = ["Items[3].Amount=.45"]
+    assert verify_input_citations(values).dropped == 0
+    assert values["Tax"]["inputs"] == ["Items[3].Amount"]
+
+
 def test_miscounted_index_is_repaired_to_the_one_matching_sibling() -> None:
     assert _verify(["Items[2].Amount=$58.20"]) == (["Items[3].Amount"], (1, 0))
 

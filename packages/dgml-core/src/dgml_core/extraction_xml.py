@@ -270,18 +270,34 @@ def _cite_norm(text: Any) -> str:
     return _CITE_NORM_RE.sub("", str(text).lower())
 
 
+def _cite_number(norm: str) -> Decimal | None:
+    try:
+        return Decimal(norm)
+    except InvalidOperation:
+        return None
+
+
 def _cited_text_matches(node: Any, cited: str) -> bool:
     """True when leaf *node* reads as *cited*: its verbatim ``text`` or its
     normalized ``value`` equals the citation, ignoring case, spacing and
-    punctuation."""
+    punctuation — or, when both are numbers, has the same numeric value
+    (".45" cites "0.45", "1,234.50" cites "1234.5")."""
     if not _is_leaf(node):
         return False
     want = _cite_norm(cited)
     if not want:
         return False
-    return any(
-        _cite_norm(node.get(key)) == want for key in ("text", "value") if node.get(key) is not None
-    )
+    want_number = _cite_number(want)
+    for key in ("text", "value"):
+        if node.get(key) is None:
+            continue
+        have = _cite_norm(node[key])
+        if have == want:
+            return True
+        if want_number is not None and (have_number := _cite_number(have)) is not None:
+            if have_number == want_number:
+                return True
+    return False
 
 
 def _repair_index(values: dict[str, Any], path: LeafPath, cited: str) -> LeafPath | None:
