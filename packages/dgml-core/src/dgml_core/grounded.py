@@ -2855,16 +2855,21 @@ def _normalized_evidence(raw: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         text = item.get("text")
-        locations = item.get("locations")
-        if isinstance(item.get("page_number"), int) and not isinstance(locations, list):
-            locations = [{"page_number": item["page_number"]}]
-        if not isinstance(text, str) or not text.strip() or not isinstance(locations, list):
+        if not isinstance(text, str) or not text.strip():
             continue
-        pages = [
-            loc
-            for loc in locations
-            if isinstance(loc, dict) and isinstance(loc.get("page_number"), int)
-        ]
+        locations = item.get("locations")
+        pages = (
+            [
+                loc
+                for loc in locations
+                if isinstance(loc, dict) and isinstance(loc.get("page_number"), int)
+            ]
+            if isinstance(locations, list)
+            else []
+        )
+        if not pages and isinstance(item.get("page_number"), int):
+            # An empty or unusable ``locations`` must not hide the flat page.
+            pages = [{"page_number": item["page_number"]}]
         if pages:
             out.append({"text": text, "locations": pages})
     return out
@@ -2911,6 +2916,9 @@ def _normalize_leaf_provenance(values: Any) -> int:
         claimed = bool(values.pop("computed", None))
         # An empty/null ``inputs`` must not hide 0.7 ``derived_from`` paths.
         refs = values.get("inputs") or legacy_refs
+        if isinstance(refs, str):
+            # A lone path the model didn't wrap in a list.
+            refs = [refs]
         inputs = (
             [r for r in refs if isinstance(r, str) and r.strip()] if isinstance(refs, list) else []
         )

@@ -1403,7 +1403,7 @@ That gives four cases:
 | | No inputs | Has inputs |
 | --- | --- | --- |
 | **Has `locations`** | Read from its printed text ("$4,200.00" → `4200.00`) | Printed in part, completed from the inputs ("3/1" + the commencement year) |
-| **No `locations`** | `method: "defaulted"`: the field's stated default. Without a method: unsupported (extraction counts it in `matching.unsupported_values`) | `method: "calculated"` (recomputable) or `"inferred"` (a judgment). Without a method: read as `inferred` |
+| **No `locations`** | `method: "defaulted"`: the field's stated default. Without a method: unsupported (extraction counts it in `matching.unsupported_values` when the model claimed a method or 0.7 `computed` and named nothing) | `method: "calculated"` (recomputable) or `"inferred"` (a judgment). Without a method: read as `inferred` |
 
 A value printed in part keeps its boxes **and** names its inputs, so one
 element holds the whole fact:

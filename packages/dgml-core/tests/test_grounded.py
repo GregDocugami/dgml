@@ -2577,6 +2577,36 @@ def test_normalize_leaf_provenance_keeps_only_groundable_evidence() -> None:
     assert values["Grace"] == {"text": "0", "method": "defaulted"}
 
 
+def test_normalize_leaf_provenance_flat_page_survives_empty_locations() -> None:
+    from dgml_core.grounded import _normalize_leaf_provenance
+
+    values: dict[str, Any] = {
+        "End": {
+            "text": "2028-01-14",
+            "method": "calculated",
+            "evidence": [{"text": "a term of 24 months", "page_number": 2, "locations": []}],
+        },
+    }
+    assert _normalize_leaf_provenance(values) == 0
+    assert values["End"]["evidence"] == [
+        {"text": "a term of 24 months", "locations": [{"page_number": 2}]}
+    ]
+
+
+def test_normalize_leaf_provenance_wraps_a_lone_input_path() -> None:
+    from dgml_core.grounded import _normalize_leaf_provenance
+
+    values: dict[str, Any] = {
+        "Currency": {"text": "CAD", "method": "inferred", "inputs": "PremisesAddress"},
+    }
+    assert _normalize_leaf_provenance(values) == 0
+    assert values["Currency"] == {
+        "text": "CAD",
+        "method": "inferred",
+        "inputs": ["PremisesAddress"],
+    }
+
+
 # ── Merged-leaf provenance normalization & enum tool-schema specialization ───
 
 

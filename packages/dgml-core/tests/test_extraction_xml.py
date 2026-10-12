@@ -497,6 +497,24 @@ def test_count_dropped_inputs() -> None:
     assert count_dropped_inputs(values) == 3
 
 
+def test_inputs_into_a_leafs_own_keys_are_dropped() -> None:
+    """``Total.value`` or ``X.evidence[0]`` resolve in the values tree but name
+    no element, so they'd be stamped as a dg:inputs target no xml:id answers;
+    they are dropped (and counted) instead."""
+    vocab = parse_rnc(_INVOICE_RNC)
+    values = _invoice_values()
+    invoice = values["Invoice"]
+    assert isinstance(invoice, dict)
+    invoice["InvoiceTotal"]["inputs"] = [
+        "Invoice.LineItems[0].Quantity",  # resolves
+        "Invoice.LineItems[0].Quantity.value",  # inside a leaf
+        "Invoice.LineItems[0].Quantity.locations[0]",  # inside a leaf
+    ]
+    assert count_dropped_inputs(values) == 2
+    xml = standalone_extraction_doc(values, vocab=vocab)
+    assert provenance_issues(xml) == []
+
+
 def test_unsupported_claims_are_counted_not_flagged_in_xml() -> None:
     """A calculated value whose inputs all dangle is written bare (no
     dg:method — calculated requires inputs). In the XML that looks the same as

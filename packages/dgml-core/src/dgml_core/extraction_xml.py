@@ -179,14 +179,25 @@ def _collect_ref_ids(values: dict[str, Any]) -> dict[LeafPath, str]:
 
 def _resolvable_input(values: dict[str, Any], raw: Any) -> LeafPath | None:
     """The path an ``inputs`` entry names, when it will emit a ``dg:inputs``
-    target: a well-formed dotted path to something in *values*. ``None`` for
-    a non-string, malformed or dangling entry, which is dropped."""
+    target: a well-formed dotted path to a field, container or collection in
+    *values* — something the serializer emits as an element that can carry
+    the ``xml:id``. ``None`` for a non-string, malformed or dangling entry,
+    and for a path into a leaf's own keys (``Total.value``,
+    ``EndDate.evidence[0]``), which no element answers to; all are dropped."""
     if not isinstance(raw, str):
         return None
     path = parse_path(raw)
-    if path is None or get_at_path(values, path) is None:
+    if path is None or not isinstance(get_at_path(values, path), (dict, list)):
+        return None
+    if any(_is_leaf(get_at_path(values, path[:i])) for i in range(1, len(path))):
         return None
     return path
+
+
+def _is_leaf(node: Any) -> bool:
+    """True for a values-tree leaf (a dict with a ``text`` key — tag names are
+    PascalCase, so no field is called that)."""
+    return isinstance(node, dict) and "text" in node
 
 
 def _evidence_boxed(item: Any) -> bool:
@@ -594,9 +605,10 @@ def _set_unprinted_attrs(
     ``dg:origin`` — there is nothing printed to box.
 
     ``calculated``/``inferred`` require inputs: when none resolve, the method
-    is dropped and the element reads as an unsupported value, which the
-    consistency check reports rather than letting the claim stand.
-    ``defaulted`` never carries inputs."""
+    is dropped rather than letting the claim stand. The bare value left
+    behind looks, in the XML, like one grounding couldn't box, so the
+    consistency check can't flag it; extraction counts it instead
+    (:func:`count_unsupported_claims`). ``defaulted`` never carries inputs."""
 
     text_str = el.text or ""
     raw_value = value.get("value")

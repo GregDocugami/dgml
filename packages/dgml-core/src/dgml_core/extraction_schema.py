@@ -584,8 +584,8 @@ def _resolve_schema_dialect(schema: dict[str, Any]) -> dict[str, Any]:
     * local ``$defs``/``definitions`` ``$ref``\\s anywhere, resolved inline
       with sibling annotation keys merged over the target;
     * the **merged leaf shape** recognized structurally — an object whose
-      properties are a subset of ``{text, value, locations, inputs, method}``
-      (or the 0.7 ``derived_from``/``computed``) with ``text`` present
+      properties are a subset of ``{text, value, locations, inputs, evidence,
+      method}`` (or the 0.7 ``derived_from``/``computed``) with ``text`` present
       becomes an ``extracted_value`` leaf, its ``value`` subschema mapped
       to ``datatype``/``value_enum`` (``enum`` list, ``format: date``,
       ``type: integer/boolean/number``, or a plain-decimal ``pattern``);
