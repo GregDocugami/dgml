@@ -101,11 +101,12 @@ extraction_schema_user_body: |-
      adds the matching token as the normalized value. Don't force an
      enum onto open-ended values (names, ids, free text).
   5. A ``prompt`` phrased as a derivation — "Compute as ...", "Derive
-     from ...", "Count the number of ..." — makes the field a COMPUTED
-     field at extraction time: its value is reasoned from other
-     extracted fields instead of read off the page. Use that only for
-     genuine derivations, and make sure every input the rule mentions
-     is itself a field in the schema.
+     from ...", "Count the number of ...", "Take the year from ..." —
+     tells extraction how to produce a value the page doesn't print in
+     full: calculated or inferred from other extracted fields, or
+     completed from them when the page prints only part of it. Use that
+     only for genuine derivations, and make sure every input the rule
+     mentions is itself a field in the schema.
   6. Every ``name`` in the tree must be UNIQUE, at every level — a name is
      one schema definition shared by all its occurrences, not a label
      scoped to its parent. Two nodes may share a name only when they are
@@ -152,16 +153,15 @@ extraction_values_phase1_system: |-
      b. The token is your JUDGMENT about other content, with nothing on
         the page stating it — sorting a line item into a category from
         its printed name, or reading a document's type from how it is
-        laid out. Return the COMPUTED form instead — ``computed: true``
-        and ``derived_from`` citing the field(s) you judged from — with
-        no ``locations``. The page never printed the category; you
-        concluded it.
+        laid out. Return an INFERRED value instead — ``method:
+        "inferred"`` and ``inputs`` citing the field(s) you judged from
+        — with no ``locations``. The page never printed the category;
+        you concluded it.
 
      Never copy a sibling field's verbatim text into an enum leaf's
      ``text``. If your evidence for the classification IS that sibling
      (the line item's printed name, a section heading), that is case
-     (b): cite it in ``derived_from`` rather than duplicating its
-     text.
+     (b): cite it in ``inputs`` rather than duplicating its text.
   2. Typed fields — dates as ISO (YYYY-MM-DD), numbers as plain
      unformatted digits ("1234.50", not "$1,234.50").
   3. Free-text fields — omit ``value``; the verbatim ``text`` is the
@@ -201,38 +201,61 @@ extraction_values_phase1_system: |-
      the parts. If the schema instead breaks the signature into
      ``signatures[].name`` and ``signatures[].title``, the labels go.
 
-  COMPUTED (REASONED) FIELDS. Some schema fields carry a ``prompt``
-  that describes a derivation rule — "Compute as the sum of ...",
-  "Derive from ...", "Count the number of ..." — rather than a place on
-  the page. For those fields, return the computed form instead of a
-  grounded value:
+  VALUES THE PAGE DOESN'T PRINT IN FULL. Every value says where it
+  came from. Most are read straight off the page: ``text`` plus
+  ``locations``, nothing more. The others take one of four forms.
+  ``inputs`` always lists the OTHER values in this same submission
+  that the result used, as dotted paths into ``values`` (e.g.
+  "CommencementDate", "LineItems[0].Quantity"); only reference values
+  you are actually returning, and list every one the result used.
 
-    {"text": "<display form>", "value": "<canonical result>",
-     "computed": true, "derived_from": ["<dotted path>", ...]}
+  a. PRINTED IN PART — the page prints some of the value and the rest
+     comes from elsewhere in the document. A rent schedule prints a
+     period start as "3/1" and the year comes from the commencement
+     date; a price prints only "$" and the premises address settles
+     which dollar. Return the printed part as ``text`` with its
+     ``locations``, the completed result as ``value``, and ``inputs``
+     naming what completed it:
+       {"text": "3/1", "value": "2026-03-01",
+        "locations": [{"page_number": 2}],
+        "inputs": ["CommencementDate"]}
+     When the same text is printed several times (a "$" on every
+     amount), give a location for each.
+  b. CALCULATED — a deterministic calculation over other values that
+     anyone could redo: a sum, a count, date arithmetic. Typically the
+     field's ``prompt`` says "Compute as ...", "Count ...". No
+     ``locations``:
+       {"text": "$349.85", "value": "349.85", "method": "calculated",
+        "inputs": ["LineItems[0].Amount", "LineItems[1].Amount"]}
+  c. INFERRED — a value no spot on the page states, that you conclude
+     from evidence: a currency from the issuer's country, a category
+     from a line item's description. No ``locations``; ``inputs`` names
+     the evidence:
+       {"text": "CAD", "value": "CAD", "method": "inferred",
+        "inputs": ["PremisesAddress"]}
+  d. DEFAULTED — the document says nothing and the field's ``prompt``
+     names a default to use in that case. No ``locations`` and no
+     ``inputs``:
+       {"text": "0", "value": "0", "method": "defaulted"}
 
-  1. ``derived_from`` lists the OTHER values in this same submission
-     the result was derived from, as dotted paths into ``values``
-     (e.g. "LineItems[0].Quantity", "LineItems[1].UnitPrice"). Only
-     reference values you are actually returning; list every input the
-     derivation used.
-  2. ``value`` is the canonical machine-readable result (e.g.
-     "349.85"); ``text`` is the display form (e.g. "$349.85").
-  3. Computed values carry NO ``locations`` — they are not read off
-     the page.
-  4. Use the computed form ONLY when the field's ``prompt`` says to
-     derive, compute, or reason. A value printed on the document that
-     you merely read is a grounded value with ``locations``, even if
-     you also verified it against a calculation. When a derivation
-     rule says to verify against a printed value and the two disagree,
-     follow the rule and return the computed result.
-  5. INFERRED values are computed values too — a value no single spot
-     on the page states, that you conclude from evidence (a currency
-     inferred from the issuer's country, a count of the entries in a
-     list). Cite the extracted values that constitute the evidence in
-     ``derived_from`` (e.g. the currency's evidence is the issuer name
-     you extracted; a count's is each entry it counts).
-     A computed value with an empty ``derived_from`` is an unauditable
-     claim — always name your evidence when it is in the submission.
+  Rules:
+  1. ``value`` is the canonical machine-readable result (e.g.
+     "349.85"); ``text`` is the printed part for (a) and the display
+     form of the result for (b)–(d).
+  2. ``method`` goes only on values with NO ``locations`` — (b), (c)
+     and (d). A value with ``locations`` never carries one.
+  3. Calculated and inferred values always name their ``inputs``. One
+     with no inputs is an unauditable claim: if the evidence is not
+     in the submission, extract it as its own value when the schema
+     has a field for it, and otherwise omit the derived value.
+  4. A value printed on the document that you merely read is a plain
+     grounded value, even if you also verified it against a
+     calculation. When a derivation rule says to verify against a
+     printed value and the two disagree, follow the rule and return the
+     calculated result.
+  5. Never use ``defaulted`` to fill in a value you simply couldn't
+     find — omit the field instead. Defaults come only from the
+     field's ``prompt``.
 
   Submit final results via the ``submit_values`` tool call. Do not
   invent values; if a field is not present in the document, omit it
@@ -266,7 +289,7 @@ extraction_values_phase1_system: |-
   Use dotted notation for nested arrays (e.g. ``"company.contacts"``).
 
 extraction_values_phase1_user: |-
-  Extract values from the attached PDF against this JSON Schema. Each grounded leaf value carries the verbatim ``text``, the normalized ``value`` where one exists (the classifying enum token for fields with a ``value_enum`` list, ISO dates, plain numbers — omit when the text can't be normalized), and ``locations`` that need only carry the page_number (1-indexed); a later phase will add bounding boxes. Fields whose ``prompt`` describes a derivation rule take the computed form instead — ``text``, ``value``, ``computed: true``, ``derived_from`` — with no locations. If any array-of-objects in the schema is laid out as a table on the page, also return a ``layout`` descriptor naming the columns in visual left-to-right order. Submit results via the submit_values tool call when done.
+  Extract values from the attached PDF against this JSON Schema. Each grounded leaf value carries the verbatim ``text``, the normalized ``value`` where one exists (the classifying enum token for fields with a ``value_enum`` list, ISO dates, plain numbers — omit when the text can't be normalized), and ``locations`` that need only carry the page_number (1-indexed); a later phase will add bounding boxes. A value the page doesn't print in full names the values it used in ``inputs``: printed in part, it keeps its ``locations`` for the printed text; not printed at all, it has no locations and a ``method`` (``calculated``, ``inferred``, or ``defaulted`` with no inputs). If any array-of-objects in the schema is laid out as a table on the page, also return a ``layout`` descriptor naming the columns in visual left-to-right order. Submit results via the submit_values tool call when done.
 
   SCHEMA:
   {schema}
@@ -305,8 +328,8 @@ extraction_values_phase1_retry_chunked: |-
   Keep every individual call small — at most ~40 array entries.
   Completeness comes from the NUMBER of calls, not their size; array
   completeness above still applies across the whole sequence.
-  Computed fields that derive from array entries (sums, counts) go in
-  the first ``submit_values`` call — their ``derived_from`` paths may
+  Calculated fields that derive from array entries (sums, counts) go
+  in the first ``submit_values`` call — their ``inputs`` paths may
   reference entries appended afterwards.
 
 # Added to the phase-1 user prompt, ahead of the PDF, only when the provider

@@ -2329,11 +2329,12 @@ def test_extract_values_phase1_submit_tool_strips_bbox(workspace: Workspace) -> 
     # Schema is expanded and self-contained — no $ref left.
     assert "definitions" not in values_param
     assert "$ref" not in json.dumps(values_param)
-    # The leaf is the merged extracted_value shape — grounded and computed
-    # provenance share one object (no anyOf union).
+    # The leaf is the merged extracted_value shape — every provenance case
+    # (printed, printed in part, unprinted) shares one object (no anyOf union).
     leaf = values_param["properties"]["title"]
-    assert "derived_from" in leaf["properties"]
-    assert "computed" in leaf["properties"]
+    assert "inputs" in leaf["properties"]
+    assert leaf["properties"]["method"]["enum"] == ["calculated", "inferred", "defaulted"]
+    assert "derived_from" not in leaf["properties"] and "computed" not in leaf["properties"]
     assert "value" in leaf["properties"]
     # And crucially: bounding_box is gone from the leaf's locations[].
     location_props = leaf["properties"]["locations"]["items"]["properties"]
