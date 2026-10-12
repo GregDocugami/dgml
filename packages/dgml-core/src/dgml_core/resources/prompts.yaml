@@ -215,9 +215,8 @@ extraction_values_phase1_system: |-
     {"text": "2028-01-14", "value": "2028-01-14",
      "method": "calculated",
      "evidence": [
-       {"text": "January 15, 2026", "locations": [{"page_number": 1}]},
-       {"text": "a term of twenty-four (24) months",
-        "locations": [{"page_number": 1}]}]}
+       {"text": "January 15, 2026", "page_number": 1},
+       {"text": "a term of twenty-four (24) months", "page_number": 1}]}
   Quote the shortest span that carries the fact, exactly as printed.
   Never put a schema field's value in ``evidence`` — reference it in
   ``inputs``.

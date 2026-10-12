@@ -246,6 +246,12 @@ def _walk_leaves(values: Any, path: LeafPath = ()) -> Iterable[tuple[LeafPath, d
             yield from _walk_leaves(v, path + (i,))
 
 
+# The values-tree key holding a leaf's evidence items; an item's path is
+# ``(*leaf_path, _EVIDENCE_KEY, i)``. Tag names are PascalCase, so it can't
+# collide with a field.
+_EVIDENCE_KEY = "evidence"
+
+
 def walk_evidence(
     leaf: dict[str, Any], path: LeafPath
 ) -> Iterable[tuple[LeafPath, dict[str, Any]]]:
@@ -255,12 +261,12 @@ def walk_evidence(
     value used that the schema doesn't extract (the "a term of twenty-four
     (24) months" an EndDate is calculated from). It serializes as an
     anonymous ``dg:chunk`` next to the field, named in its ``dg:inputs``."""
-    evidence = leaf.get("evidence")
+    evidence = leaf.get(_EVIDENCE_KEY)
     if not isinstance(evidence, list):
         return
     for i, item in enumerate(evidence):
         if isinstance(item, dict) and isinstance(item.get("text"), str) and "locations" in item:
-            yield path + ("evidence", i), item
+            yield path + (_EVIDENCE_KEY, i), item
 
 
 def walk_all_leaves(values: Any, path: LeafPath = ()) -> Iterable[tuple[LeafPath, dict[str, Any]]]:
@@ -558,7 +564,15 @@ def _row_path(path: LeafPath) -> LeafPath | None:
     The earlier ``path[:-1]`` fallback made every top-level scalar share
     the empty pseudo-row ``()`` — so the first such field to match set a
     y-band that drove every other top-level field's lone candidate to
-    zero, sending otherwise-unambiguous values to phase 3."""
+    zero, sending otherwise-unambiguous values to phase 3.
+
+    An ``evidence`` item (``(*leaf_path, "evidence", i)``, see
+    :func:`walk_evidence`) is printed text that is *not* a schema field, so
+    it is no array row's cell either: it gets ``None`` too. Otherwise its
+    own index would make it a one-item pseudo-row, whose band would veto
+    top-level scalars on its line and its own repeat occurrences."""
+    if len(path) >= 2 and path[-2] == _EVIDENCE_KEY and isinstance(path[-1], int):
+        return None
     for i in range(len(path) - 1, -1, -1):
         if isinstance(path[i], int):
             return path[: i + 1]

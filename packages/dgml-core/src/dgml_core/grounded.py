@@ -2843,9 +2843,11 @@ def _describe_text_reply(result: CallResult) -> str:
 
 
 def _normalized_evidence(raw: Any) -> list[dict[str, Any]]:
-    """The usable ``evidence`` items of a phase-1 leaf: non-empty verbatim
-    ``text`` with at least one location naming a page. Anything else can't
-    be grounded, so it can't become a ``dg:chunk`` a verifier could crop."""
+    """The usable ``evidence`` items of a phase-1 leaf, as ``{text,
+    locations}``: non-empty verbatim ``text`` and a page to ground it on —
+    the tool's flat ``page_number``, or a ``locations`` list. Anything else
+    can't be grounded, so it can't become a ``dg:chunk`` a verifier could
+    crop."""
     if not isinstance(raw, list):
         return []
     out: list[dict[str, Any]] = []
@@ -2854,6 +2856,8 @@ def _normalized_evidence(raw: Any) -> list[dict[str, Any]]:
             continue
         text = item.get("text")
         locations = item.get("locations")
+        if isinstance(item.get("page_number"), int) and not isinstance(locations, list):
+            locations = [{"page_number": item["page_number"]}]
         if not isinstance(text, str) or not text.strip() or not isinstance(locations, list):
             continue
         pages = [
@@ -2905,7 +2909,8 @@ def _normalize_leaf_provenance(values: Any) -> int:
             del values["value"]
         legacy_refs = values.pop("derived_from", None)
         claimed = bool(values.pop("computed", None))
-        refs = values.get("inputs", legacy_refs)
+        # An empty/null ``inputs`` must not hide 0.7 ``derived_from`` paths.
+        refs = values.get("inputs") or legacy_refs
         inputs = (
             [r for r in refs if isinstance(r, str) and r.strip()] if isinstance(refs, list) else []
         )
@@ -2946,8 +2951,8 @@ def _normalize_leaf_provenance(values: Any) -> int:
 def _drop_bboxes_from_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of the schema with ``bounding_box`` stripped from the
     leaf definition's ``locations[]`` (``extracted_value``, plus the legacy
-    ``grounded_field`` for older exported schemas) and from the
-    ``locations[]`` of its ``evidence`` items.
+    ``grounded_field`` for older exported schemas). ``evidence`` items carry
+    a bare ``page_number`` already.
 
     Phase-1 extraction shows the model this slimmer shape so it focuses
     on getting the text and page numbers right without the bbox burden.
@@ -2961,12 +2966,7 @@ def _drop_bboxes_from_schema(schema: dict[str, Any]) -> dict[str, Any]:
         leaf_def = defs.get(def_name)
         if not isinstance(leaf_def, dict):
             continue
-        props = leaf_def.get("properties", {})
-        _drop_bbox_from_locations(props.get("locations"))
-        evidence = props.get("evidence")
-        if isinstance(evidence, dict):
-            item_props = evidence.get("items", {}).get("properties", {})
-            _drop_bbox_from_locations(item_props.get("locations"))
+        _drop_bbox_from_locations(leaf_def.get("properties", {}).get("locations"))
     return out
 
 

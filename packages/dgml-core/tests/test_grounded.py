@@ -2300,15 +2300,31 @@ def test_expand_refs_chained_definitions() -> None:
     assert expanded["properties"]["a"]["properties"]["v"] == {"type": "string"}
 
 
-def test_phase1_schema_strips_bbox_from_evidence_locations() -> None:
-    """Evidence items are grounded by phases 2/3 like any leaf, so phase 1
-    must not demand their bounding boxes either, even when the schema has
-    been through JSON (no shared ``locations`` object left to alias)."""
+def test_phase1_schema_strips_bbox_and_keeps_evidence_flat() -> None:
+    """Phase 1 must not demand bounding boxes, even when the schema has been
+    through JSON (no shared ``locations`` object left to alias). Evidence
+    items carry only a page_number: they ride on every leaf, so a nested
+    locations array there would grow the constrained-decoding state count."""
     schema = json.loads(json.dumps({"definitions": {"extracted_value": EXTRACTED_VALUE}}))
     leaf = _drop_bboxes_from_schema(schema)["definitions"]["extracted_value"]["properties"]
-    for locs in (leaf["locations"], leaf["evidence"]["items"]["properties"]["locations"]):
-        assert "bounding_box" not in locs["items"]["properties"]
-        assert locs["items"]["required"] == ["page_number"]
+    assert "bounding_box" not in leaf["locations"]["items"]["properties"]
+    assert leaf["locations"]["items"]["required"] == ["page_number"]
+    item = leaf["evidence"]["items"]
+    assert set(item["properties"]) == {"text", "page_number"}
+
+
+def test_normalize_leaf_provenance_turns_evidence_page_into_locations() -> None:
+    from dgml_core.grounded import _normalize_leaf_provenance
+
+    values: dict[str, Any] = {
+        "End": {
+            "text": "x",
+            "method": "calculated",
+            "evidence": [{"text": "24 months", "page_number": 2}],
+        }
+    }
+    _normalize_leaf_provenance(values)
+    assert values["End"]["evidence"] == [{"text": "24 months", "locations": [{"page_number": 2}]}]
 
 
 def test_extract_values_phase1_submit_tool_strips_bbox(workspace: Workspace) -> None:
@@ -2510,7 +2526,7 @@ def test_extract_values_grounds_evidence_into_chunks(workspace: Workspace) -> No
             "text": "2",
             "value": "2",
             "method": "calculated",
-            "evidence": [{"text": "Hello world", "locations": [{"page_number": 1}]}],
+            "evidence": [{"text": "Hello world", "page_number": 1}],
         },
     }
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
@@ -2649,6 +2665,20 @@ def test_normalize_leaf_provenance_filters_and_defaults() -> None:
     assert values["B"] == {"text": "y", "inputs": ["ok"], "method": "inferred"}
     assert values["C"] == {"text": "z"}
     assert values["Nested"][0]["D"]["locations"] == [{"page_number": 2}]
+
+
+def test_normalize_leaf_provenance_empty_inputs_keep_legacy_refs() -> None:
+    """A model mixing shapes (``inputs: []`` or ``null`` beside 0.7
+    ``derived_from``) keeps the legacy paths rather than losing them."""
+    from dgml_core.grounded import _normalize_leaf_provenance
+
+    values: dict[str, Any] = {
+        "A": {"text": "x", "inputs": [], "derived_from": ["B"], "computed": True},
+        "C": {"text": "y", "inputs": None, "derived_from": ["B"]},
+    }
+    assert _normalize_leaf_provenance(values) == 0
+    assert values["A"] == {"text": "x", "inputs": ["B"], "method": "inferred"}
+    assert values["C"] == {"text": "y", "inputs": ["B"], "method": "inferred"}
 
 
 def test_expand_refs_specializes_value_enum_and_carries_annotations() -> None:

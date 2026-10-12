@@ -148,15 +148,19 @@ EXTRACTED_VALUE: dict[str, Any] = {
                 "from these. Without: it is calculated or inferred from them."
             ),
         },
+        # Kept flat ({text, page_number}, no nested locations array): this
+        # rides on every leaf of the tool schema, so its shape multiplies the
+        # constrained-decoding state count. The normalizer turns page_number
+        # into the locations phases 2/3 ground.
         "evidence": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
-                    "locations": _LOCATIONS_SCHEMA,
+                    "page_number": {"type": "integer"},
                 },
-                "required": ["text", "locations"],
+                "required": ["text", "page_number"],
             },
             "description": (
                 "Printed text the result used that no schema field extracts "

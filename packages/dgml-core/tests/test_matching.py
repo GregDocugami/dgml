@@ -1244,6 +1244,37 @@ def test_repeated_scalar_picks_the_labelled_occurrence(workspace: Workspace) -> 
     assert result.stats.repeated_value_picks == 1
 
 
+def test_matched_evidence_is_not_a_table_row(workspace: Workspace) -> None:
+    """An evidence item (``(*leaf, "evidence", i)``) is not an array row's
+    cell. Its match must not lay a row band over its line that hides a
+    top-level scalar's labelled occurrence there."""
+    _seed_file_and_text(
+        workspace,
+        "f1aaaaaaaaaa",
+        page=1,
+        words=[
+            {"t": "Printed", "l": [100, 200, 180, 220]},
+            {"t": "01/02/1980", "l": [190, 200, 300, 220]},
+            {"t": "DOB:", "l": [100, 500, 150, 520]},
+            {"t": "01/02/1980", "l": [160, 500, 270, 520]},
+            {"t": "age", "l": [300, 500, 340, 520]},
+            {"t": "forty-four", "l": [350, 500, 450, 520]},
+        ],
+    )
+    phase1 = {
+        "PatientDOB": {"text": "01/02/1980", "locations": [{"page_number": 1}]},
+        "AgeBand": {
+            "text": "40-49",
+            "method": "inferred",
+            "evidence": [{"text": "age forty-four", "locations": [{"page_number": 1}]}],
+        },
+    }
+    result = run_phase2_matching(workspace, "f1aaaaaaaaaa", phase1)
+
+    assert _box(result, "AgeBand", "evidence", 0) == [300, 500, 450, 520]
+    assert _box(result, "PatientDOB") == [160, 500, 270, 520]
+
+
 def test_repeated_scalar_label_above_the_value(workspace: Workspace) -> None:
     """A label printed over its box counts too (form cells), also when the
     OCR box of the label slightly overlaps the value's box."""

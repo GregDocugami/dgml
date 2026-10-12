@@ -171,13 +171,28 @@ def _collect_ref_ids(values: dict[str, Any]) -> dict[LeafPath, str]:
         if not isinstance(refs, list):
             continue
         for raw in refs:
-            if not isinstance(raw, str):
-                continue
-            path = parse_path(raw)
-            if path is None or path in ids or get_at_path(values, path) is None:
-                continue
-            ids[path] = _id_for_path(path)
+            path = _resolvable_input(values, raw)
+            if path is not None and path not in ids:
+                ids[path] = _id_for_path(path)
     return ids
+
+
+def _resolvable_input(values: dict[str, Any], raw: Any) -> LeafPath | None:
+    """The path an ``inputs`` entry names, when it will emit a ``dg:inputs``
+    target: a well-formed dotted path to something in *values*. ``None`` for
+    a non-string, malformed or dangling entry, which is dropped."""
+    if not isinstance(raw, str):
+        return None
+    path = parse_path(raw)
+    if path is None or get_at_path(values, path) is None:
+        return None
+    return path
+
+
+def _evidence_boxed(item: Any) -> bool:
+    """True for an ``evidence`` item with a bounding box, which emits a
+    ``dg:chunk``; one without is dropped."""
+    return isinstance(item, dict) and _origin_from_locations(item.get("locations")) is not None
 
 
 def count_dropped_inputs(values: dict[str, Any], *, evidence: bool = True) -> int:
@@ -195,22 +210,10 @@ def count_dropped_inputs(values: dict[str, Any], *, evidence: bool = True) -> in
     for _path, leaf in walk_input_leaves(values):
         items = leaf.get("evidence") if evidence else None
         if isinstance(items, list):
-            dropped += sum(
-                1
-                for item in items
-                if not isinstance(item, dict)
-                or _origin_from_locations(item.get("locations")) is None
-            )
+            dropped += sum(1 for item in items if not _evidence_boxed(item))
         refs = leaf.get("inputs")
-        if not isinstance(refs, list):
-            continue
-        for raw in refs:
-            if not isinstance(raw, str):
-                dropped += 1
-                continue
-            path = parse_path(raw)
-            if path is None or get_at_path(values, path) is None:
-                dropped += 1
+        if isinstance(refs, list):
+            dropped += sum(1 for raw in refs if _resolvable_input(values, raw) is None)
     return dropped
 
 
@@ -226,16 +229,10 @@ def count_unsupported_claims(values: dict[str, Any]) -> int:
             continue
         refs = leaf.get("inputs")
         resolvable = isinstance(refs, list) and any(
-            isinstance(raw, str)
-            and (path := parse_path(raw)) is not None
-            and get_at_path(values, path) is not None
-            for raw in refs
+            _resolvable_input(values, raw) is not None for raw in refs
         )
         items = leaf.get("evidence")
-        boxed = isinstance(items, list) and any(
-            isinstance(item, dict) and _origin_from_locations(item.get("locations")) is not None
-            for item in items
-        )
+        boxed = isinstance(items, list) and any(_evidence_boxed(item) for item in items)
         if not resolvable and not boxed:
             count += 1
     return count
@@ -696,7 +693,7 @@ def _add_field(
         el.set(f"{{{DG_NS}}}value", dg_value)
     origin = _origin_from_locations(value.get("locations"))
     if origin:
-        el.set(f"{{{DG_NS}}}origin", origin)
+        el.set(ORIGIN_ATTR, origin)
     # Printed in part: the boxes say where the printed text is, dg:inputs
     # what completed it. A boxed value never carries dg:method.
     inputs = _resolved_inputs(value, ids) + evidence_refs
