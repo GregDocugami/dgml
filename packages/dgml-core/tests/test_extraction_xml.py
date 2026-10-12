@@ -16,12 +16,12 @@ import pytest
 from dgml_core.extraction_schema import Tag, Vocabulary, json_schema_to_rnc, parse_rnc
 from dgml_core.extraction_xml import (
     carry_extraction_over,
-    count_dropped_refs,
+    count_dropped_inputs,
     dgml_xml_to_values,
     embed_extraction_into,
     has_extraction,
+    provenance_issues,
     standalone_extraction_doc,
-    unattributed_computed_fields,
 )
 
 _SCHEMA = {
@@ -246,20 +246,20 @@ def test_string_type_emits_verbatim_id_without_coercion() -> None:
     assert "value" not in back["PremiseId"]
 
 
-def test_string_type_computed_keeps_value_without_type() -> None:
-    """A computed string-typed field keeps its mandatory dg:value (verbatim) but
-    still carries no xsi:type."""
+def test_string_type_unprinted_keeps_value_without_type() -> None:
+    """An unprinted string-typed field keeps its mandatory dg:value (verbatim)
+    but still carries no xsi:type."""
     vocab = _string_id_vocab()
     values = {
         "PremiseId": {
             "text": "0819510000",
             "value": "0819510000",
-            "computed": True,
-            "derived_from": [],
+            "method": "defaulted",
         },
     }
     xml = standalone_extraction_doc(values, vocab=vocab)
-    assert 'dg:origin="computed"' in xml
+    assert 'dg:method="defaulted"' in xml
+    assert "dg:origin" not in xml and "dg:inputs" not in xml
     assert 'dg:value="0819510000"' in xml
     assert "xsi:type" not in xml
 
@@ -308,7 +308,7 @@ def test_missing_field_is_omitted() -> None:
     assert "LiabilityCap" not in xml  # not extracted ⇒ not emitted
 
 
-# ── computed (reasoned) fields — spec §7/§13 ──────────────────────────────────
+# ── values the page doesn't print: inputs + method (DGML 0.71) ────────────────
 
 # The spec's §13 invoice: line items are read off the page; InvoiceTotal is
 # derived from them (`## Prompt:` carries the rule).
@@ -385,30 +385,33 @@ def _invoice_values() -> dict[str, object]:
             "InvoiceTotal": {
                 "text": "$349.85",
                 "value": "349.85",
-                "computed": True,
-                "derived_from": [
+                "inputs": [
                     "Invoice.LineItems[0].Quantity",
                     "Invoice.LineItems[0].UnitPrice",
                     "Invoice.LineItems[1].Quantity",
                     "Invoice.LineItems[1].UnitPrice",
                 ],
+                "method": "calculated",
             },
         }
     }
 
 
-def test_computed_field_emits_spec_attribute_set() -> None:
-    """A computed leaf carries dg:origin="computed", a mandatory dg:value,
-    and dg:itemprop/dg:href naming the sources; each source element gains
-    an xml:id derived from its path — the spec §13 InvoiceTotal shape."""
+def test_calculated_field_emits_inputs_and_method() -> None:
+    """A calculated leaf carries a mandatory dg:value, dg:inputs naming the
+    elements it used and dg:method; each input element gains an xml:id
+    derived from its path. No dg:origin — the page doesn't print it — and
+    none of the retired 0.7 attributes."""
     vocab = parse_rnc(_INVOICE_RNC)
     xml = standalone_extraction_doc(_invoice_values(), vocab=vocab)
-    assert 'dg:origin="computed"' in xml
-    assert 'dg:itemprop="computedFrom"' in xml
+    assert 'dg:method="calculated"' in xml
     assert (
-        'dg:href="#invoice-line-items-0-quantity; #invoice-line-items-0-unit-price; '
+        'dg:inputs="#invoice-line-items-0-quantity; #invoice-line-items-0-unit-price; '
         '#invoice-line-items-1-quantity; #invoice-line-items-1-unit-price"' in xml
     )
+    assert "computed" not in xml
+    assert "dg:itemprop" not in xml and "dg:href" not in xml
+    assert "<docset:InvoiceTotal dg:origin" not in xml
     # Schema-declared xsd:decimal + the model's canonical value.
     assert 'xsi:type="decimal" dg:value="349.85"' in xml
     assert ">$349.85</docset:InvoiceTotal>" in xml
@@ -418,8 +421,8 @@ def test_computed_field_emits_spec_attribute_set() -> None:
     assert "VendorName xml:id" not in xml
 
 
-def test_computed_field_roundtrip() -> None:
-    """XML → values reconstructs the computed leaf, mapping #id hrefs back
+def test_calculated_field_roundtrip() -> None:
+    """XML → values reconstructs the calculated leaf, mapping #id inputs back
     to dotted paths; grounded leaves are untouched."""
     vocab = parse_rnc(_INVOICE_RNC)
     values = _invoice_values()
@@ -432,43 +435,44 @@ def test_computed_field_roundtrip() -> None:
     assert back["Invoice"]["LineItems"][0]["UnitPrice"]["value"] == "49.95"
 
 
-def test_computed_dangling_refs_dropped() -> None:
-    """Malformed or dangling derived_from entries lose their href; when none
-    survive, the element keeps dg:origin="computed" + dg:value but no
-    itemprop/href pair."""
+def test_dangling_inputs_dropped() -> None:
+    """Malformed or dangling inputs entries are dropped; when none survive, a
+    calculated value can't keep its method (calculated requires inputs), so
+    the element is left with only its dg:value — an unsupported value the
+    consistency check reports."""
     vocab = parse_rnc(_INVOICE_RNC)
     values = _invoice_values()
     invoice = values["Invoice"]
     assert isinstance(invoice, dict)
-    invoice["InvoiceTotal"]["derived_from"] = [
+    invoice["InvoiceTotal"]["inputs"] = [
         "Invoice.LineItems[9].Quantity",  # index out of range
         "Invoice.NoSuchField",  # unknown key
         "not a [valid path",  # unparseable
     ]
     xml = standalone_extraction_doc(values, vocab=vocab)
-    assert 'dg:origin="computed"' in xml
     assert 'dg:value="349.85"' in xml
-    assert "dg:itemprop" not in xml
-    assert "dg:href" not in xml
+    assert "dg:inputs" not in xml
+    assert "dg:method" not in xml
     assert "xml:id" not in xml
 
 
-def test_computed_partial_dangling_keeps_resolvable_refs() -> None:
+def test_partial_dangling_inputs_keep_resolvable_refs() -> None:
     vocab = parse_rnc(_INVOICE_RNC)
     values = _invoice_values()
     invoice = values["Invoice"]
     assert isinstance(invoice, dict)
-    invoice["InvoiceTotal"]["derived_from"] = [
+    invoice["InvoiceTotal"]["inputs"] = [
         "Invoice.LineItems[0].Quantity",
         "Invoice.Bogus",
     ]
     xml = standalone_extraction_doc(values, vocab=vocab)
-    assert 'dg:href="#invoice-line-items-0-quantity"' in xml
+    assert 'dg:inputs="#invoice-line-items-0-quantity" dg:method="calculated"' in xml
 
 
-def test_computed_without_canonical_value_falls_back_to_text() -> None:
+def test_unprinted_without_canonical_value_falls_back_to_text() -> None:
     """No model-provided ``value``: dg:value comes from the schema-typed
-    normalization of the display text (spec: computed always carries dg:value)."""
+    normalization of the display text (an unprinted value always carries
+    dg:value)."""
     vocab = parse_rnc(_INVOICE_RNC)
     values = _invoice_values()
     invoice = values["Invoice"]
@@ -478,52 +482,198 @@ def test_computed_without_canonical_value_falls_back_to_text() -> None:
     assert 'xsi:type="decimal" dg:value="349.85"' in xml  # normalized from "$349.85"
 
 
-def test_count_dropped_refs() -> None:
+def test_count_dropped_inputs() -> None:
     values = _invoice_values()
-    assert count_dropped_refs(values) == 0
+    assert count_dropped_inputs(values) == 0
     invoice = values["Invoice"]
     assert isinstance(invoice, dict)
-    invoice["InvoiceTotal"]["derived_from"] = [
+    invoice["InvoiceTotal"]["inputs"] = [
         "Invoice.LineItems[0].Quantity",  # resolves
         "Invoice.LineItems[9].Quantity",  # dangles
         "not a [valid path",  # malformed
         42,  # non-string
     ]
-    assert count_dropped_refs(values) == 3
+    assert count_dropped_inputs(values) == 3
 
 
-def test_unattributed_computed_fields() -> None:
-    """The consistency-check helper names computed elements with no dg:href;
-    attributed computed fields and grounded fields don't trip it."""
+def test_provenance_issues_flags_unsupported_extracted_values() -> None:
+    """A value with inputs (or boxes) passes; one whose inputs all dangle is
+    written with neither, so it reads as unsupported."""
     vocab = parse_rnc(_INVOICE_RNC)
     xml = standalone_extraction_doc(_invoice_values(), vocab=vocab)
-    assert unattributed_computed_fields(xml) == []
+    assert provenance_issues(xml) == []
 
     values = _invoice_values()
     invoice = values["Invoice"]
     assert isinstance(invoice, dict)
-    invoice["InvoiceTotal"]["derived_from"] = ["Invoice.Bogus"]  # all refs dangle
+    invoice["InvoiceTotal"]["inputs"] = ["Invoice.Bogus"]  # all inputs dangle
     xml = standalone_extraction_doc(values, vocab=vocab)
-    assert unattributed_computed_fields(xml) == ["InvoiceTotal"]
+    assert [(k, t) for k, t, _ in provenance_issues(xml)] == [("value_unsupported", "InvoiceTotal")]
+    # In a born-digital document a value with no boxes is source data.
+    assert provenance_issues(xml, has_pages=False) == []
 
 
-def test_computed_crossfile_href_stays_raw_on_parse() -> None:
-    """A dg:href target outside this file (fileid#id form) can't be mapped to
-    a values path — it survives the projection as the raw reference."""
-    xml = (
+def _ext(body: str) -> str:
+    return (
         '<dg:chunk xmlns:dg="http://dgml.io/ns/dg#" '
         'xmlns:docset="http://www.dgml.io/acme/invoices#">'
-        "<dg:extraction>"
+        f"<dg:extraction>{body}</dg:extraction></dg:chunk>"
+    )
+
+
+@pytest.mark.parametrize(
+    ("element", "detail"),
+    [
+        (
+            '<docset:A dg:origin="1 1 1 2 2" dg:method="inferred" dg:value="x">x</docset:A>',
+            "dg:method on an element with dg:origin",
+        ),
+        (
+            '<docset:A xml:id="b">b</docset:A>'
+            '<docset:A dg:method="defaulted" dg:inputs="#b" dg:value="x">x</docset:A>',
+            "defaulted value with dg:inputs",
+        ),
+        (
+            '<docset:A dg:method="calculated" dg:value="x">x</docset:A>',
+            "calculated value with no dg:inputs",
+        ),
+        ('<docset:A dg:method="guessed" dg:value="x">x</docset:A>', "unknown dg:method 'guessed'"),
+    ],
+)
+def test_provenance_issues_flags_misplaced_method(element: str, detail: str) -> None:
+    found = provenance_issues(_ext(element))
+    assert ("method_misplaced", "A", detail) in found
+
+
+def test_provenance_issues_flags_dangling_and_cyclic_inputs() -> None:
+    xml = _ext(
+        '<docset:A xml:id="a" dg:value="1" dg:inputs="#b" dg:method="calculated">1</docset:A>'
+        '<docset:B xml:id="b" dg:value="2" dg:inputs="#a" dg:method="calculated">2</docset:B>'
+        '<docset:C xml:id="c" dg:value="3" dg:inputs="#c" dg:method="inferred">3</docset:C>'
+        '<docset:D dg:value="4" dg:inputs="#gone; f1#elsewhere" dg:method="inferred">4</docset:D>'
+    )
+    found = provenance_issues(xml)
+    assert ("inputs_dangling", "D", "#gone") in found
+    assert not any(detail == "f1#elsewhere" for _, _, detail in found)  # cross-file: unchecked
+    cycles = {tag for kind, tag, _ in found if kind == "inputs_cycle"}
+    assert cycles == {"A", "B", "C"}
+
+
+def test_provenance_issues_reads_legacy_computed() -> None:
+    """A 0.7 computed element with sources checks cleanly; one without reads
+    as unsupported (it was computed_field_unattributed before)."""
+    ok = _ext(
+        '<docset:P xml:id="p1" dg:origin="1 1 1 2 2">5</docset:P>'
+        '<docset:Total dg:origin="computed" dg:value="10" '
+        'dg:itemprop="computedFrom" dg:href="#p1">10</docset:Total>'
+    )
+    assert provenance_issues(ok) == []
+    bare = _ext('<docset:Total dg:origin="computed" dg:value="10">10</docset:Total>')
+    assert [k for k, _, _ in provenance_issues(bare)] == ["value_unsupported"]
+
+
+def test_legacy_computed_crossfile_href_reads_as_inputs() -> None:
+    """A 0.7 dg:origin="computed" element reads in its 0.71 form: no boxes,
+    its dg:href targets as inputs. A target outside this file (fileid#id)
+    can't be mapped to a values path, so it survives as the raw reference."""
+    xml = _ext(
         '<docset:InvoiceTotal dg:origin="computed" dg:value="10" '
         'dg:itemprop="computedFrom" dg:href="5kqt9r5fowno#notice-1; #unknown-local">'
         "$10</docset:InvoiceTotal>"
-        "</dg:extraction></dg:chunk>"
     )
     back = dgml_xml_to_values(xml)
     total = back["InvoiceTotal"]
-    assert total["computed"] is True
-    assert total["derived_from"] == ["5kqt9r5fowno#notice-1", "#unknown-local"]
-    assert "locations" not in total
+    assert total["inputs"] == ["5kqt9r5fowno#notice-1", "#unknown-local"]
+    assert total["method"] == "inferred"  # no dg:method stated: the safe reading
+    assert "locations" not in total and "computed" not in total
+
+
+def test_partly_printed_value_keeps_boxes_and_inputs() -> None:
+    """The lease "3/1" case: one element holds the printed text's boxes, the
+    completed date as dg:value, and dg:inputs naming what supplied the year.
+    No dg:method — the boxes already say it was read."""
+    vocab = Vocabulary(
+        namespace_uri="http://www.dgml.io/acme/leases#",
+        roots=[
+            Tag(name="CommencementDate", kind="field", value_type="date"),
+            Tag(name="PeriodStart", kind="field", value_type="date"),
+        ],
+    )
+    values = {
+        "CommencementDate": {
+            "text": "March 1, 2026",
+            "value": "2026-03-01",
+            "locations": [{"page_number": 1, "bounding_box": [100, 200, 300, 230]}],
+        },
+        "PeriodStart": {
+            "text": "3/1",
+            "value": "2026-03-01",
+            "locations": [{"page_number": 2, "bounding_box": [410, 980, 520, 1025]}],
+            "inputs": ["CommencementDate"],
+        },
+    }
+    xml = standalone_extraction_doc(values, vocab=vocab)
+    assert (
+        '<docset:PeriodStart xsi:type="date" dg:value="2026-03-01" '
+        'dg:origin="2 410 980 520 1025" dg:inputs="#commencement-date">3/1</docset:PeriodStart>'
+    ) in xml
+    assert 'xml:id="commencement-date"' in xml
+    assert "dg:method" not in xml
+    assert provenance_issues(xml) == []
+    back = dgml_xml_to_values(xml, vocab=vocab)
+    assert back["PeriodStart"]["inputs"] == ["CommencementDate"]
+    assert back["PeriodStart"]["locations"] == values["PeriodStart"]["locations"]
+    assert "method" not in back["PeriodStart"]
+
+
+def test_currency_symbol_boxed_twice_with_an_input() -> None:
+    """Several boxes mean the same text printed more than once."""
+    vocab = Vocabulary(
+        namespace_uri="http://www.dgml.io/acme/leases#",
+        roots=[Tag(name="PremisesAddress", kind="field"), Tag(name="Currency", kind="field")],
+    )
+    values = {
+        "PremisesAddress": {
+            "text": "100 King St W, Toronto",
+            "locations": [{"page_number": 1, "bounding_box": [1, 2, 3, 4]}],
+        },
+        "Currency": {
+            "text": "$",
+            "value": "CAD",
+            "locations": [
+                {"page_number": 2, "bounding_box": [1510, 880, 1528, 915]},
+                {"page_number": 2, "bounding_box": [1510, 1240, 1528, 1275]},
+            ],
+            "inputs": ["PremisesAddress"],
+        },
+    }
+    xml = standalone_extraction_doc(values, vocab=vocab)
+    assert 'dg:origin="2 1510 880 1528 915; 2 1510 1240 1528 1275"' in xml
+    assert 'dg:inputs="#premises-address"' in xml
+
+
+def test_defaulted_value_never_carries_inputs() -> None:
+    vocab = Vocabulary(
+        namespace_uri="http://www.dgml.io/acme/leases#",
+        roots=[
+            Tag(name="Notes", kind="field"),
+            Tag(name="LateFeeGraceDays", kind="field", value_type="integer"),
+        ],
+    )
+    values = {
+        "Notes": {"text": "n", "locations": [{"page_number": 1, "bounding_box": [1, 2, 3, 4]}]},
+        "LateFeeGraceDays": {
+            "text": "0",
+            "value": "0",
+            "method": "defaulted",
+            "inputs": ["Notes"],  # a sloppy producer: defaulted forbids inputs
+        },
+    }
+    xml = standalone_extraction_doc(values, vocab=vocab)
+    assert '<docset:LateFeeGraceDays xsi:type="integer" dg:value="0" dg:method="defaulted">' in xml
+    assert "dg:inputs" not in xml
+    back = dgml_xml_to_values(xml, vocab=vocab)
+    assert back["LateFeeGraceDays"] == {"text": "0", "value": "0", "method": "defaulted"}
 
 
 def test_carry_extraction_over_moves_element_verbatim() -> None:
@@ -683,7 +833,7 @@ def test_untyped_field_model_value_kept_without_xsi_type() -> None:
     assert "xsi:type" not in xml
 
 
-def test_computed_enum_field_uses_valid_token() -> None:
+def test_inferred_enum_field_uses_valid_token() -> None:
     values = {
         "Notes": {
             "text": "electric bill",
@@ -692,12 +842,12 @@ def test_computed_enum_field_uses_valid_token() -> None:
         "MeterType": {
             "text": "Electric",
             "value": "electric",
-            "computed": True,
-            "derived_from": ["Notes"],
+            "inputs": ["Notes"],
+            "method": "inferred",
         },
     }
     xml = standalone_extraction_doc(values, vocab=_enum_vocab())  # type: ignore[arg-type]
-    assert 'dg:origin="computed"' in xml
+    assert 'dg:inputs="#notes" dg:method="inferred"' in xml
     assert 'dg:value="electric"' in xml
 
 
@@ -733,8 +883,8 @@ def test_check_derivations_sum_match_and_mismatch() -> None:
             "Total": {
                 "text": f"${total}",
                 "value": total,
-                "computed": True,
-                "derived_from": ["Items[0].Amount", "Items[1].Amount"],
+                "inputs": ["Items[0].Amount", "Items[1].Amount"],
+                "method": "calculated",
             },
         }
 
@@ -755,15 +905,15 @@ def test_check_derivations_count_and_passthrough_accepted() -> None:
         "NMeters": {
             "text": "2",
             "value": "2",
-            "computed": True,
-            "derived_from": ["MeterIds[0]", "MeterIds[1]"],
+            "inputs": ["MeterIds[0]", "MeterIds[1]"],
+            "method": "calculated",
         },
         # A passthrough/max-style derivation: value equals one input.
         "LargestCharge": {
             "text": "$9.00",
             "value": "9.00",
-            "computed": True,
-            "derived_from": ["Charges[0]", "Charges[1]"],
+            "inputs": ["Charges[0]", "Charges[1]"],
+            "method": "calculated",
         },
         "Charges": [
             {"text": "$4.00", "locations": [{"page_number": 1}]},
@@ -778,19 +928,26 @@ def test_check_derivations_skips_non_numeric_and_dangling() -> None:
 
     values = {
         "UtilityProvider": {"text": "PECO Energy", "locations": [{"page_number": 1}]},
-        # Inferred currency: input not numeric → skipped, not counted.
+        # Inferred currency: a judgment, never recomputed.
         "Currency": {
             "text": "USD",
             "value": "USD",
-            "computed": True,
-            "derived_from": ["UtilityProvider"],
+            "inputs": ["UtilityProvider"],
+            "method": "inferred",
+        },
+        # Calculated but not numeric → skipped, not counted.
+        "Region": {
+            "text": "EMEA",
+            "value": "EMEA",
+            "inputs": ["UtilityProvider"],
+            "method": "calculated",
         },
         # Dangling ref → skipped.
         "Total": {
             "text": "$5",
             "value": "5",
-            "computed": True,
-            "derived_from": ["Missing.Path"],
+            "inputs": ["Missing.Path"],
+            "method": "calculated",
         },
     }
     assert check_derivations(values) == (0, 0)

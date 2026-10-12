@@ -1535,8 +1535,9 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
         "matched_phase2": 1,
         "matched_phase3": 0,
         "unmatched": 0,
-        "computed_fields": 0,
-        "dropped_refs": 0,
+        "unprinted_fields": 0,
+        "partly_printed_fields": 0,
+        "dropped_inputs": 0,
         "unnormalized_enum_values": 0,
         "derivations_checked": 0,
         "derivations_mismatched": 0,
@@ -2356,7 +2357,7 @@ def test_extract_values_propagates_schema_not_found(workspace: Workspace) -> Non
 
 
 # ---------------------------------------------------------------------------
-# computed (reasoned) fields — spec §7/§13
+# values the page doesn't print: inputs + method (DGML 0.71)
 
 
 _COMPUTED_RNC = """\
@@ -2381,11 +2382,11 @@ word_count =
 """
 
 
-def test_extract_values_computed_field_end_to_end(workspace: Workspace) -> None:
-    """A computed leaf flows through untouched by phases 2/3 (it carries no
-    locations to ground), serializes with the spec's computed attribute set
-    (dg:origin="computed", dg:value, dg:itemprop/dg:href + xml:id on the
-    source), and is counted separately in extraction_stats.json."""
+def test_extract_values_calculated_field_end_to_end(workspace: Workspace) -> None:
+    """A calculated leaf flows through untouched by phases 2/3 (it carries no
+    locations to ground), serializes with dg:value, dg:inputs (+ xml:id on the
+    input) and dg:method — no dg:origin — and is counted separately in
+    extraction_stats.json."""
     fid = "f1aaaaaaaaaa"
     _seed_file(workspace, fid)
     _seed_page_text(workspace, fid, page=1)  # "Hello", "world"
@@ -2399,8 +2400,8 @@ def test_extract_values_computed_field_end_to_end(workspace: Workspace) -> None:
         "word_count": {
             "text": "2",
             "value": "2",
-            "computed": True,
-            "derived_from": ["title"],
+            "inputs": ["title"],
+            "method": "calculated",
         },
     }
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
@@ -2410,16 +2411,14 @@ def test_extract_values_computed_field_end_to_end(workspace: Workspace) -> None:
     ) as mock_completion:
         result = extract_values(workspace, ds.id, fid, config=config)
 
-    # One LLM call: phase 2 matched the grounded leaf; the computed leaf
+    # One LLM call: phase 2 matched the grounded leaf; the calculated leaf
     # never became an unmatched item, so no phase 3.
     assert mock_completion.call_count == 1
     assert result.values["word_count"] == phase1_values["word_count"]
 
     xml = workspace.blobs.get_blob(result.xml_key).decode("utf-8")
-    assert 'dg:origin="computed"' in xml
-    assert 'xsi:type="integer" dg:value="2"' in xml
-    assert 'dg:itemprop="computedFrom"' in xml
-    assert 'dg:href="#title"' in xml
+    assert 'xsi:type="integer" dg:value="2" dg:inputs="#title" dg:method="calculated"' in xml
+    assert "computed" not in xml and "dg:href" not in xml
     assert 'xml:id="title"' in xml
     # Round-trip through the persisted XML reproduces the values tree.
     vocab = parse_rnc(DocSetStore(workspace).get_schema(ds.id))
@@ -2432,8 +2431,9 @@ def test_extract_values_computed_field_end_to_end(workspace: Workspace) -> None:
         "matched_phase2": 1,
         "matched_phase3": 0,
         "unmatched": 0,
-        "computed_fields": 1,
-        "dropped_refs": 0,
+        "unprinted_fields": 1,
+        "partly_printed_fields": 0,
+        "dropped_inputs": 0,
         "unnormalized_enum_values": 0,
         "derivations_checked": 0,
         "derivations_mismatched": 0,
@@ -2443,10 +2443,11 @@ def test_extract_values_computed_field_end_to_end(workspace: Workspace) -> None:
     }
 
 
-def test_extract_values_counts_dropped_refs_in_stats(workspace: Workspace) -> None:
-    """A computed leaf whose derived_from references values that were never
+def test_extract_values_counts_dropped_inputs_in_stats(workspace: Workspace) -> None:
+    """An unprinted leaf whose inputs reference values that were never
     extracted still lands in the XML, but the unresolvable entries are
-    counted in stats so the incomplete provenance is visible."""
+    counted in stats so the incomplete provenance is visible. The 0.7 leaf
+    keys (computed/derived_from) are still accepted from the model."""
     fid = "f1aaaaaaaaaa"
     _seed_file(workspace, fid)
     _seed_page_text(workspace, fid, page=1)
@@ -2474,29 +2475,51 @@ def test_extract_values_counts_dropped_refs_in_stats(workspace: Workspace) -> No
 
     stats = workspace.docs.get_doc("extraction_stats", f"{ds.id}/{fid}")
     assert stats is not None
-    assert stats["matching"]["computed_fields"] == 1
-    assert stats["matching"]["dropped_refs"] == 2
+    assert stats["matching"]["unprinted_fields"] == 1
+    assert stats["matching"]["dropped_inputs"] == 2
 
 
 # ── Merged-leaf provenance normalization & enum tool-schema specialization ───
 
 
-def test_normalize_leaf_provenance_grounded_wins_over_computed_markers() -> None:
+def test_normalize_leaf_provenance_boxes_plus_inputs_is_partly_printed() -> None:
+    """Locations and inputs together are a value printed in part: both are
+    kept, and the method goes — a boxed value never carries one."""
     from dgml_core.grounded import _normalize_leaf_provenance
 
     values = {
+        "Start": {
+            "text": "3/1",
+            "value": "2026-03-01",
+            "inputs": ["CommencementDate"],
+            "method": "inferred",
+            "locations": [{"page_number": 1}],
+        },
+        # The 0.7 keys read the same way.
         "Title": {
             "text": "hi",
             "computed": True,
             "derived_from": ["Other"],
             "locations": [{"page_number": 1}],
-        }
+        },
     }
     _normalize_leaf_provenance(values)
-    assert values["Title"] == {"text": "hi", "locations": [{"page_number": 1}]}
+    assert values["Start"] == {
+        "text": "3/1",
+        "value": "2026-03-01",
+        "inputs": ["CommencementDate"],
+        "locations": [{"page_number": 1}],
+    }
+    assert values["Title"] == {
+        "text": "hi",
+        "inputs": ["Other"],
+        "locations": [{"page_number": 1}],
+    }
 
 
-def test_normalize_leaf_provenance_computed_drops_empty_locations() -> None:
+def test_normalize_leaf_provenance_unprinted_drops_empty_locations() -> None:
+    """No usable location: the locations key goes, and inputs with no method
+    read as inferred (the safe reading)."""
     from dgml_core.grounded import _normalize_leaf_provenance
 
     values = {
@@ -2506,9 +2529,28 @@ def test_normalize_leaf_provenance_computed_drops_empty_locations() -> None:
     assert values["Total"] == {
         "text": "$5",
         "value": "5",
-        "computed": True,
-        "derived_from": ["Items[0].Amount"],
+        "inputs": ["Items[0].Amount"],
+        "method": "inferred",
     }
+
+
+def test_normalize_leaf_provenance_enforces_method_rules() -> None:
+    from dgml_core.grounded import _normalize_leaf_provenance
+
+    values: dict[str, Any] = {
+        # defaulted forbids inputs
+        "Grace": {"text": "0", "method": "defaulted", "inputs": ["Notes"]},
+        # calculated requires inputs: without them the claim is unsupported
+        "Months": {"text": "12", "method": "calculated", "inputs": []},
+        # an unknown method is dropped
+        "Region": {"text": "EMEA", "method": "guessed", "inputs": ["Hq"]},
+        "Kept": {"text": "12", "method": "calculated", "inputs": ["Start", "End"]},
+    }
+    _normalize_leaf_provenance(values)
+    assert values["Grace"] == {"text": "0", "method": "defaulted"}
+    assert values["Months"] == {"text": "12"}
+    assert values["Region"] == {"text": "EMEA", "inputs": ["Hq"], "method": "inferred"}
+    assert values["Kept"] == {"text": "12", "method": "calculated", "inputs": ["Start", "End"]}
 
 
 def test_normalize_leaf_provenance_filters_and_defaults() -> None:
@@ -2522,7 +2564,7 @@ def test_normalize_leaf_provenance_filters_and_defaults() -> None:
     }
     _normalize_leaf_provenance(values)
     assert values["A"] == {"text": "x", "locations": [{"page_number": 1}]}
-    assert values["B"] == {"text": "y", "computed": True, "derived_from": ["ok"]}
+    assert values["B"] == {"text": "y", "inputs": ["ok"], "method": "inferred"}
     assert values["C"] == {"text": "z"}
     assert values["Nested"][0]["D"]["locations"] == [{"page_number": 2}]
 

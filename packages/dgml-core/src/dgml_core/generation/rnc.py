@@ -156,14 +156,18 @@ def build_rnc(
     w("start = dg.chunk")
     w("")
     w("# --- attributes common to every DGML element ------------------------")
-    w('# dg:origin  = grounding bbox: "page x1 y1 x2 y2"')
+    w('# dg:origin  = boxes of the element\'s own printed text: "page x1 y1 x2 y2"')
     w("# dg:itemprop / dg:href = semantic link (predicate + '#id' target(s))")
+    w("# dg:inputs  = elements the dg:value used ('#id' / 'fileid#id', '; '-joined)")
+    w("# dg:method  = how a value the page doesn't print was produced")
     w("common.atts =")
     w("  attribute dg:structure { text }?,")
     w("  attribute dg:origin { text }?,")
     w("  attribute xml:id { xsd:ID }?,")
     w("  attribute dg:itemprop { text }?,")
     w("  attribute dg:href { text }?,")
+    w("  attribute dg:inputs { text }?,")
+    w('  attribute dg:method { "calculated" | "inferred" | "defaulted" }?,')
     w("  attribute dg:value { text }?,")
     w("  attribute xsi:type { text }?")
     w("")
@@ -233,7 +237,9 @@ def build_rnc(
                 "  attribute dg:origin { text }?,\n"
                 "  attribute xml:id { xsd:ID }?,\n"
                 "  attribute dg:itemprop { text }?,\n"
-                "  attribute dg:href { text }?,\n" + typed
+                "  attribute dg:href { text }?,\n"
+                "  attribute dg:inputs { text }?,\n"
+                '  attribute dg:method { "calculated" | "inferred" | "defaulted" }?,\n' + typed
             )
         else:
             atts = "  common.atts,"

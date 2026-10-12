@@ -61,6 +61,7 @@ from typing import Any
 
 from . import layout
 from .config import load_merged_config
+from .dg_refs import METHOD_DEFAULTED, METHOD_INFERRED, METHODS
 from .docsets import DocSetStore
 from .errors import (
     CONVERT_TO_PDF_OPERATION,
@@ -87,7 +88,7 @@ from .extraction_schema import (
 from .extraction_xml import (
     check_derivations,
     check_invariants,
-    count_dropped_refs,
+    count_dropped_inputs,
     count_unnormalized_enum_values,
     embed_extraction_into,
     has_document_tree,
@@ -111,7 +112,8 @@ from .matching import (
     parse_path,
     path_to_str,
     run_phase2_matching,
-    walk_computed_leaves,
+    walk_input_leaves,
+    walk_unprinted_leaves,
 )
 from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .ocr import _image_dimensions as _png_dimensions
@@ -961,8 +963,9 @@ def extract_values(
     phase3_matched = 0
     unmatched_count = 0
     total_locations = 0
-    computed_fields = 0
-    dropped_refs = 0
+    unprinted_fields = 0
+    partly_printed_fields = 0
+    dropped_inputs = 0
     unnormalized_enums = 0
     derivations_checked = 0
     derivations_mismatched = 0
@@ -1135,22 +1138,27 @@ def extract_values(
             phase1_args["values"] = kept
         phase1_values = phase1_args["values"]
         # The merged extracted_value leaf shape lets a sloppy model blur the
-        # grounded/computed boundary; normalize before phases 2/3 (and the
+        # printed/unprinted boundary; normalize before phases 2/3 (and the
         # serializer) so their invariants hold regardless.
         _normalize_leaf_provenance(phase1_values)
-        # Computed (reasoned) leaves carry no locations — phases 2 and 3
-        # never see them; counted here so the stats file can attest they
-        # were deliberate, not dropped. dropped_refs counts derived_from
-        # entries that won't resolve to a dg:href target — incomplete
-        # provenance that would otherwise vanish silently at serialization.
-        computed_fields = sum(1 for _ in walk_computed_leaves(phase1_values))
-        dropped_refs = count_dropped_refs(phase1_values)
+        # Unprinted leaves (calculated, inferred, defaulted) carry no
+        # locations — phases 2 and 3 never see them; counted here so the
+        # stats file can attest they were deliberate, not dropped. Partly
+        # printed leaves are grounded as usual and also name their inputs.
+        # dropped_inputs counts inputs entries that won't resolve to a
+        # dg:inputs target — incomplete provenance that would otherwise
+        # vanish silently at serialization.
+        unprinted_fields = sum(1 for _ in walk_unprinted_leaves(phase1_values))
+        partly_printed_fields = sum(
+            1 for _, leaf in walk_input_leaves(phase1_values) if "locations" in leaf
+        )
+        dropped_inputs = count_dropped_inputs(phase1_values)
         # Enum leaves whose normalized value isn't one of the schema's tokens
         # serialize text-only; count them so misses are visible in stats.
         unnormalized_enums = count_unnormalized_enum_values(phase1_values, vocab)
         # Recompute checkable derivations (report-only): a mismatch means a
-        # computed leaf's value agrees with neither the sum, the count, nor
-        # any single one of its derived_from inputs.
+        # calculated leaf's value agrees with neither the sum, the count, nor
+        # any single one of its inputs.
         derivations_checked, derivations_mismatched = check_derivations(phase1_values)
         # Schema-declared `## Invariant:` relations (count/sum across the
         # submission). Report-only, like the derivation recompute above.
@@ -1292,8 +1300,9 @@ def extract_values(
                     phase3_matched=phase3_matched,
                     unmatched=unmatched_count,
                     total_locations=total_locations,
-                    computed_fields=computed_fields,
-                    dropped_refs=dropped_refs,
+                    unprinted_fields=unprinted_fields,
+                    partly_printed_fields=partly_printed_fields,
+                    dropped_inputs=dropped_inputs,
                     unnormalized_enums=unnormalized_enums,
                     derivations_checked=derivations_checked,
                     derivations_mismatched=derivations_mismatched,
@@ -1362,8 +1371,9 @@ def _write_extraction_stats(
     phase3_matched: int,
     unmatched: int,
     total_locations: int,
-    computed_fields: int,
-    dropped_refs: int,
+    unprinted_fields: int,
+    partly_printed_fields: int,
+    dropped_inputs: int,
     unnormalized_enums: int,
     derivations_checked: int,
     derivations_mismatched: int,
@@ -1432,8 +1442,9 @@ def _write_extraction_stats(
             "matched_phase2": phase2_matched,
             "matched_phase3": phase3_matched,
             "unmatched": unmatched,
-            "computed_fields": computed_fields,
-            "dropped_refs": dropped_refs,
+            "unprinted_fields": unprinted_fields,
+            "partly_printed_fields": partly_printed_fields,
+            "dropped_inputs": dropped_inputs,
             "unnormalized_enum_values": unnormalized_enums,
             "derivations_checked": derivations_checked,
             "derivations_mismatched": derivations_mismatched,
@@ -2816,23 +2827,23 @@ def _describe_text_reply(result: CallResult) -> str:
 
 
 def _normalize_leaf_provenance(values: Any) -> None:
-    """Enforce the grounded-XOR-computed invariant on phase-1 leaves, in place.
+    """Enforce the DGML 0.71 provenance invariants on phase-1 leaves, in place.
 
-    The merged ``extracted_value`` leaf shape lets a sloppy model return both
-    ``locations`` and ``computed``/``derived_from`` on one leaf, an empty
-    ``locations`` array on a computed value, or an empty-string ``value``.
-    Phases 2/3 and the XML serializer rely on the invariants the old split
-    shapes guaranteed — a grounded leaf has ``locations`` and no computed
-    keys; a computed leaf has ``computed``/``derived_from`` (a list) and no
-    ``locations`` key — so this pass restores them:
+    The merged ``extracted_value`` leaf shape lets a sloppy model return
+    combinations the format can't express. Phases 2/3 and the XML serializer
+    rely on these invariants, so this pass restores them:
 
-    * a leaf with at least one usable location is grounded → computed keys
-      are dropped;
-    * a leaf with computed markers and no usable location is computed →
-      ``computed`` is forced true, ``derived_from`` to a list of strings,
-      and ``locations`` removed;
-    * an unusable ``locations`` array (empty, or no valid page_number) on a
-      plain leaf is removed;
+    * the 0.7 keys are read as their 0.71 form — ``derived_from`` becomes
+      ``inputs`` and ``computed`` is dropped;
+    * ``inputs`` is a non-empty list of strings, or absent;
+    * ``method`` is one of ``calculated``/``inferred``/``defaulted``, or absent;
+    * a leaf with at least one usable location is printed (in full, or in part
+      when it also has ``inputs``) and never carries a ``method``;
+    * a leaf with no usable location loses its ``locations`` key. A
+      ``defaulted`` one loses its ``inputs``; one with ``inputs`` and no method
+      is ``inferred`` (the safe reading); ``calculated``/``inferred`` with no
+      ``inputs`` lose the method, leaving an unsupported value the
+      consistency check reports;
     * an empty-string ``value`` is removed.
     """
     if isinstance(values, list):
@@ -2846,22 +2857,33 @@ def _normalize_leaf_provenance(values: Any) -> None:
         # PascalCase). Normalize in place; never descend further.
         if values.get("value") == "":
             del values["value"]
+        legacy_refs = values.pop("derived_from", None)
+        values.pop("computed", None)
+        refs = values.get("inputs", legacy_refs)
+        inputs = (
+            [r for r in refs if isinstance(r, str) and r.strip()] if isinstance(refs, list) else []
+        )
+        if inputs:
+            values["inputs"] = inputs
+        else:
+            values.pop("inputs", None)
+        if values.get("method") not in METHODS:
+            values.pop("method", None)
         locations = values.get("locations")
         grounded = isinstance(locations, list) and any(
             isinstance(loc, dict) and isinstance(loc.get("page_number"), int) for loc in locations
         )
         if grounded:
-            values.pop("computed", None)
-            values.pop("derived_from", None)
-        elif "computed" in values or "derived_from" in values:
-            values["computed"] = True
-            refs = values.get("derived_from")
-            values["derived_from"] = (
-                [r for r in refs if isinstance(r, str)] if isinstance(refs, list) else []
-            )
-            values.pop("locations", None)
-        else:
-            values.pop("locations", None)
+            values.pop("method", None)
+            return
+        values.pop("locations", None)
+        method = values.get("method")
+        if method == METHOD_DEFAULTED:
+            values.pop("inputs", None)
+        elif inputs and method is None:
+            values["method"] = METHOD_INFERRED
+        elif not inputs and method is not None:
+            del values["method"]
         return
     for child in values.values():
         _normalize_leaf_provenance(child)

@@ -743,6 +743,10 @@ def _check_dgml_xml(ws: Workspace, *, docset_id: str, file_id: str, report: Chec
     Malformed XML is skipped throughout: XML validity is owned by the
     generation/extraction writers, not this check.
     """
+    # Every workspace file is a PDF with rendered pages, so a value with no
+    # dg:origin is never source data here. (In a born-digital document it
+    # would be: provenance_issues takes has_pages=False for that case.)
+    has_pages = True
     for key in sorted(ws.blobs.list_blobs(layout.docset_pair_prefix(docset_id, file_id))):
         if not key.endswith(".dgml.xml"):
             continue
@@ -751,39 +755,55 @@ def _check_dgml_xml(ws: Workspace, *, docset_id: str, file_id: str, report: Chec
         except Exception:
             continue
         name = key.rsplit("/", 1)[-1]
-        _check_computed_attribution(
-            xml, docset_id=docset_id, file_id=file_id, name=name, report=report
+        _check_provenance(
+            xml,
+            docset_id=docset_id,
+            file_id=file_id,
+            name=name,
+            has_pages=has_pages,
+            report=report,
         )
         _check_semantic_links(xml, docset_id=docset_id, file_id=file_id, name=name, report=report)
 
 
-def _check_computed_attribution(
-    xml: bytes, *, docset_id: str, file_id: str, name: str, report: CheckReport
+def _check_provenance(
+    xml: bytes, *, docset_id: str, file_id: str, name: str, has_pages: bool, report: CheckReport
 ) -> None:
-    """Flag ``dg:origin="computed"`` elements with no ``dg:href``.
+    """Flag values whose provenance a verifier can't follow (DGML 0.71).
 
-    A computed field's value is verifiable only by walking its ``dg:href``
-    sources and recomputing the derivation (spec §13); one with no sources is
-    an unauditable claim — usually the model derived it from document content
-    the schema never extracted."""
-    from .extraction_xml import unattributed_computed_fields
+    A value is checkable through its ``dg:origin`` boxes, its ``dg:inputs``,
+    or a ``dg:method`` saying it was defaulted. An extracted value with none
+    of them is an unsupported claim — usually the model derived it from
+    document content the schema never extracted. ``dg:method`` placement,
+    dangling inputs and input cycles are reported too. See
+    :func:`dgml_core.extraction_xml.provenance_issues`."""
+    from .extraction_xml import provenance_issues
 
     try:
-        tags = unattributed_computed_fields(xml)
+        found = provenance_issues(xml, has_pages=has_pages)
     except Exception:
         return
-    if tags:
+    by_kind: dict[str, list[str]] = {}
+    for kind, tag, detail in found:
+        by_kind.setdefault(kind, []).append(f"{tag} ({detail})")
+    for kind, entries in sorted(by_kind.items()):
         report.issues.append(
             Issue(
-                kind="computed_field_unattributed",
+                kind=kind,
                 target_type="docset",
                 target_id=docset_id,
-                message=(
-                    f"file '{file_id}' {name}: computed element(s) with no "
-                    f"dg:href sources: {', '.join(sorted(set(tags)))}"
-                ),
+                message=f"file '{file_id}' {name}: {_PROVENANCE_MESSAGES[kind]}: "
+                + ", ".join(sorted(set(entries))),
             )
         )
+
+
+_PROVENANCE_MESSAGES = {
+    "value_unsupported": "value(s) with no dg:origin, dg:inputs or dg:method",
+    "method_misplaced": "dg:method that contradicts the element's other attributes",
+    "inputs_dangling": "dg:inputs target(s) with no element",
+    "inputs_cycle": "element(s) that are their own input",
+}
 
 
 def _check_semantic_links(

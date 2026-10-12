@@ -18,13 +18,24 @@ schema: a leaf is ``{"text": ..., "value"?: ..., "locations": [{"page_number",
 the schema token, validated against the enum before it becomes ``dg:value``),
 a container is a dict of child fields, and a collection is a list of such dicts.
 
-A leaf may instead be **computed** (spec §7/§13) — derived by the model
-reasoning over other extracted values rather than read off the page:
-``{"text", "value"?, "computed": true, "derived_from": [dotted paths]}``.
-Computed leaves serialize with ``dg:origin="computed"``, a mandatory
-``dg:value``, and ``dg:itemprop="computedFrom"``/``dg:href`` naming their
-source elements; each referenced source element gets a stable ``xml:id``
-derived from its path so the ``dg:href`` targets resolve within the file.
+Provenance follows DGML 0.71 (see :mod:`dgml_core.dg_refs`). A leaf may name
+the other values it used — ``"inputs": [dotted paths]`` — and, when the page
+doesn't print it, say how it was produced — ``"method": "calculated" |
+"inferred" | "defaulted"``. That gives four cases:
+
+* ``locations`` only — read from its printed text;
+* ``locations`` + ``inputs`` — printed in part ("3/1"), completed from the
+  inputs (the commencement year);
+* ``inputs`` + ``method`` (``calculated`` or ``inferred``) — not printed,
+  derived from the inputs;
+* ``method: "defaulted"`` — a producer default, with no inputs.
+
+``locations`` serialize as ``dg:origin`` boxes, ``inputs`` as ``dg:inputs``
+(``"#id; #id"``), ``method`` as ``dg:method``, and an unprinted leaf always
+carries ``dg:value``. Each referenced element gets a stable ``xml:id`` derived
+from its path so the ``dg:inputs`` targets resolve within the file. The 0.7
+form (``dg:origin="computed"`` + ``dg:itemprop="computedFrom"``/``dg:href``)
+is never written, and is read as its 0.71 equivalent.
 
 Per spec §13, extracted values live inside the **core DGML file** as a
 ``<dg:extraction>`` element — a direct child of the root ``dg:chunk`` — holding
@@ -49,15 +60,28 @@ from typing import Any
 
 from lxml import etree  # type: ignore[import-untyped]
 
+from .dg_refs import (
+    INPUTS_ATTR,
+    METHOD_ATTR,
+    METHOD_CALCULATED,
+    METHOD_DEFAULTED,
+    METHODS,
+    VALUE_ATTR,
+    effective_inputs,
+    effective_method,
+    effective_origin,
+    format_refs,
+    parse_ref,
+)
 from .extraction_schema import Tag, Vocabulary, parse_invariant, resolve_invariant_path
 from .generation.semantic_transform import _detect_value_type
 from .matching import (
     LeafPath,
     get_at_path,
-    is_computed_leaf,
+    is_unprinted_leaf,
     parse_path,
     path_to_str,
-    walk_computed_leaves,
+    walk_input_leaves,
 )
 
 DG_NS = "http://dgml.io/ns/dg#"
@@ -67,7 +91,6 @@ XML_NS = "http://www.w3.org/XML/1998/namespace"
 _NSMAP_BASE = {"dg": DG_NS, "xsi": XSI_NS}
 EXTRACTION_TAG = f"{{{DG_NS}}}extraction"
 CHUNK_TAG = f"{{{DG_NS}}}chunk"
-_ORIGIN_COMPUTED = "computed"
 
 
 # ── values tree → DGML XML ───────────────────────────────────────────────────
@@ -117,7 +140,7 @@ def _typed_value(text: str, value_type: str) -> tuple[str | None, str | None]:
     return (value_type, dg_value if dg_value is not None else text.strip())
 
 
-# ── computed fields (spec §7/§13) ────────────────────────────────────────────
+# ── value provenance: inputs and method (DGML 0.71) ──────────────────────────
 
 _CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
@@ -136,12 +159,12 @@ def _id_for_path(path: LeafPath) -> str:
 
 
 def _collect_ref_ids(values: dict[str, Any]) -> dict[LeafPath, str]:
-    """Assign an ``xml:id`` to every values-tree path some computed leaf's
-    ``derived_from`` references. Malformed or dangling paths get no id — the
-    corresponding ``dg:href`` entry is dropped at emission."""
+    """Assign an ``xml:id`` to every values-tree path some leaf's ``inputs``
+    references. Malformed or dangling paths get no id — the corresponding
+    ``dg:inputs`` entry is dropped at emission."""
     ids: dict[LeafPath, str] = {}
-    for _path, leaf in walk_computed_leaves(values):
-        refs = leaf.get("derived_from")
+    for _path, leaf in walk_input_leaves(values):
+        refs = leaf.get("inputs")
         if not isinstance(refs, list):
             continue
         for raw in refs:
@@ -154,16 +177,16 @@ def _collect_ref_ids(values: dict[str, Any]) -> dict[LeafPath, str]:
     return ids
 
 
-def count_dropped_refs(values: dict[str, Any]) -> int:
-    """Number of ``derived_from`` entries across all computed leaves that will
-    NOT emit a ``dg:href`` target — malformed path, non-string entry, or a
-    path that dangles in *values*. Mirrors the drop logic in
-    :func:`_collect_ref_ids`/:func:`_set_computed_attrs`; surfaced in
+def count_dropped_inputs(values: dict[str, Any]) -> int:
+    """Number of ``inputs`` entries across all leaves that will NOT emit a
+    ``dg:inputs`` target — malformed path, non-string entry, or a path that
+    dangles in *values*. Mirrors the drop logic in
+    :func:`_collect_ref_ids`/:func:`_resolved_inputs`; surfaced in
     ``extraction_stats.json`` so incomplete provenance is visible instead of
-    silently shrinking the href list."""
+    silently shrinking the inputs list."""
     dropped = 0
-    for _path, leaf in walk_computed_leaves(values):
-        refs = leaf.get("derived_from")
+    for _path, leaf in walk_input_leaves(values):
+        refs = leaf.get("inputs")
         if not isinstance(refs, list):
             continue
         for raw in refs:
@@ -196,20 +219,24 @@ def _leaf_number(leaf: Any) -> Decimal | None:
 
 
 def check_derivations(values: dict[str, Any]) -> tuple[int, int]:
-    """Recompute checkable computed leaves; return ``(checked, mismatched)``.
+    """Recompute checkable calculated leaves; return ``(checked, mismatched)``.
 
     Report-only quality signal (surfaced in ``extraction_stats.json``): for
-    each computed leaf whose ``derived_from`` paths all resolve to leaves
-    with numeric readings, the leaf is *checked*; it counts as *mismatched*
-    when its own numeric value matches neither the SUM of the inputs, the
-    COUNT of the inputs, nor any single input (a passthrough/min/max style
-    derivation) within a $0.05 tolerance. Non-numeric derivations (an
-    inferred currency, a classification) are skipped, not counted.
+    each ``method: "calculated"`` leaf whose ``inputs`` paths all resolve to
+    leaves with numeric readings, the leaf is *checked*; it counts as
+    *mismatched* when its own numeric value matches neither the SUM of the
+    inputs, the COUNT of the inputs, nor any single input (a
+    passthrough/min/max style derivation) within a $0.05 tolerance.
+    ``inferred`` values are judgments, not calculations — a verifier checks
+    only that their inputs exist — and non-numeric calculations are skipped,
+    not counted.
     """
     checked = 0
     mismatched = 0
-    for _path, leaf in walk_computed_leaves(values):
-        refs = leaf.get("derived_from")
+    for _path, leaf in walk_input_leaves(values):
+        if leaf.get("method") != METHOD_CALCULATED:
+            continue
+        refs = leaf.get("inputs")
         if not isinstance(refs, list) or not refs:
             continue
         inputs: list[Decimal] = []
@@ -379,19 +406,97 @@ def count_unnormalized_enum_values(values: dict[str, Any], vocab: Vocabulary) ->
     return count
 
 
-def unattributed_computed_fields(xml: str | bytes) -> list[str]:
-    """Local names of ``dg:origin="computed"`` elements that carry no
-    ``dg:href`` — a computed value whose sources can't be walked (spec §13
-    says computed fields always name their sources). Used by the workspace
-    consistency check."""
+def provenance_issues(xml: str | bytes, *, has_pages: bool = True) -> list[tuple[str, str, str]]:
+    """Check every ``dg:value`` element's provenance against DGML 0.71.
+
+    Returns ``(kind, local_name, detail)`` triples, used by the workspace
+    consistency check:
+
+    * ``value_unsupported`` — an extracted value (inside ``dg:extraction``)
+      with no boxes, no inputs and no method: nothing a verifier can check.
+      Only for files with page images (*has_pages*); in a born-digital
+      document such a value is source data. Document-tree elements are not
+      held to this: grounding them is best-effort.
+    * ``method_misplaced`` — ``dg:method`` on a boxed element, an unknown
+      method, ``defaulted`` with inputs, or ``calculated``/``inferred``
+      without them.
+    * ``inputs_dangling`` — a same-file ``dg:inputs`` target with no element.
+    * ``inputs_cycle`` — an element that is its own input, directly or
+      through other inputs.
+
+    A 0.7 ``dg:origin="computed"`` element is read as its 0.71 equivalent
+    (its ``dg:href`` targets as inputs), so old files check cleanly.
+    Cross-file (``fileid#id``) inputs can't be resolved against one file and
+    are not checked.
+    """
     root = etree.fromstring(xml.encode("utf-8") if isinstance(xml, str) else xml)
-    out: list[str] = []
-    for el in root.iter():
-        if not isinstance(el.tag, str):
-            continue
-        if el.get(f"{{{DG_NS}}}origin") == _ORIGIN_COMPUTED and not el.get(f"{{{DG_NS}}}href"):
-            out.append(_local_name(el))
+    elements = [el for el in root.iter() if isinstance(el.tag, str)]
+    by_id = {xid: el for el in elements if (xid := el.get(f"{{{XML_NS}}}id"))}
+    extracted = {
+        id(el) for ext in root.iter(EXTRACTION_TAG) for el in ext.iter() if isinstance(el.tag, str)
+    }
+    out: list[tuple[str, str, str]] = []
+    edges: dict[str, list[str]] = {}
+    for el in elements:
+        name = _local_name(el)
+        tokens = effective_inputs(el)
+        method = el.get(METHOD_ATTR)
+        boxed = effective_origin(el) is not None
+        if method is not None:
+            if method not in METHODS:
+                out.append(("method_misplaced", name, f"unknown dg:method {method!r}"))
+            elif boxed:
+                out.append(("method_misplaced", name, "dg:method on an element with dg:origin"))
+            elif method == METHOD_DEFAULTED and tokens:
+                out.append(("method_misplaced", name, "defaulted value with dg:inputs"))
+            elif method != METHOD_DEFAULTED and not tokens:
+                out.append(("method_misplaced", name, f"{method} value with no dg:inputs"))
+        if (
+            has_pages
+            and id(el) in extracted
+            and el.get(VALUE_ATTR) is not None
+            and not boxed
+            and not tokens
+            and method is None
+        ):
+            out.append(("value_unsupported", name, "no dg:origin, dg:inputs or dg:method"))
+        local: list[str] = []
+        for token in tokens:
+            ref = parse_ref(token)
+            if ref is None or not ref.local:
+                continue
+            if ref.xml_id not in by_id:
+                out.append(("inputs_dangling", name, token))
+            else:
+                local.append(ref.xml_id)
+        own_id = el.get(f"{{{XML_NS}}}id")
+        if own_id and local:
+            edges[own_id] = local
+    for xid in _ids_on_cycles(edges):
+        out.append(("inputs_cycle", _local_name(by_id[xid]), f"#{xid}"))
     return out
+
+
+def _ids_on_cycles(edges: dict[str, list[str]]) -> list[str]:
+    """The ids that reach themselves through ``dg:inputs`` edges, in document
+    order of first discovery. Iterative DFS; graphs here are small."""
+    on_cycle: list[str] = []
+    seen: set[str] = set()
+    for start in edges:
+        stack = list(edges[start])
+        visited: set[str] = set()
+        while stack:
+            node = stack.pop()
+            if node == start:
+                if start not in seen:
+                    seen.add(start)
+                    on_cycle.append(start)
+                break
+            if node in visited:
+                continue
+            visited.add(node)
+            stack.extend(edges.get(node, ()))
+    return on_cycle
 
 
 def _maybe_set_id(el: etree._Element, path: LeafPath, ids: dict[LeafPath, str]) -> None:
@@ -399,17 +504,36 @@ def _maybe_set_id(el: etree._Element, path: LeafPath, ids: dict[LeafPath, str]) 
         el.set(f"{{{XML_NS}}}id", ids[path])
 
 
-def _set_computed_attrs(
+def _resolved_inputs(value: dict[str, Any], ids: dict[LeafPath, str]) -> list[str]:
+    """The ``#id`` targets of *value*'s ``inputs`` that resolve in this file."""
+    refs = value.get("inputs")
+    out: list[str] = []
+    if isinstance(refs, list):
+        for raw in refs:
+            if not isinstance(raw, str):
+                continue
+            path = parse_path(raw)
+            if path is not None and path in ids:
+                out.append(f"#{ids[path]}")
+    return out
+
+
+def _set_unprinted_attrs(
     el: etree._Element,
     value: dict[str, Any],
     value_type: str | None,
     ids: dict[LeafPath, str],
     enum_values: list[str] | None = None,
 ) -> None:
-    """Emit the computed-field attribute set (spec §13): ``dg:origin="computed"``,
-    a mandatory ``dg:value`` (the model's canonical ``value``, normalized), and
-    ``dg:itemprop="computedFrom"``/``dg:href`` listing the resolvable sources."""
-    el.set(f"{{{DG_NS}}}origin", _ORIGIN_COMPUTED)
+    """Emit the attribute set of a value the page doesn't print (DGML 0.71):
+    a mandatory ``dg:value`` (the model's canonical ``value``, normalized),
+    ``dg:inputs`` listing the resolvable inputs, and ``dg:method``. No
+    ``dg:origin`` — there is nothing printed to box.
+
+    ``calculated``/``inferred`` require inputs: when none resolve, the method
+    is dropped and the element reads as an unsupported value, which the
+    consistency check reports rather than letting the claim stand.
+    ``defaulted`` never carries inputs."""
 
     text_str = el.text or ""
     raw_value = value.get("value")
@@ -421,7 +545,7 @@ def _set_computed_attrs(
         xsi_type: str | None = None
         dg_value = canonical if canonical in enum_values else None
     elif value_type == "string":
-        # Explicitly string-typed: keep dg:value (mandatory for computed fields) but
+        # Explicitly string-typed: keep dg:value (mandatory when unprinted) but
         # verbatim, with no xsi:type and no numeric coercion (see _add_field).
         xsi_type = None
         dg_value = canonical if canonical is not None else text_str.strip()
@@ -440,18 +564,12 @@ def _set_computed_attrs(
         el.set(f"{{{XSI_NS}}}type", xsi_type)
     el.set(f"{{{DG_NS}}}value", dg_value)
 
-    refs = value.get("derived_from")
-    hrefs: list[str] = []
-    if isinstance(refs, list):
-        for raw in refs:
-            if not isinstance(raw, str):
-                continue
-            path = parse_path(raw)
-            if path is not None and path in ids:
-                hrefs.append(f"#{ids[path]}")
-    if hrefs:
-        el.set(f"{{{DG_NS}}}itemprop", "computedFrom")
-        el.set(f"{{{DG_NS}}}href", "; ".join(hrefs))
+    method = value.get("method")
+    inputs = [] if method == METHOD_DEFAULTED else _resolved_inputs(value, ids)
+    if inputs:
+        el.set(INPUTS_ATTR, format_refs(inputs))
+    if method == METHOD_DEFAULTED or (method in METHODS and inputs):
+        el.set(METHOD_ATTR, method)
 
 
 def _add_field(
@@ -472,8 +590,8 @@ def _add_field(
     text_str = "" if text is None else str(text)
     if text_str:
         el.text = text_str
-    if is_computed_leaf(value):
-        _set_computed_attrs(el, value, value_type, ids, enum_values)
+    if is_unprinted_leaf(value):
+        _set_unprinted_attrs(el, value, value_type, ids, enum_values)
         return
     # Grounded leaf: the model-returned normalized `value` wins when it
     # validates (an enum token from the schema's closed set, or a value the
@@ -510,6 +628,11 @@ def _add_field(
     origin = _origin_from_locations(value.get("locations"))
     if origin:
         el.set(f"{{{DG_NS}}}origin", origin)
+    # Printed in part: the boxes say where the printed text is, dg:inputs
+    # what completed it. A boxed value never carries dg:method.
+    inputs = _resolved_inputs(value, ids)
+    if inputs:
+        el.set(INPUTS_ATTR, format_refs(inputs))
 
 
 def _add_tag(
@@ -617,8 +740,8 @@ def _build_extraction(
     """Append a ``<dg:extraction>`` element (with the field tree) under *parent*.
 
     Pass 1 (:func:`_collect_ref_ids`) assigns an ``xml:id`` to every path some
-    computed leaf derives from; pass 2 emits the tree, stamping those ids on
-    the source elements and ``dg:href`` on the computed ones."""
+    leaf names as an input; pass 2 emits the tree, stamping those ids on the
+    input elements and ``dg:inputs`` on the leaves that use them."""
     ext = etree.SubElement(parent, EXTRACTION_TAG)
     _add_children(ext, docset_ns, vocab.roots, values, ids=_collect_ref_ids(values))
     return ext
@@ -655,7 +778,7 @@ def carry_extraction_over(prior_xml: str, new_xml: str) -> str:
     Used by ``docset generate`` when it (re)writes a ``<stem>.dgml.xml`` that
     already carried extracted values — a fresh document-tree render must not
     lose them (spec mode ``full-extraction``). The element is moved verbatim
-    (values, origins, hrefs, xml:ids all preserved), replacing any
+    (values, origins, inputs, xml:ids all preserved), replacing any
     ``dg:extraction`` already present in *new_xml*. Returns *new_xml*
     unchanged when *prior_xml* has none."""
     prior_root = etree.fromstring(prior_xml.encode("utf-8"))
@@ -699,16 +822,16 @@ def _local_name(el: etree._Element) -> str:
 
 
 class _ParseAcc:
-    """Per-parse collector for computed-field href resolution.
+    """Per-parse collector for ``dg:inputs`` resolution.
 
     ``id_paths`` maps every ``xml:id`` seen to its values-tree path;
-    ``computed`` holds the computed leaves whose ``derived_from`` still
-    carries raw ``#id`` hrefs. :meth:`resolve` rewrites those back to dotted
-    paths once the whole tree has been walked."""
+    ``with_inputs`` holds the leaves whose ``inputs`` still carry raw ``#id``
+    references. :meth:`resolve` rewrites those back to dotted paths once the
+    whole tree has been walked."""
 
     def __init__(self) -> None:
         self.id_paths: dict[str, LeafPath] = {}
-        self.computed: list[dict[str, Any]] = []
+        self.with_inputs: list[dict[str, Any]] = []
 
     def record(self, el: etree._Element, path: LeafPath) -> None:
         xml_id = el.get(f"{{{XML_NS}}}id")
@@ -716,12 +839,12 @@ class _ParseAcc:
             self.id_paths[xml_id] = path
 
     def resolve(self) -> None:
-        for leaf in self.computed:
-            leaf["derived_from"] = [
+        for leaf in self.with_inputs:
+            leaf["inputs"] = [
                 path_to_str(self.id_paths[raw[1:]])
                 if raw.startswith("#") and raw[1:] in self.id_paths
                 else raw
-                for raw in leaf["derived_from"]
+                for raw in leaf["inputs"]
             ]
 
 
@@ -734,15 +857,19 @@ def _leaf_value(
     dg_value = el.get(f"{{{DG_NS}}}value")
     if dg_value is not None:
         leaf["value"] = dg_value
-    origin = el.get(f"{{{DG_NS}}}origin")
-    if origin == _ORIGIN_COMPUTED:
-        leaf["computed"] = True
-        href = el.get(f"{{{DG_NS}}}href")
-        leaf["derived_from"] = [r.strip() for r in href.split(";") if r.strip()] if href else []
-        if acc is not None and leaf["derived_from"]:
-            acc.computed.append(leaf)
-        return leaf
-    leaf["locations"] = _locations_from_origin(origin)
+    # Read through dg_refs so a 0.7 dg:origin="computed" element comes back
+    # in its 0.71 form: no boxes, its dg:href targets as inputs.
+    origin = effective_origin(el)
+    inputs = effective_inputs(el)
+    method = effective_method(el)
+    if origin is not None or method is None:
+        leaf["locations"] = _locations_from_origin(origin)
+    if inputs:
+        leaf["inputs"] = inputs
+        if acc is not None:
+            acc.with_inputs.append(leaf)
+    if method is not None:
+        leaf["method"] = method
     return leaf
 
 
@@ -826,9 +953,11 @@ def has_document_tree(xml: str) -> bool:
 def dgml_xml_to_values(xml: str, *, vocab: Vocabulary | None = None) -> dict[str, Any]:
     """Project a core DGML file's ``dg:extraction`` element to values-shape JSON.
 
-    ``{tag: {text, value?, locations}}`` for grounded leaves, ``{text, value?,
-    computed, derived_from}`` for computed ones (hrefs mapped back to dotted
-    paths where they resolve in-file; cross-file or unknown targets stay raw),
+    ``{tag: {text, value?, locations, inputs?}}`` for printed leaves (in full,
+    or in part with ``inputs``), ``{text, value?, inputs?, method}`` for
+    unprinted ones (``dg:inputs`` mapped back to dotted paths where they
+    resolve in-file; cross-file or unknown targets stay raw; a 0.7
+    ``dg:origin="computed"`` element reads as its 0.71 equivalent),
     nested dicts for containers, lists for collections. When *vocab* is given,
     the schema classifies each element (so a single-item collection stays a
     list); otherwise the structure is inferred from the XML alone. Looks for

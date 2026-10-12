@@ -24,7 +24,8 @@ from dgml_core.matching import (
     parse_path,
     path_to_str,
     run_phase2_matching,
-    walk_computed_leaves,
+    walk_input_leaves,
+    walk_unprinted_leaves,
 )
 from dgml_core.models import FileRecord
 from dgml_core.storage import Workspace
@@ -1095,12 +1096,12 @@ def test_phase2_must_not_match(
 
 
 # ---------------------------------------------------------------------------
-# computed leaves + path helpers
+# unprinted leaves + path helpers
 
 
-def test_computed_leaf_skipped_by_matcher(workspace: Workspace) -> None:
-    """A computed leaf (no locations; computed/derived_from keys) is invisible
-    to phase 2: it creates no task, no unmatched item, and survives the copy
+def test_unprinted_leaf_skipped_by_matcher(workspace: Workspace) -> None:
+    """An unprinted leaf (no locations; inputs/method keys) is invisible to
+    phase 2: it creates no task, no unmatched item, and survives the copy
     untouched."""
     _seed_file_and_text(
         workspace,
@@ -1116,8 +1117,8 @@ def test_computed_leaf_skipped_by_matcher(workspace: Workspace) -> None:
         "word_count": {
             "text": "2",
             "value": "2",
-            "computed": True,
-            "derived_from": ["title"],
+            "inputs": ["title"],
+            "method": "calculated",
         },
     }
     result = run_phase2_matching(workspace, "f1aaaaaaaaaa", phase1)
@@ -1127,18 +1128,23 @@ def test_computed_leaf_skipped_by_matcher(workspace: Workspace) -> None:
     assert result.values["word_count"] == phase1["word_count"]
 
 
-def test_walk_computed_leaves_complements_walk_leaves() -> None:
+def test_walk_unprinted_leaves_complements_walk_leaves() -> None:
     values = {
         "title": {"text": "Hello", "locations": [{"page_number": 1}]},
         "items": [
             {"qty": {"text": "3", "locations": [{"page_number": 2}]}},
-            {"qty": {"text": "2", "computed": True, "derived_from": ["items[0].qty"]}},
+            {"qty": {"text": "2", "inputs": ["items[0].qty"], "method": "inferred"}},
         ],
+        "grace": {"text": "0", "method": "defaulted"},
+        # Printed in part: grounded like any leaf, and it has inputs.
+        "start": {"text": "3/1", "locations": [{"page_number": 1}], "inputs": ["title"]},
     }
     grounded = {path for path, _ in _walk_leaves(values)}
-    computed = {path for path, _ in walk_computed_leaves(values)}
-    assert grounded == {("title",), ("items", 0, "qty")}
-    assert computed == {("items", 1, "qty")}
+    unprinted = {path for path, _ in walk_unprinted_leaves(values)}
+    with_inputs = {path for path, _ in walk_input_leaves(values)}
+    assert grounded == {("title",), ("items", 0, "qty"), ("start",)}
+    assert unprinted == {("items", 1, "qty"), ("grace",)}
+    assert with_inputs == {("items", 1, "qty"), ("start",)}
 
 
 @pytest.mark.parametrize(

@@ -202,12 +202,21 @@ def _bbox_norm(loc: dict[str, Any], dims: _PageDims) -> tuple[float, float, floa
 # ---- Walking helpers ------------------------------------------------------
 
 
-def is_computed_leaf(value: dict[str, Any]) -> bool:
-    """True for a computed_field-shaped leaf: a value derived by reasoning
-    (``computed``/``derived_from`` keys) rather than read off the page
-    (``locations``). Computed leaves carry no page locations, so the
-    matcher and phase 3 never touch them."""
-    return "locations" not in value and ("computed" in value or "derived_from" in value)
+def is_unprinted_leaf(value: dict[str, Any]) -> bool:
+    """True for a leaf the page doesn't print: no ``locations``, but an
+    ``inputs`` list or a ``method`` saying how the value was produced
+    (``calculated``, ``inferred`` or ``defaulted``). Unprinted leaves have
+    nothing to ground, so the matcher and phase 3 never touch them.
+
+    A leaf printed only in part (the "3/1" of a period start whose year comes
+    from the commencement date) carries ``locations`` *and* ``inputs``; it is
+    grounded like any other leaf, not unprinted."""
+    return "locations" not in value and ("inputs" in value or "method" in value)
+
+
+def has_inputs(value: dict[str, Any]) -> bool:
+    """True for a leaf whose value names the values it used (``inputs``)."""
+    return isinstance(value.get("inputs"), list) and bool(value["inputs"])
 
 
 def _walk_leaves(values: Any, path: LeafPath = ()) -> Iterable[tuple[LeafPath, dict[str, Any]]]:
@@ -216,13 +225,13 @@ def _walk_leaves(values: Any, path: LeafPath = ()) -> Iterable[tuple[LeafPath, d
     A leaf is recognized by having both ``text`` and ``locations`` keys
     on a dict. Walking stops descending once a leaf is recognized so
     nested dicts inside the locations array don't confuse the walker.
-    Computed leaves (see :func:`is_computed_leaf`) are skipped entirely —
+    Unprinted leaves (see :func:`is_unprinted_leaf`) are skipped entirely —
     they have nothing to ground."""
     if isinstance(values, dict):
         if "text" in values and "locations" in values:
             yield path, values
             return
-        if "text" in values and is_computed_leaf(values):
+        if "text" in values and is_unprinted_leaf(values):
             return
         for k, v in values.items():
             yield from _walk_leaves(v, path + (k,))
@@ -231,22 +240,38 @@ def _walk_leaves(values: Any, path: LeafPath = ()) -> Iterable[tuple[LeafPath, d
             yield from _walk_leaves(v, path + (i,))
 
 
-def walk_computed_leaves(
-    values: Any, path: LeafPath = ()
-) -> Iterable[tuple[LeafPath, dict[str, Any]]]:
-    """Yield ``(path, leaf)`` for every computed_field-shaped leaf — the
-    complement of :func:`_walk_leaves` over the same tree."""
+def walk_all_leaves(values: Any, path: LeafPath = ()) -> Iterable[tuple[LeafPath, dict[str, Any]]]:
+    """Yield ``(path, leaf)`` for every leaf, grounded or not. Leaves are
+    recognized by their lowercase ``text`` key (tag names are PascalCase)."""
     if isinstance(values, dict):
-        if "text" in values and "locations" in values:
-            return
-        if "text" in values and is_computed_leaf(values):
+        if isinstance(values.get("text"), str):
             yield path, values
             return
         for k, v in values.items():
-            yield from walk_computed_leaves(v, path + (k,))
+            yield from walk_all_leaves(v, path + (k,))
     elif isinstance(values, list):
         for i, v in enumerate(values):
-            yield from walk_computed_leaves(v, path + (i,))
+            yield from walk_all_leaves(v, path + (i,))
+
+
+def walk_unprinted_leaves(
+    values: Any, path: LeafPath = ()
+) -> Iterable[tuple[LeafPath, dict[str, Any]]]:
+    """Yield ``(path, leaf)`` for every unprinted leaf — the complement of
+    :func:`_walk_leaves` among leaves that state their provenance."""
+    for leaf_path, leaf in walk_all_leaves(values, path):
+        if is_unprinted_leaf(leaf):
+            yield leaf_path, leaf
+
+
+def walk_input_leaves(
+    values: Any, path: LeafPath = ()
+) -> Iterable[tuple[LeafPath, dict[str, Any]]]:
+    """Yield ``(path, leaf)`` for every leaf with ``inputs`` — unprinted and
+    partly printed alike."""
+    for leaf_path, leaf in walk_all_leaves(values, path):
+        if has_inputs(leaf):
+            yield leaf_path, leaf
 
 
 def _get_at_path(values: dict[str, Any], path: LeafPath) -> Any:
@@ -273,8 +298,8 @@ _PATH_SEG_RE = re.compile(r"\.?([^.\[\]]+)|\[(\d+)\]")
 def parse_path(text: str) -> LeafPath | None:
     """Inverse of :func:`path_to_str` — ``"a.b[0].c"`` → ``("a", "b", 0, "c")``.
 
-    Computed leaves reference their sources with these dotted paths
-    (``derived_from``); this parses them back for resolution against the
+    Leaves reference the values they used with these dotted paths
+    (``inputs``); this parses them back for resolution against the
     values tree. Returns ``None`` for anything malformed rather than
     raising — a model-fumbled path is dropped, not fatal."""
     text = text.strip()
