@@ -1430,9 +1430,11 @@ unresolvable targets stay as raw references). The paths are positional, and a
 model miscounting its own array entries would name a real but wrong element,
 which no check could catch. So the model cites the text it read with each
 input (`"LineItems[6].Amount=$58.20"`), and extraction checks every citation
-before writing. A matching target is kept. A mismatch is re-pointed at the one
-sibling in the same array whose text matches (`matching.repaired_inputs`) or,
-when none or several do, dropped (`matching.dropped_inputs`). The citation
+before writing. A matching target is kept. A mismatch is re-pointed
+(`matching.repaired_inputs`) when the cited text matches the same path under
+one of the value's own ancestors (a path written relative to the value) or at
+exactly one sibling index (a miscounted index). Otherwise it is dropped
+(`matching.dropped_inputs`). The citation
 text itself is not stored. When a value used printed text
 that **no schema field extracts**, that text comes back in `evidence` —
 `[{text, locations}]` — instead, so the schema doesn't need a field per piece
@@ -1589,8 +1591,7 @@ values calculated from `evidence` text are not recomputed). It also counts
 `unprinted_fields` (values with no `locations`), `partly_printed_fields`
 (`locations` plus `inputs`), `dropped_inputs` and `unsupported_values`
 (calculated or inferred values that named nothing they used), and
-`repaired_inputs` (inputs re-pointed to the array entry their cited text
-matched). These replace 0.7's
+`repaired_inputs` (inputs re-pointed to where their cited text matched). These replace 0.7's
 `computed_fields` and `dropped_refs`. The top-level
 `phase1_tool_schema` field records whether the docset schema rode inside the
 `submit_values` tool parameter (`"inlined"`, provider-enforced shape) or

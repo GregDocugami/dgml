@@ -775,6 +775,48 @@ def test_uncited_and_non_leaf_inputs_are_kept() -> None:
     )
 
 
+def _meter() -> dict[str, Any]:
+    """A bill's shape: line items and their summary nested in a meter reading."""
+    bill = _bill()
+    item = bill["Items"][3]
+    item["Category"] = {"text": "tax", "method": "inferred", "inputs": ["Name=City Utility Tax"]}
+    return {"Meters": [bill]}
+
+
+def test_path_relative_to_the_value_is_anchored_by_its_citation() -> None:
+    """The model wrote "Items[3].Amount" from inside Meters[0] — a path that
+    resolves nowhere from the root. The citation finds it under the value's
+    own meter reading, and it is rewritten as a root path."""
+    values = _meter()
+    values["Meters"][0]["Tax"]["inputs"] = ["Items[3].Amount=58.20"]
+    result = verify_input_citations(values)
+    assert values["Meters"][0]["Tax"]["inputs"] == ["Meters[0].Items[3].Amount"]
+    assert values["Meters"][0]["Items"][3]["Category"]["inputs"] == ["Meters[0].Items[3].Name"]
+    assert (result.repaired, result.dropped) == (2, 0)
+
+
+def test_relative_path_with_a_miscounted_index_is_repaired() -> None:
+    values = _meter()
+    values["Meters"][0]["Tax"]["inputs"] = ["Items[2].Amount=58.20"]
+    verify_input_citations(values)
+    assert values["Meters"][0]["Tax"]["inputs"] == ["Meters[0].Items[3].Amount"]
+
+
+def test_relative_path_whose_citation_matches_nothing_is_dropped() -> None:
+    values = _meter()
+    values["Meters"][0]["Tax"]["inputs"] = ["Items[3].Amount=99.99"]
+    result = verify_input_citations(values)
+    assert "inputs" not in values["Meters"][0]["Tax"]
+    assert result.dropped == 1
+
+
+def test_uncited_relative_path_is_anchored_too() -> None:
+    values = _meter()
+    values["Meters"][0]["Tax"]["inputs"] = ["Items[3].Amount"]
+    assert verify_input_citations(values).repaired == 2  # Tax's input and Category's
+    assert values["Meters"][0]["Tax"]["inputs"] == ["Meters[0].Items[3].Amount"]
+
+
 def _end_date_vocab() -> Vocabulary:
     return Vocabulary(
         namespace_uri="http://www.dgml.io/acme/contracts#",

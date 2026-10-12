@@ -205,13 +205,14 @@ extraction_values_phase1_system: |-
   came from. Most are read straight off the page: ``text`` plus
   ``locations``, nothing more. The others take one of four forms.
   ``inputs`` always lists the OTHER values in this same submission
-  that the result used. Write each one as its dotted path into
-  ``values``, then "=", then that value's ``text`` exactly as you
-  returned it: "CommencementDate=March 1, 2026",
-  "LineItems[2].Amount=$27.05". Paths are zero-based and positional —
-  LineItems[2] is the third entry you returned — and the text after
-  "=" is how each reference is checked, so cite the text of the entry
-  you actually used. Only reference values you are actually
+  that the result used. Write each one as its full dotted path from
+  the top of ``values``, then "=", then that value's ``text`` exactly
+  as you returned it: "CommencementDate=March 1, 2026",
+  "Accounts[0].LineItems[2].Amount=$27.05". Always write the full path,
+  even for a value inside the same entry ("Accounts[0].LineItems[2].Name",
+  not "Name"). Paths are zero-based and positional — LineItems[2] is the
+  third entry you returned — and the text after "=" is how each
+  reference is checked, so cite the text of the entry you actually used. Only reference values you are actually
   returning, and list every one the result used.
   When the result used printed text that NO schema field extracts,
   quote that text verbatim in ``evidence`` instead, with the page it

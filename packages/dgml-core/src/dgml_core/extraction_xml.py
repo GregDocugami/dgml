@@ -256,9 +256,9 @@ _CITE_NORM_RE = re.compile(r"[^0-9a-z.\-]+")
 
 
 class CitationResult(NamedTuple):
-    """What :func:`verify_input_citations` did: inputs re-pointed at the one
-    sibling whose text matched, and inputs dropped because nothing (or more
-    than one thing) did."""
+    """What :func:`verify_input_citations` did: inputs re-pointed (a
+    miscounted index, or a path written relative to the citing value), and
+    cited inputs dropped because nothing — or more than one thing — matched."""
 
     repaired: int
     dropped: int
@@ -304,48 +304,93 @@ def _repair_index(values: dict[str, Any], path: LeafPath, cited: str) -> LeafPat
     return found[0] if len(found) == 1 else None
 
 
+def _anchorings(leaf_path: LeafPath, path: LeafPath) -> list[LeafPath]:
+    """Where *path* may point: from the root first, then — for a path written
+    relative to the citing value ("LineItemName" for a line item's own name,
+    "ChargeLineItems[6].Amount" from inside its meter reading) — under each of
+    the value's ancestors, nearest first."""
+    out = [path]
+    for k in range(len(leaf_path) - 1, 0, -1):
+        candidate = leaf_path[:k] + path
+        if candidate not in out:
+            out.append(candidate)
+    return out
+
+
+def _resolve_input(
+    values: dict[str, Any], leaf_path: LeafPath, path: LeafPath, cited: str | None
+) -> tuple[LeafPath | None, bool]:
+    """``(target path, re-pointed?)`` for one input, or ``(None, False)`` when
+    nothing can be trusted.
+
+    With a citation, the first anchoring whose leaf reads as the cited text
+    wins; failing that, the first one with exactly one matching sibling at its
+    last array index (a miscounted index). A target that isn't a leaf (a whole
+    row) can't be compared, so the first anchoring that resolves stands.
+    Without a citation, the first anchoring that resolves stands."""
+    anchorings = _anchorings(leaf_path, path)
+    resolving = [(c, t) for c in anchorings if (t := get_at_path(values, c)) is not None]
+    if cited is None or (resolving and not _is_leaf(resolving[0][1])):
+        if not resolving:
+            return None, False
+        return resolving[0][0], resolving[0][0] != path
+    for candidate, target in resolving:
+        if _cited_text_matches(target, cited):
+            return candidate, candidate != path
+    for candidate in anchorings:
+        if (fixed := _repair_index(values, candidate, cited)) is not None:
+            return fixed, True
+    return None, False
+
+
 def verify_input_citations(values: dict[str, Any]) -> CitationResult:
-    """Check every cited input against the text it cites, in place.
+    """Check every input against the text it cites, in place.
 
     The model writes an input as ``"<dotted path>=<the text it read there>"``
-    (``"MeterReadings[0].ChargeLineItems[6].Amount=58.20"``). Paths are
-    positional, and a model miscounting its own array entries names a real but
-    wrong element — one ``dgml check`` can't catch, because the target exists.
-    The cited text makes the slip detectable:
+    (``"MeterReadings[0].ChargeLineItems[6].Amount=58.20"``). Two slips are
+    common and both name a real but wrong (or no) element — one ``dgml check``
+    can't catch when the target exists:
 
-    * the target leaf reads as the citation → kept;
-    * it doesn't, but exactly one sibling at the path's last array index does
-      → re-pointed there (counted as repaired);
-    * otherwise → dropped (counted), never left pointing at the wrong element.
+    * a miscounted array index, e.g. after two identical rows;
+    * a path written relative to the citing value instead of from the root.
 
-    Every entry is rewritten to its bare path, which is what the serializer and
-    the values JSON carry. An entry with no citation is kept as is, and one
-    whose target isn't a leaf (a whole row or section) can't be compared, so it
-    is kept with its citation removed.
+    The cited text makes both fixable: an input is kept when its target reads
+    as the citation, re-pointed (counted as repaired) when the citation
+    matches under one of the value's ancestors or at exactly one sibling
+    index, and dropped (counted) otherwise — never left pointing at the wrong
+    element. See :func:`_resolve_input`.
+
+    Every entry is rewritten to its bare root path, which is what the
+    serializer and the values JSON carry. An uncited entry is anchored the
+    same way but can't be checked; one that resolves nowhere is left for the
+    serializer to drop and :func:`count_dropped_inputs` to count.
     """
     repaired = dropped = 0
-    for _path, leaf in walk_all_leaves(values):
+    for leaf_path, leaf in walk_all_leaves(values):
         refs = leaf.get("inputs")
         if not isinstance(refs, list):
             continue
         kept: list[Any] = []
         for raw in refs:
-            if not isinstance(raw, str) or _CITE_SEP not in raw:
+            if not isinstance(raw, str):
                 kept.append(raw)
                 continue
-            path_text, _, cited = raw.partition(_CITE_SEP)
+            path_text, sep, cited_text = raw.partition(_CITE_SEP)
             path_text = path_text.strip()
             path = parse_path(path_text)
-            target = get_at_path(values, path) if path is not None else None
-            if path is None or (target is not None and not _is_leaf(target)):
+            if path is None:
                 kept.append(path_text)
-            elif _cited_text_matches(target, cited):
-                kept.append(path_text)
-            elif (fixed := _repair_index(values, path, cited)) is not None:
-                kept.append(path_to_str(fixed))
-                repaired += 1
-            else:
-                dropped += 1
+                continue
+            cited = cited_text if sep else None
+            target, moved = _resolve_input(values, leaf_path, path, cited)
+            if target is None:
+                if cited is None:
+                    kept.append(path_text)  # dangles; counted downstream
+                else:
+                    dropped += 1
+                continue
+            kept.append(path_to_str(target))
+            repaired += moved
         if kept:
             leaf["inputs"] = kept
         else:
