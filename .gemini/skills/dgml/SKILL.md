@@ -703,8 +703,10 @@ the commencement date, keeps its boxes **and** names its `inputs`. Printed
 text a value used that no schema field extracts comes back as `evidence`
 (`[{text, locations}]`) and is written as an anonymous `dg:chunk` next to the
 field. When writing a derivation `## Prompt:`, prefer making every input it
-mentions an extracted field of its own. Unresolvable inputs, and evidence
-that couldn't be boxed, are counted as `matching.dropped_inputs` in
+mentions an extracted field of its own. The model cites the text it read with
+each input, and extraction re-points a miscounted array index at the matching
+entry (`matching.repaired_inputs`). Unresolvable or unmatched inputs, and
+evidence that couldn't be boxed, are counted as `matching.dropped_inputs` in
 `extraction_stats.json`, and calculated or inferred values that named nothing
 as `matching.unsupported_values`. `dgml check` reports `method_misplaced`,
 `inputs_dangling` and `inputs_cycle`, and `value_unsupported` for a 0.7

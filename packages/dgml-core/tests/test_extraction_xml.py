@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from dgml_core.extraction_schema import Tag, Vocabulary, json_schema_to_rnc, parse_rnc
 from dgml_core.extraction_xml import (
@@ -23,6 +25,7 @@ from dgml_core.extraction_xml import (
     has_extraction,
     provenance_issues,
     standalone_extraction_doc,
+    verify_input_citations,
 )
 
 _SCHEMA = {
@@ -711,6 +714,65 @@ def test_defaulted_value_never_carries_inputs() -> None:
 
 
 # ── evidence: inputs that aren't schema fields become dg:chunk (rule 7) ──────
+
+
+# ── input citations ──────────────────────────────────────────────────────────
+
+
+def _bill() -> dict[str, Any]:
+    return {
+        "Items": [
+            {"Name": {"text": "Customer Charge"}, "Amount": {"text": "$12.75", "value": "12.75"}},
+            {"Name": {"text": "Gas Delivery"}, "Amount": {"text": "$318.40"}},
+            {"Name": {"text": "Gas Delivery"}, "Amount": {"text": "$27.05"}},
+            {"Name": {"text": "City Utility Tax"}, "Amount": {"text": "$58.20"}},
+        ],
+        "Tax": {"text": "58.20", "method": "calculated", "inputs": []},
+    }
+
+
+def _verify(inputs: list[Any]) -> tuple[Any, tuple[int, int]]:
+    values = _bill()
+    values["Tax"]["inputs"] = inputs
+    result = verify_input_citations(values)
+    return values["Tax"].get("inputs"), (result.repaired, result.dropped)
+
+
+def test_citation_that_matches_is_kept_bare() -> None:
+    """Money formatting doesn't matter: "58.20" cites "$58.20"."""
+    assert _verify(["Items[3].Amount=58.20"]) == (["Items[3].Amount"], (0, 0))
+
+
+def test_citation_matches_the_normalized_value_too() -> None:
+    assert _verify(["Items[0].Amount=12.75"]) == (["Items[0].Amount"], (0, 0))
+
+
+def test_miscounted_index_is_repaired_to_the_one_matching_sibling() -> None:
+    assert _verify(["Items[2].Amount=$58.20"]) == (["Items[3].Amount"], (1, 0))
+
+
+def test_out_of_range_index_is_repaired_too() -> None:
+    assert _verify(["Items[9].Amount=58.20"]) == (["Items[3].Amount"], (1, 0))
+
+
+def test_ambiguous_citation_is_dropped_not_guessed() -> None:
+    """Two rows print "Gas Delivery"; a wrong index citing that name
+    can't be re-pointed with confidence."""
+    assert _verify(["Items[0].Name=Gas Delivery"]) == (None, (0, 1))
+
+
+def test_citation_matching_nothing_is_dropped() -> None:
+    inputs, counts = _verify(["Items[3].Amount=99.99", "Items[3].Amount=58.20"])
+    assert inputs == ["Items[3].Amount"] and counts == (0, 1)
+
+
+def test_uncited_and_non_leaf_inputs_are_kept() -> None:
+    """No citation: nothing to check. A whole row can't be compared to text,
+    so it is kept with the citation stripped."""
+    assert _verify(["Items[3].Amount", "Items[3]=City Utility Tax"]) == (
+        ["Items[3].Amount", "Items[3]"],
+        (0, 0),
+    )
 
 
 def _end_date_vocab() -> Vocabulary:

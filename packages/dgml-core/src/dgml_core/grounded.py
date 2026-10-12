@@ -94,6 +94,7 @@ from .extraction_xml import (
     embed_extraction_into,
     has_document_tree,
     standalone_extraction_doc,
+    verify_input_citations,
 )
 from .files import FileStore
 from .llm import (
@@ -968,6 +969,7 @@ def extract_values(
     partly_printed_fields = 0
     dropped_inputs = 0
     unsupported_values = 0
+    repaired_inputs = 0
     unnormalized_enums = 0
     derivations_checked = 0
     derivations_mismatched = 0
@@ -1143,6 +1145,14 @@ def extract_values(
         # printed/unprinted boundary; normalize before phases 2/3 (and the
         # serializer) so their invariants hold regardless.
         demoted_claims = _normalize_leaf_provenance(phase1_values)
+        # Inputs are positional paths the model counts out in its own output;
+        # each cites the text it read there, so a miscounted index is
+        # re-pointed at the one sibling that matches, or dropped — never left
+        # naming a real but wrong element. Then normalize again: a value that
+        # lost every input can no longer claim to be calculated or inferred.
+        citations = verify_input_citations(phase1_values)
+        repaired_inputs = citations.repaired
+        demoted_claims += _normalize_leaf_provenance(phase1_values)
         unsupported_values = demoted_claims
         # Unprinted leaves (calculated, inferred, defaulted) carry no
         # locations — phases 2 and 3 never see them; counted here so the
@@ -1153,7 +1163,7 @@ def extract_values(
         # serialization. Counted for paths now, so a later phase failing
         # still leaves it in the stats, and again after grounding to add the
         # evidence that never got a box.
-        dropped_inputs = count_dropped_inputs(phase1_values, evidence=False)
+        dropped_inputs = citations.dropped + count_dropped_inputs(phase1_values, evidence=False)
         unprinted_fields = sum(1 for _ in walk_unprinted_leaves(phase1_values))
         partly_printed_fields = sum(
             1 for _, leaf in walk_input_leaves(phase1_values) if "locations" in leaf
@@ -1208,7 +1218,7 @@ def extract_values(
         # After grounding, so evidence that never got a box (and so emits no
         # dg:chunk) counts as dropped too — and a calculated or inferred value
         # left with nothing it used is an unsupported claim.
-        dropped_inputs = count_dropped_inputs(final_values)
+        dropped_inputs = citations.dropped + count_dropped_inputs(final_values)
         unsupported_values = demoted_claims + count_unsupported_claims(final_values)
 
         # Extracted values live as a dg:extraction element in the file's core
@@ -1314,6 +1324,7 @@ def extract_values(
                     partly_printed_fields=partly_printed_fields,
                     dropped_inputs=dropped_inputs,
                     unsupported_values=unsupported_values,
+                    repaired_inputs=repaired_inputs,
                     unnormalized_enums=unnormalized_enums,
                     derivations_checked=derivations_checked,
                     derivations_mismatched=derivations_mismatched,
@@ -1386,6 +1397,7 @@ def _write_extraction_stats(
     partly_printed_fields: int,
     dropped_inputs: int,
     unsupported_values: int,
+    repaired_inputs: int,
     unnormalized_enums: int,
     derivations_checked: int,
     derivations_mismatched: int,
@@ -1461,6 +1473,9 @@ def _write_extraction_stats(
             # used (or whose inputs all dropped): written with no dg:method,
             # so the XML can't tell them from a value grounding missed.
             "unsupported_values": unsupported_values,
+            # Inputs whose cited text matched a different entry of the same
+            # array than the index the model gave: re-pointed there.
+            "repaired_inputs": repaired_inputs,
             "unnormalized_enum_values": unnormalized_enums,
             "derivations_checked": derivations_checked,
             "derivations_mismatched": derivations_mismatched,

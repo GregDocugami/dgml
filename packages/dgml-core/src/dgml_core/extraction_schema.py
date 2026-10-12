@@ -142,10 +142,11 @@ EXTRACTED_VALUE: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "Dotted paths of the other values in this same submission the "
-                "result used (e.g. 'CommencementDate', 'LineItems[0].Quantity'). "
-                "With locations: the value is printed in part and completed "
-                "from these. Without: it is calculated or inferred from them."
+                "The other values in this same submission the result used, each "
+                "as '<dotted path>=<that value's text>' (e.g. "
+                "'LineItems[2].Amount=$27.05'). With locations: the value is "
+                "printed in part and completed from these. Without: it is "
+                "calculated or inferred from them."
             ),
         },
         # Kept flat ({text, page_number}, no nested locations array): this

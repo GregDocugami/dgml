@@ -56,7 +56,7 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, NamedTuple
 
 from lxml import etree  # type: ignore[import-untyped]
 
@@ -247,6 +247,110 @@ def count_unsupported_claims(values: dict[str, Any]) -> int:
         if not resolvable and not boxed:
             count += 1
     return count
+
+
+# ── input citations: verify, repair or drop positional input paths ───────────
+
+_CITE_SEP = "="
+_CITE_NORM_RE = re.compile(r"[^0-9a-z.\-]+")
+
+
+class CitationResult(NamedTuple):
+    """What :func:`verify_input_citations` did: inputs re-pointed at the one
+    sibling whose text matched, and inputs dropped because nothing (or more
+    than one thing) did."""
+
+    repaired: int
+    dropped: int
+
+
+def _cite_norm(text: Any) -> str:
+    """Text as compared for a citation: lowercase, with only letters, digits,
+    ``.`` and ``-`` kept — so "$1,234.50" and "1234.50" agree."""
+    return _CITE_NORM_RE.sub("", str(text).lower())
+
+
+def _cited_text_matches(node: Any, cited: str) -> bool:
+    """True when leaf *node* reads as *cited*: its verbatim ``text`` or its
+    normalized ``value`` equals the citation, ignoring case, spacing and
+    punctuation."""
+    if not _is_leaf(node):
+        return False
+    want = _cite_norm(cited)
+    if not want:
+        return False
+    return any(
+        _cite_norm(node.get(key)) == want for key in ("text", "value") if node.get(key) is not None
+    )
+
+
+def _repair_index(values: dict[str, Any], path: LeafPath, cited: str) -> LeafPath | None:
+    """The one path that differs from *path* only in its last array index and
+    whose leaf matches *cited*, or ``None`` when no sibling does or several do
+    (two rows with the same amount can't be told apart)."""
+    last = max((i for i, seg in enumerate(path) if isinstance(seg, int)), default=None)
+    if last is None:
+        return None
+    siblings = get_at_path(values, path[:last])
+    if not isinstance(siblings, list):
+        return None
+    found = [
+        candidate
+        for j in range(len(siblings))
+        if _cited_text_matches(
+            get_at_path(values, candidate := path[:last] + (j,) + path[last + 1 :]), cited
+        )
+    ]
+    return found[0] if len(found) == 1 else None
+
+
+def verify_input_citations(values: dict[str, Any]) -> CitationResult:
+    """Check every cited input against the text it cites, in place.
+
+    The model writes an input as ``"<dotted path>=<the text it read there>"``
+    (``"MeterReadings[0].ChargeLineItems[6].Amount=58.20"``). Paths are
+    positional, and a model miscounting its own array entries names a real but
+    wrong element — one ``dgml check`` can't catch, because the target exists.
+    The cited text makes the slip detectable:
+
+    * the target leaf reads as the citation → kept;
+    * it doesn't, but exactly one sibling at the path's last array index does
+      → re-pointed there (counted as repaired);
+    * otherwise → dropped (counted), never left pointing at the wrong element.
+
+    Every entry is rewritten to its bare path, which is what the serializer and
+    the values JSON carry. An entry with no citation is kept as is, and one
+    whose target isn't a leaf (a whole row or section) can't be compared, so it
+    is kept with its citation removed.
+    """
+    repaired = dropped = 0
+    for _path, leaf in walk_all_leaves(values):
+        refs = leaf.get("inputs")
+        if not isinstance(refs, list):
+            continue
+        kept: list[Any] = []
+        for raw in refs:
+            if not isinstance(raw, str) or _CITE_SEP not in raw:
+                kept.append(raw)
+                continue
+            path_text, _, cited = raw.partition(_CITE_SEP)
+            path_text = path_text.strip()
+            path = parse_path(path_text)
+            target = get_at_path(values, path) if path is not None else None
+            if path is None or (target is not None and not _is_leaf(target)):
+                kept.append(path_text)
+            elif _cited_text_matches(target, cited):
+                kept.append(path_text)
+            elif (fixed := _repair_index(values, path, cited)) is not None:
+                kept.append(path_to_str(fixed))
+                repaired += 1
+            else:
+                dropped += 1
+        if kept:
+            leaf["inputs"] = kept
+        else:
+            del leaf["inputs"]
+    return CitationResult(repaired, dropped)
 
 
 _DERIVATION_TOLERANCE = Decimal("0.05")

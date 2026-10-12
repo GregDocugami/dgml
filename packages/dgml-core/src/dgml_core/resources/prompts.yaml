@@ -205,9 +205,14 @@ extraction_values_phase1_system: |-
   came from. Most are read straight off the page: ``text`` plus
   ``locations``, nothing more. The others take one of four forms.
   ``inputs`` always lists the OTHER values in this same submission
-  that the result used, as dotted paths into ``values`` (e.g.
-  "CommencementDate", "LineItems[0].Quantity"); only reference values
-  you are actually returning, and list every one the result used.
+  that the result used. Write each one as its dotted path into
+  ``values``, then "=", then that value's ``text`` exactly as you
+  returned it: "CommencementDate=March 1, 2026",
+  "LineItems[2].Amount=$27.05". Paths are zero-based and positional —
+  LineItems[2] is the third entry you returned — and the text after
+  "=" is how each reference is checked, so cite the text of the entry
+  you actually used. Only reference values you are actually
+  returning, and list every one the result used.
   When the result used printed text that NO schema field extracts,
   quote that text verbatim in ``evidence`` instead, with the page it
   is on — a contract that prints only a start date and a term gives
@@ -230,7 +235,7 @@ extraction_values_phase1_system: |-
      (or ``evidence``) naming what completed it:
        {"text": "3/1", "value": "2026-03-01",
         "locations": [{"page_number": 2}],
-        "inputs": ["CommencementDate"]}
+        "inputs": ["CommencementDate=March 1, 2026"]}
      When the same text is printed several times (a "$" on every
      amount), give a location for each.
   b. CALCULATED — a deterministic calculation over other values that
@@ -238,13 +243,14 @@ extraction_values_phase1_system: |-
      field's ``prompt`` says "Compute as ...", "Count ...". No
      ``locations``:
        {"text": "$349.85", "value": "349.85", "method": "calculated",
-        "inputs": ["LineItems[0].Amount", "LineItems[1].Amount"]}
+        "inputs": ["LineItems[0].Amount=$300.00",
+                   "LineItems[1].Amount=$49.85"]}
   c. INFERRED — a value no spot on the page states, that you conclude
      from evidence: a currency from the issuer's country, a category
      from a line item's description. No ``locations``; ``inputs`` names
      the evidence:
        {"text": "CAD", "value": "CAD", "method": "inferred",
-        "inputs": ["PremisesAddress"]}
+        "inputs": ["PremisesAddress=100 King St W, Toronto"]}
   d. DEFAULTED — the document says nothing and the field's ``prompt``
      names a default to use in that case. No ``locations``, no
      ``inputs`` and no ``evidence``:
@@ -300,7 +306,7 @@ extraction_values_phase1_system: |-
   Use dotted notation for nested arrays (e.g. ``"company.contacts"``).
 
 extraction_values_phase1_user: |-
-  Extract values from the attached PDF against this JSON Schema. Each grounded leaf value carries the verbatim ``text``, the normalized ``value`` where one exists (the classifying enum token for fields with a ``value_enum`` list, ISO dates, plain numbers — omit when the text can't be normalized), and ``locations`` that need only carry the page_number (1-indexed); a later phase will add bounding boxes. A value the page doesn't print in full names the values it used in ``inputs``: printed in part, it keeps its ``locations`` for the printed text; not printed at all, it has no locations and a ``method`` (``calculated``, ``inferred``, or ``defaulted`` with no inputs). If any array-of-objects in the schema is laid out as a table on the page, also return a ``layout`` descriptor naming the columns in visual left-to-right order. Submit results via the submit_values tool call when done.
+  Extract values from the attached PDF against this JSON Schema. Each grounded leaf value carries the verbatim ``text``, the normalized ``value`` where one exists (the classifying enum token for fields with a ``value_enum`` list, ISO dates, plain numbers — omit when the text can't be normalized), and ``locations`` that need only carry the page_number (1-indexed); a later phase will add bounding boxes. A value the page doesn't print in full names the values it used in ``inputs``, each as ``<dotted path>=<that value's text>``: printed in part, it keeps its ``locations`` for the printed text; not printed at all, it has no locations and a ``method`` (``calculated``, ``inferred``, or ``defaulted`` with no inputs). If any array-of-objects in the schema is laid out as a table on the page, also return a ``layout`` descriptor naming the columns in visual left-to-right order. Submit results via the submit_values tool call when done.
 
   SCHEMA:
   {schema}

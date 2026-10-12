@@ -1540,6 +1540,7 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
         "partly_printed_fields": 0,
         "dropped_inputs": 0,
         "unsupported_values": 0,
+        "repaired_inputs": 0,
         "unnormalized_enum_values": 0,
         "derivations_checked": 0,
         "derivations_mismatched": 0,
@@ -2465,6 +2466,7 @@ def test_extract_values_calculated_field_end_to_end(workspace: Workspace) -> Non
         "partly_printed_fields": 0,
         "dropped_inputs": 0,
         "unsupported_values": 0,
+        "repaired_inputs": 0,
         "unnormalized_enum_values": 0,
         "derivations_checked": 0,
         "derivations_mismatched": 0,
@@ -2605,6 +2607,88 @@ def test_normalize_leaf_provenance_wraps_a_lone_input_path() -> None:
         "method": "inferred",
         "inputs": ["PremisesAddress"],
     }
+
+
+def test_extract_values_repairs_a_miscounted_input(workspace: Workspace) -> None:
+    """The slip: the model names the right value at the wrong index.
+    Its cited text points at the one entry that matches, so the input is
+    re-pointed there before serialization and counted as repaired."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(
+        workspace,
+        fid,
+        page=1,
+        words=[
+            {"t": "12.75", "l": [100, 100, 160, 120]},
+            {"t": "58.20", "l": [100, 200, 160, 220]},
+        ],
+    )
+    store = DocSetStore(workspace)
+    ds = store.create(name="Test")
+    store.set_schema(ds.id, _CHARGES_RNC)
+    store.add_file(ds.id, fid)
+
+    phase1_values = {
+        "Bill": {
+            "Items": [
+                {"Amount": {"text": "12.75", "locations": [{"page_number": 1}]}},
+                {"Amount": {"text": "58.20", "locations": [{"page_number": 1}]}},
+            ],
+            "Tax": {
+                "text": "58.20",
+                "value": "58.20",
+                "method": "calculated",
+                "inputs": ["Bill.Items[0].Amount=58.20"],  # right text, wrong index
+            },
+        }
+    }
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch(
+        "litellm.completion",
+        return_value=_tool_call_response("submit_values", {"values": phase1_values}),
+    ):
+        result = extract_values(workspace, ds.id, fid, config=config)
+
+    xml = workspace.blobs.get_blob(result.xml_key).decode("utf-8")
+    assert 'dg:inputs="#bill-items-1-amount" dg:method="calculated"' in xml
+    assert result.values["Bill"]["Tax"]["inputs"] == ["Bill.Items[1].Amount"]
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds.id}/{fid}")
+    assert stats is not None
+    assert stats["matching"]["repaired_inputs"] == 1
+    assert stats["matching"]["dropped_inputs"] == 0
+    assert stats["matching"]["derivations_mismatched"] == 0
+
+
+_CHARGES_RNC = """\
+namespace docset = "http://www.dgml.io/ws/Test"
+
+Bill =
+  element docset:Bill {
+    (text | Items | Tax)*
+  }
+
+Items =
+  element docset:Items {
+    Item*
+  }
+
+Item =
+  element docset:Item {
+    (text | Amount)*
+  }
+
+Amount =
+  element docset:Amount {
+    xsd:decimal
+  }
+
+## Prompt: Compute as the sum of the tax line amounts
+Tax =
+  element docset:Tax {
+    xsd:decimal
+  }
+"""
 
 
 # ── Merged-leaf provenance normalization & enum tool-schema specialization ───
