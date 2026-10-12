@@ -37,6 +37,7 @@ from typing import Any
 from lxml import etree  # type: ignore[import-untyped]
 
 from dgml_core import llm
+from dgml_core.dg_refs import parse_ref, split_refs
 from dgml_core.errors import LinkPlanFailed
 from dgml_core.generation.prompts import get as prompt
 from dgml_core.generation.transcribe import loads_tolerant, strip_fences
@@ -360,9 +361,13 @@ def audit_links(xml: str | bytes) -> LinkAudit:
         if not href:
             continue
         links += 1
-        for token in href.split():
+        for token in split_refs(href):
+            ref = parse_ref(token)
+            if ref is not None and not ref.local:
+                # A cross-file reference can't be resolved against this tree.
+                continue
             pairs += 1
-            object_idx = position_of.get(token.lstrip("#"))
+            object_idx = position_of.get(ref.xml_id if ref is not None else token)
             if object_idx is None:
                 dangling += 1
                 dangling_hrefs.append(token)
