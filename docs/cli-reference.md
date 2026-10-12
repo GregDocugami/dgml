@@ -444,7 +444,10 @@ Walk the workspace and report inconsistencies. Issue kinds emitted today:
 | `text_extraction_failed` | file | pdfminer.six failed to extract any words (records a permanent error so future checks skip retry) |
 | `text_extraction_failed_permanent` | file | A previous extraction recorded a permanent failure; not retried without `--retry-errors` |
 | `dangling_file_reference` | docset | DocSet references a File ID that doesn't exist |
-| `computed_field_unattributed` | docset | A `dg:origin="computed"` element in a file's DGML XML has no `dg:href` sources — the derivation can't be audited (spec §13 requires computed fields to name their sources) |
+| `value_unsupported` | docset | An extracted value in a file's DGML XML has no `dg:origin`, no `dg:inputs` and no `dg:method` — nothing a verifier can check (DGML 0.71). Replaces `computed_field_unattributed`; a 0.7 `dg:origin="computed"` element with no `dg:href` is reported here |
+| `method_misplaced` | docset | A `dg:method` that contradicts the element: on an element with `dg:origin`, an unknown method, `defaulted` with `dg:inputs`, or `calculated`/`inferred` without them |
+| `inputs_dangling` | docset | A `dg:inputs` target (`#id`) names an `xml:id` no element in the file carries. Cross-file (`fileid#id`) inputs are not checked |
+| `inputs_cycle` | docset | An element is its own input, directly or through other inputs |
 | `semlink_dangling_href` | docset | A semantic link's `dg:href` names an `xml:id` no element in the document carries |
 | `semlink_nested` | docset | A semantic link points at the subject's own ancestor or descendant, stating a relationship the tree's nesting already states. Newly generated files can't carry one — re-generating clears it |
 
@@ -1273,10 +1276,11 @@ Accepted JSON dialects (all convert to the same RNC):
   system): a root `$ref`, local `$defs`/`definitions` `$ref`s (sibling
   annotation keys merge over the target), `title` as the DGML element name,
   and leaves recognized *structurally* — an object whose properties are a
-  subset of `{text, value, locations, derived_from, computed}` with `text`
-  present is a leaf, its `value` subschema mapped to the field type
-  (`enum` list → value enumeration; `format: date` / `type: integer` /
-  `boolean` / `number` / a plain-decimal `pattern` → the XSD datatype).
+  subset of `{text, value, locations, inputs, evidence, method}` (or the 0.7
+  `derived_from`/`computed`) with `text` present is a leaf, its `value`
+  subschema mapped to the field type (`enum` list → value enumeration;
+  `format: date` / `type: integer` / `boolean` / `number` / a plain-decimal
+  `pattern` → the XSD datatype).
 
 Same-named tags must share one identical definition; two definitions with the
 same name but different content or annotations are rejected with
@@ -1288,9 +1292,10 @@ rendered RNC carries an explicit `start` rule so the field stays a root.
 
 Return the DocSet's schema as canonical RNC (default) or as the engine's
 JSON Schema projection (`--schema-format json`), whose leaves are
-`extracted_value` refs (`{text, value?, locations?, computed?, derived_from?}`
-— note: projections exported before the merged leaf shape used a
-`grounded_field`/`computed_field` union; both are still accepted on
+`extracted_value` refs (`{text, value?, locations?, inputs?, evidence?, method?}`
+— note: projections exported before DGML 0.71 carried `computed?` /
+`derived_from?` instead of `inputs?` / `method?`, and older ones a
+`grounded_field`/`computed_field` union; all are still accepted on
 `set-schema` input). Errors `SCHEMA_NOT_FOUND` if none is set.
 
 ### `dgml extraction set-guidance <docset_id> --guidance-file PATH`
@@ -1382,35 +1387,86 @@ file has no `dg:extraction` element yet (extraction not run).
 }
 ```
 
-A leaf whose schema `## Prompt:` describes a derivation rule (spec §13) comes
-back **computed** instead of grounded: `computed: true`, no `locations`, and
-`derived_from` listing the dotted paths of the values it was derived from
-(cross-file or unresolvable `dg:href` targets stay as raw references):
+#### Value provenance (DGML 0.71)
+
+Every leaf says where its value came from, with up to three keys that mirror
+three XML attributes:
+
+| JSON | XML | Question it answers |
+| --- | --- | --- |
+| `locations` | `dg:origin` | Where is the element's own text printed? (boxes only) |
+| `inputs` (+ `evidence`) | `dg:inputs` | Which elements did the value use? |
+| `method` | `dg:method` | How was a value the page doesn't print produced? `calculated`, `inferred` or `defaulted` |
+
+That gives four cases:
+
+| | No inputs | Has inputs |
+| --- | --- | --- |
+| **Has `locations`** | Read from its printed text ("$4,200.00" → `4200.00`) | Printed in part, completed from the inputs ("3/1" + the commencement year) |
+| **No `locations`** | `method: "defaulted"`: the field's stated default. Without a method: unsupported (`dgml check` reports `value_unsupported`) | `method: "calculated"` (recomputable) or `"inferred"` (a judgment). Without a method: read as `inferred` |
+
+A value printed in part keeps its boxes **and** names its inputs, so one
+element holds the whole fact:
 
 ```json
 {
+  "PeriodStart": {
+    "text": "3/1",
+    "value": "2026-03-01",
+    "locations": [{"page_number": 2, "bounding_box": [410, 980, 520, 1025]}],
+    "inputs": ["CommencementDate"]
+  },
   "InvoiceTotal": {
     "text": "$349.85",
     "value": "349.85",
-    "computed": true,
-    "derived_from": ["LineItems[0].Quantity", "LineItems[0].UnitPrice"]
+    "method": "calculated",
+    "inputs": ["LineItems[0].Amount", "LineItems[1].Amount"]
   }
 }
 ```
 
-In the XML form (`--as xml`), the same field carries `dg:origin="computed"`,
-`dg:value`, and `dg:itemprop="computedFrom"`/`dg:href` pointing at the source
-elements, which are stamped with matching `xml:id` attributes.
+`inputs` are dotted paths of other extracted values (cross-file or
+unresolvable targets stay as raw references). When a value used printed text
+that **no schema field extracts**, that text comes back in `evidence` —
+`[{text, locations}]` — instead, so the schema doesn't need a field per piece
+of evidence.
 
-**Schema-authoring rule for derivations:** every input a `## Prompt:`
-derivation rule mentions must itself be an extracted field in the schema.
-The model can fold any page content into its arithmetic, but `dg:href` can
-only point at extracted elements — an un-extracted input leaves the computed
-value unverifiable. A `derived_from` entry that doesn't resolve is dropped
-from `dg:href` and counted in `extraction_stats.json` under
-`matching.dropped_refs` (written under `--debug`); a computed field that ends
-up with no `dg:href` at all is flagged by `dgml check` as
-`computed_field_unattributed`.
+In the XML form (`--as xml`) the same fields read:
+
+```xml
+<docset:PeriodStart xsi:type="date" dg:value="2026-03-01"
+    dg:origin="2 410 980 520 1025" dg:inputs="#commencement-date">3/1</docset:PeriodStart>
+<docset:InvoiceTotal xsi:type="decimal" dg:value="349.85"
+    dg:inputs="#line-items-0-amount; #line-items-1-amount"
+    dg:method="calculated">$349.85</docset:InvoiceTotal>
+
+<dg:chunk xml:id="end-date--in-0" dg:origin="1 300 410 620 450">January 15, 2026</dg:chunk>
+<dg:chunk xml:id="end-date--in-1" dg:origin="1 300 520 980 560">a term of twenty-four (24) months</dg:chunk>
+<docset:EndDate xsi:type="date" dg:value="2028-01-14"
+    dg:inputs="#end-date--in-0; #end-date--in-1" dg:method="calculated">2028-01-14</docset:EndDate>
+```
+
+Every element an input names gets a matching `xml:id`. An `evidence` item
+becomes an anonymous `dg:chunk` (its boxes and printed text) just ahead of the
+field that uses it. `dg:itemprop`/`dg:href` are semantic links only and never
+carry provenance.
+
+**Reading 0.7 files.** DGML 0.7 wrote an unprinted value as
+`dg:origin="computed"` plus `dg:itemprop="computedFrom"`/`dg:href`. Those
+files still read: the `"computed"` origin is ignored and the `dg:href`
+targets read as `inputs` (with `method: "inferred"`, the safe reading), so
+the values JSON no longer carries 0.7's `computed`/`derived_from` keys. New extractions
+write only the 0.71 form, and since rewriting an element changes its hash,
+re-anchor any attested file you re-extract. There is no JSON-LD export yet.
+
+**Schema-authoring rule for derivations:** prefer making every input a
+`## Prompt:` derivation rule mentions an extracted field in the schema, so
+`dg:inputs` can point at it. An input the schema doesn't extract can only be
+recorded as `evidence` text. An `inputs` entry that doesn't resolve is
+dropped from `dg:inputs`, and so is `evidence` that phases 2/3 couldn't box.
+Both are counted in `extraction_stats.json` under `matching.dropped_inputs`
+(written under `--debug`). A calculated or inferred value left with nothing
+loses its method and is flagged by `dgml check` as `value_unsupported`.
 
 Extraction asks each model for its own maximum output (128K on current
 frontier Claude/Gemini, 64K on Haiku 4.5 — read from the provider's model
@@ -1518,9 +1574,13 @@ instead of never running.
 `unnormalized_enum_values` (enum-field leaves whose returned value wasn't one
 of the schema's tokens — those serialize text-only, never guessed) and a
 report-only derivation recompute: `derivations_checked` /
-`derivations_mismatched` (computed leaves whose numeric inputs all resolve
-are recomputed; a leaf mismatches when its value agrees with neither the sum,
-the count, nor any single input within $0.05). The top-level
+`derivations_mismatched` (`calculated` leaves whose numeric inputs all
+resolve are recomputed; a leaf mismatches when its value agrees with neither
+the sum, the count, nor any single input within $0.05; `inferred` values and
+values calculated from `evidence` text are not recomputed). It also counts
+`unprinted_fields` (values with no `locations`), `partly_printed_fields`
+(`locations` plus `inputs`) and `dropped_inputs`. These replace 0.7's
+`computed_fields` and `dropped_refs`. The top-level
 `phase1_tool_schema` field records whether the docset schema rode inside the
 `submit_values` tool parameter (`"inlined"`, provider-enforced shape) or
 extraction fell back to a permissive parameter with code-side vocabulary
