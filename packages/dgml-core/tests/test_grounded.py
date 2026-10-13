@@ -1280,6 +1280,36 @@ def test_extract_values_phase3_page_without_words_uses_the_grid(workspace: Works
     assert (phase3["grid_pages"], phase3["boxes_dropped"]) == (1, 0)
 
 
+def test_extract_values_rejects_a_phase3_box_on_the_wrong_words(workspace: Workspace) -> None:
+    """Phase 3 boxes "Goodnight" on the words "Hello world". The text layer
+    says the box is wrong, so it is stripped, and with no box left the value
+    is dropped rather than written pointing at the wrong span."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1, width=2550, height=3300)  # "Hello", "world"
+    workspace.blobs.put_blob(layout.file_page_image_key(fid, 1), _png_header(2550, 3300))
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    phase1_values = {"title": {"text": "Goodnight", "locations": [{"page_number": 1}]}}
+    phase3_args = {"locations": [{"id": "a", "bounding_boxes": [[100, 210, 290, 242]]}]}
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch(
+        "litellm.completion",
+        side_effect=[
+            _tool_call_response("submit_values", {"values": phase1_values}, call_id="p1"),
+            _tool_call_response("submit_locations", phase3_args, call_id="p3"),
+        ],
+    ):
+        result = extract_values(workspace, ds_id, fid, config=config)
+
+    assert "title" not in result.values
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
+    assert stats["matching"]["matched_phase3"] == 1
+    assert stats["matching"]["rejected_boxes"] == 1
+    assert stats["matching"]["dropped_unboxed_values"] == 1
+
+
 def test_extract_values_phase3_states_the_image_size(workspace: Workspace) -> None:
     """With words on the page the pixel contract stays, and the prompt says how
     big the image is, so pixel coordinates have a known frame."""
@@ -1545,6 +1575,7 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
         "unsupported_values": 0,
         "repaired_inputs": 0,
         "dropped_unboxed_values": 0,
+        "rejected_boxes": 0,
         "unnormalized_enum_values": 0,
         "derivations_checked": 0,
         "derivations_mismatched": 0,
@@ -2472,6 +2503,7 @@ def test_extract_values_calculated_field_end_to_end(workspace: Workspace) -> Non
         "unsupported_values": 0,
         "repaired_inputs": 0,
         "dropped_unboxed_values": 0,
+        "rejected_boxes": 0,
         "unnormalized_enum_values": 0,
         "derivations_checked": 0,
         "derivations_mismatched": 0,

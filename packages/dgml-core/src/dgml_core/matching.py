@@ -69,6 +69,7 @@ space.
 from __future__ import annotations
 
 import copy
+import difflib
 import re
 import time
 from collections.abc import Iterable
@@ -302,6 +303,90 @@ def walk_input_leaves(
     for leaf_path, leaf in walk_all_leaves(values, path):
         if has_inputs(leaf):
             yield leaf_path, leaf
+
+
+# ---- Box verification against the text layer -------------------------------
+
+_BOX_SLACK_PX = 3
+_BOX_FUZZY_RATIO = 0.8
+_BOX_KEY_RE = re.compile(r"[^0-9a-z]+")
+
+
+def _box_key(text: str) -> str:
+    """Letters and digits only, lowercased: "$18,642.30" and "18642.30" agree."""
+    return _BOX_KEY_RE.sub("", text.lower())
+
+
+def _box_agrees(words: list[_Word], key: str) -> bool:
+    """True when the words inside a box read as the value whose *key* it
+    claims to locate: the box holds a piece of it (one line of a wrapped
+    value), a run of its words spells it (a loose box that also takes in a
+    label), or the two are close enough to be OCR noise."""
+    keys = [_box_key(w.text) for w in words]
+    joined = "".join(keys)
+    if not joined:
+        return True
+    if joined in key:
+        return True
+    for i in range(len(keys)):
+        run = ""
+        for k in keys[i:]:
+            run += k
+            if run == key:
+                return True
+            if len(run) >= len(key):
+                break
+    return difflib.SequenceMatcher(None, joined, key).ratio() >= _BOX_FUZZY_RATIO
+
+
+def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> int:
+    """Strip every bounding box whose words disagree with its value, in place;
+    return how many were stripped.
+
+    Phase 3 asks a model to draw boxes on a page image, and a model can land
+    on the wrong span — a total boxed on a neighbouring number in the same
+    row. Wherever the page has a text layer the box can be checked: the words
+    whose centres fall inside it must read as the value (see
+    :func:`_box_agrees`). A box that fails keeps only its page number, so a
+    value left with no box at all is then dropped like any value grounding
+    couldn't box. A box with no words under it, a value with no letters or
+    digits ("$"), or a page with no text layer can't be checked and is kept.
+    """
+    cache: dict[int, list[_Word]] = {}
+
+    def page_words(page: int) -> list[_Word]:
+        if page not in cache:
+            try:
+                cache[page] = _load_page_words(workspace, file_id, page)[0]
+            except FileNotFound:
+                cache[page] = []
+        return cache[page]
+
+    stripped = 0
+    for _path, leaf in _walk_leaves(values):
+        key = _box_key(str(leaf.get("text") or ""))
+        locations = leaf.get("locations")
+        if not key or not isinstance(locations, list):
+            continue
+        for i, loc in enumerate(locations):
+            box = loc.get("bounding_box") if isinstance(loc, dict) else None
+            page = loc.get("page_number") if isinstance(loc, dict) else None
+            if not isinstance(box, list) or len(box) != 4 or not isinstance(page, int):
+                continue
+            left, top, right, bottom = box
+            inside = sorted(
+                (
+                    w
+                    for w in page_words(page)
+                    if left - _BOX_SLACK_PX <= (w.left + w.right) / 2 <= right + _BOX_SLACK_PX
+                    and top - _BOX_SLACK_PX <= w.y_center <= bottom + _BOX_SLACK_PX
+                ),
+                key=lambda w: (round(w.y_center / max(w.height, 1)), w.left),
+            )
+            if not _box_agrees(inside, key):
+                locations[i] = {"page_number": page}
+                stripped += 1
+    return stripped
 
 
 def _get_at_path(values: dict[str, Any], path: LeafPath) -> Any:

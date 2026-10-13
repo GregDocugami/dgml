@@ -115,6 +115,7 @@ from .matching import (
     parse_path,
     path_to_str,
     run_phase2_matching,
+    verify_boxes,
     walk_input_leaves,
     walk_unprinted_leaves,
 )
@@ -972,6 +973,7 @@ def extract_values(
     unsupported_values = 0
     repaired_inputs = 0
     dropped_unboxed_values = 0
+    rejected_boxes = 0
     unnormalized_enums = 0
     derivations_checked = 0
     derivations_mismatched = 0
@@ -1223,6 +1225,10 @@ def extract_values(
         # A printed value grounding couldn't box can't be tied to the page:
         # drop it rather than write it with no dg:origin (where it would read
         # as unsupported, or as inferred if it named inputs).
+        # Phase 3's boxes are drawn by a model on the page image; where the
+        # page has a text layer, a box whose words don't read as its value is
+        # wrong, and is stripped before the drop below.
+        rejected_boxes = verify_boxes(workspace, file_id, final_values)
         unboxed = drop_unboxed_values(final_values)
         dropped_unboxed_values = unboxed.values
         dropped_inputs = citations.dropped + unboxed.inputs + count_dropped_inputs(final_values)
@@ -1333,6 +1339,7 @@ def extract_values(
                     unsupported_values=unsupported_values,
                     repaired_inputs=repaired_inputs,
                     dropped_unboxed_values=dropped_unboxed_values,
+                    rejected_boxes=rejected_boxes,
                     unnormalized_enums=unnormalized_enums,
                     derivations_checked=derivations_checked,
                     derivations_mismatched=derivations_mismatched,
@@ -1407,6 +1414,7 @@ def _write_extraction_stats(
     unsupported_values: int,
     repaired_inputs: int,
     dropped_unboxed_values: int,
+    rejected_boxes: int,
     unnormalized_enums: int,
     derivations_checked: int,
     derivations_mismatched: int,
@@ -1487,6 +1495,8 @@ def _write_extraction_stats(
             "repaired_inputs": repaired_inputs,
             # Printed values phases 2/3 found no box for: not written.
             "dropped_unboxed_values": dropped_unboxed_values,
+            # Boxes whose words on the text layer don't read as their value.
+            "rejected_boxes": rejected_boxes,
             "unnormalized_enum_values": unnormalized_enums,
             "derivations_checked": derivations_checked,
             "derivations_mismatched": derivations_mismatched,

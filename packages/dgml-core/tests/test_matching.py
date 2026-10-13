@@ -1577,3 +1577,63 @@ def test_same_text_field_with_free_occurrences_does_not_borrow_a_span(
     assert _box(result, "Pages") == [180, 200, 210, 220]
     assert result.values["Count"]["locations"] == [{"page_number": 1}]
     assert result.stats.shared_value_matches == 0
+
+
+# ---------------------------------------------------------------------------
+# box verification against the text layer
+
+
+def _words(*specs: tuple[str, int, int]) -> list[dict[str, Any]]:
+    """Words on one line, each ``(text, left, right)`` at y 100..130."""
+    return [{"t": t, "l": [left, 100, right, 130]} for t, left, right in specs]
+
+
+_METER_ROW = _words(
+    ("581204", 671, 782),
+    ("533454", 830, 940),
+    ("47", 1003, 1040),
+    (",", 1040, 1049),
+    ("750", 1049, 1105),
+    ("1.025", 1300, 1380),
+    ("Total", 1400, 1450),
+    ("Therms", 1455, 1500),
+    ("48216", 1507, 1600),
+)
+
+
+def _verify(workspace: Workspace, text: str, box: list[int]) -> tuple[int, list[Any]]:
+    from dgml_core.matching import verify_boxes
+
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=_METER_ROW)
+    values: dict[str, Any] = {
+        "V": {"text": text, "locations": [{"page_number": 1, "bounding_box": box}]}
+    }
+    stripped = verify_boxes(workspace, "f1aaaaaaaaaa", values)
+    return stripped, values["V"]["locations"]
+
+
+def test_box_on_a_neighbouring_number_is_stripped(workspace: Workspace) -> None:
+    """A usage total: 48216 boxed on the "47,750" in the same row."""
+    assert _verify(workspace, "48216", [1003, 100, 1105, 130]) == (1, [{"page_number": 1}])
+
+
+def test_box_on_the_value_is_kept(workspace: Workspace) -> None:
+    assert _verify(workspace, "48216", [1507, 100, 1600, 130])[0] == 0
+    assert _verify(workspace, "47,750", [1003, 100, 1105, 130])[0] == 0
+
+
+def test_loose_box_that_takes_in_the_label_is_kept(workspace: Workspace) -> None:
+    assert _verify(workspace, "48216", [1400, 100, 1600, 130])[0] == 0
+
+
+def test_box_holding_one_line_of_a_wrapped_value_is_kept(workspace: Workspace) -> None:
+    assert _verify(workspace, "Total Therms 48216 due", [1400, 100, 1500, 130])[0] == 0
+
+
+def test_ocr_noise_is_tolerated(workspace: Workspace) -> None:
+    assert _verify(workspace, "48Z16", [1507, 100, 1600, 130])[0] == 0
+
+
+def test_box_with_no_words_or_a_value_with_no_letters_is_kept(workspace: Workspace) -> None:
+    assert _verify(workspace, "48216", [10, 500, 90, 530])[0] == 0
+    assert _verify(workspace, "$", [1003, 100, 1105, 130])[0] == 0

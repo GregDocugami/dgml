@@ -699,9 +699,10 @@ when the page doesn't print it, `method`: `calculated`, `inferred`, or
 `defaulted` (no inputs). The XML carries the same as `dg:origin` (boxes only),
 `dg:inputs` (`#id; #id`, with the targets given `xml:id`s) and `dg:method`. A
 value printed only in part, like a "3/1" period start whose year comes from
-the commencement date, keeps its boxes **and** names its `inputs`. A printed
-value that grounding can't box is dropped rather than written without
-`dg:origin` (`matching.dropped_unboxed_values`). Printed
+the commencement date, keeps its boxes **and** names its `inputs`. A box whose
+words on the page's text layer don't read as its value is stripped
+(`matching.rejected_boxes`), and a printed value left with no box is dropped
+rather than written without `dg:origin` (`matching.dropped_unboxed_values`). Printed
 text a value used that no schema field extracts comes back as `evidence`
 (`[{text, locations}]`) and is written as an anonymous `dg:chunk` next to the
 field. When writing a derivation `## Prompt:`, prefer making every input it
