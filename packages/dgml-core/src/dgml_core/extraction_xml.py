@@ -286,7 +286,13 @@ def _cited_text_matches(node: Any, cited: str) -> bool:
         return False
     want = _cite_norm(cited)
     if not want:
-        return False
+        # Nothing but punctuation ("$", "%"): compare the bare text instead.
+        bare = " ".join(cited.split()).lower()
+        return bool(bare) and any(
+            " ".join(str(node[key]).split()).lower() == bare
+            for key in ("text", "value")
+            if node.get(key) is not None
+        )
     want_number = _cite_number(want)
     for key in ("text", "value"):
         if node.get(key) is None:

@@ -757,6 +757,20 @@ def test_numeric_citation_matches_by_value() -> None:
     assert values["Tax"]["inputs"] == ["Items[3].Amount"]
 
 
+def test_punctuation_only_citation_compares_bare_text() -> None:
+    """A currency printed only as "$": the citation normalizes to nothing,
+    so it is compared as written rather than dropped."""
+    values: dict[str, Any] = {
+        "Currency": {"text": "$", "value": "USD", "method": "inferred", "inputs": ["Hq"]},
+        "MeterCurrency": {"text": "$", "method": "inferred", "inputs": ["Currency=$"]},
+        "Hq": {"text": "Springfield"},
+    }
+    assert verify_input_citations(values).dropped == 0
+    assert values["MeterCurrency"]["inputs"] == ["Currency"]
+    values["MeterCurrency"]["inputs"] = ["Currency=€"]
+    assert verify_input_citations(values).dropped == 1
+
+
 def test_miscounted_index_is_repaired_to_the_one_matching_sibling() -> None:
     assert _verify(["Items[2].Amount=$58.20"]) == (["Items[3].Amount"], (1, 0))
 
