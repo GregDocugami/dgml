@@ -1408,8 +1408,10 @@ That gives four cases:
 Where the page has a text layer, every box is checked against it: the words
 inside a box must read as its value (a piece of a wrapped value, a loose box
 that also takes in the label, and OCR noise all pass). A box drawn on the wrong
-span, such as a total boxed on a neighbouring number, is stripped and counted
-in `matching.rejected_boxes`.
+span, such as a total boxed on a neighbouring number, moves to the one span on
+its own line whose words match the value exactly (`matching.snapped_boxes`).
+When there isn't exactly one such span, the box is stripped
+(`matching.rejected_boxes`).
 
 A printed value (in full or in part) left with no bounding box is
 **dropped**, not written: without `dg:origin` it would read as
@@ -1605,8 +1607,9 @@ values calculated from `evidence` text are not recomputed). It also counts
 (calculated or inferred values that named nothing they used), and
 `repaired_inputs` (inputs re-pointed to where their cited text matched), and
 `dropped_unboxed_values` (printed values no box was found for, which are not
-written), and `rejected_boxes` (boxes whose words on the text layer don't read
-as their value). The first four replace 0.7's
+written), `snapped_boxes` and `rejected_boxes` (boxes whose words on the text
+layer didn't read as their value: moved to the exact match on their line, or
+stripped). The first four replace 0.7's
 `computed_fields` and `dropped_refs`. The top-level
 `phase1_tool_schema` field records whether the docset schema rode inside the
 `submit_values` tool parameter (`"inlined"`, provider-enforced shape) or

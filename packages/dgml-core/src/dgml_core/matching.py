@@ -74,7 +74,7 @@ import re
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 from .errors import FileNotFound
 from .storage import Workspace
@@ -339,17 +339,42 @@ def _box_agrees(words: list[_Word], key: str) -> bool:
     return difflib.SequenceMatcher(None, joined, key).ratio() >= _BOX_FUZZY_RATIO
 
 
-def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> int:
-    """Strip every bounding box whose words disagree with its value, in place;
-    return how many were stripped.
+class BoxCheck(NamedTuple):
+    """What :func:`verify_boxes` did to boxes whose words disagreed with their
+    value: moved to the matching span on the same line, or stripped."""
+
+    snapped: int
+    rejected: int
+
+
+def _snap_to_line(
+    words: list[_Word], text: str, box: list[int], page: int
+) -> list[dict[str, Any]] | None:
+    """The locations of the one span on *box*'s line whose words match
+    *text* exactly, or ``None`` when there isn't exactly one. A model that
+    found the right row but drew the box over the wrong column is corrected;
+    anything less certain is not guessed."""
+    top, bottom = box[1], box[3]
+    candidates = []
+    for start, end in _find_spans(text, words):
+        span = words[start:end]
+        if any(w.top < bottom and w.bottom > top for w in span):
+            candidates.append(_span_to_locations((start, end), words, _PageDims(1, 1), page))
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
+    """Check every bounding box against the page's text layer, in place.
 
     Phase 3 asks a model to draw boxes on a page image, and a model can land
     on the wrong span — a total boxed on a neighbouring number in the same
     row. Wherever the page has a text layer the box can be checked: the words
     whose centres fall inside it must read as the value (see
-    :func:`_box_agrees`). A box that fails keeps only its page number, so a
-    value left with no box at all is then dropped like any value grounding
-    couldn't box. A box with no words under it, a value with no letters or
+    :func:`_box_agrees`). A box that fails is moved to the one span on its
+    own line whose words match the value exactly (counted as snapped), or,
+    when there isn't exactly one, keeps only its page number (counted as
+    rejected) — so a value left with no box at all is then dropped like any
+    value grounding couldn't box. A box with no words under it, a value with no letters or
     digits ("$"), or a page with no text layer can't be checked and is kept.
     """
     cache: dict[int, list[_Word]] = {}
@@ -362,16 +387,19 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> int:
                 cache[page] = []
         return cache[page]
 
-    stripped = 0
+    snapped = rejected = 0
     for _path, leaf in _walk_leaves(values):
-        key = _box_key(str(leaf.get("text") or ""))
+        text = str(leaf.get("text") or "")
+        key = _box_key(text)
         locations = leaf.get("locations")
         if not key or not isinstance(locations, list):
             continue
-        for i, loc in enumerate(locations):
+        checked: list[Any] = []
+        for loc in locations:
             box = loc.get("bounding_box") if isinstance(loc, dict) else None
             page = loc.get("page_number") if isinstance(loc, dict) else None
             if not isinstance(box, list) or len(box) != 4 or not isinstance(page, int):
+                checked.append(loc)
                 continue
             left, top, right, bottom = box
             inside = sorted(
@@ -383,10 +411,16 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> int:
                 ),
                 key=lambda w: (round(w.y_center / max(w.height, 1)), w.left),
             )
-            if not _box_agrees(inside, key):
-                locations[i] = {"page_number": page}
-                stripped += 1
-    return stripped
+            if _box_agrees(inside, key):
+                checked.append(loc)
+            elif (moved := _snap_to_line(page_words(page), text, box, page)) is not None:
+                checked.extend(moved)
+                snapped += 1
+            else:
+                checked.append({"page_number": page})
+                rejected += 1
+        leaf["locations"] = checked
+    return BoxCheck(snapped, rejected)
 
 
 def _get_at_path(values: dict[str, Any], path: LeafPath) -> Any:

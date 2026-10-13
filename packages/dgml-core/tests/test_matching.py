@@ -1608,13 +1608,23 @@ def _verify(workspace: Workspace, text: str, box: list[int]) -> tuple[int, list[
     values: dict[str, Any] = {
         "V": {"text": text, "locations": [{"page_number": 1, "bounding_box": box}]}
     }
-    stripped = verify_boxes(workspace, "f1aaaaaaaaaa", values)
-    return stripped, values["V"]["locations"]
+    check = verify_boxes(workspace, "f1aaaaaaaaaa", values)
+    return check.rejected + check.snapped, values["V"]["locations"]
 
 
-def test_box_on_a_neighbouring_number_is_stripped(workspace: Workspace) -> None:
-    """A usage total: 48216 boxed on the "47,750" in the same row."""
-    assert _verify(workspace, "48216", [1003, 100, 1105, 130]) == (1, [{"page_number": 1}])
+def test_box_on_a_neighbouring_number_snaps_to_the_match_on_its_line(
+    workspace: Workspace,
+) -> None:
+    """A usage total: 48216 boxed on the "47,750" in the same row. The
+    row has exactly one "48216", so the box moves there."""
+    assert _verify(workspace, "48216", [1003, 100, 1105, 130]) == (
+        1,
+        [{"page_number": 1, "bounding_box": [1507, 100, 1600, 130]}],
+    )
+
+
+def test_box_with_no_match_on_its_line_is_stripped(workspace: Workspace) -> None:
+    assert _verify(workspace, "99999", [1003, 100, 1105, 130]) == (1, [{"page_number": 1}])
 
 
 def test_box_on_the_value_is_kept(workspace: Workspace) -> None:

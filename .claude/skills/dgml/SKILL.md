@@ -700,7 +700,8 @@ when the page doesn't print it, `method`: `calculated`, `inferred`, or
 `dg:inputs` (`#id; #id`, with the targets given `xml:id`s) and `dg:method`. A
 value printed only in part, like a "3/1" period start whose year comes from
 the commencement date, keeps its boxes **and** names its `inputs`. A box whose
-words on the page's text layer don't read as its value is stripped
+words on the page's text layer don't read as its value moves to the one exact
+match on its line (`matching.snapped_boxes`) or is stripped
 (`matching.rejected_boxes`), and a printed value left with no box is dropped
 rather than written without `dg:origin` (`matching.dropped_unboxed_values`). Printed
 text a value used that no schema field extracts comes back as `evidence`
