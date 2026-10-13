@@ -1310,6 +1310,83 @@ def test_extract_values_rejects_a_phase3_box_on_the_wrong_words(workspace: Works
     assert stats["matching"]["dropped_unboxed_values"] == 1
 
 
+def _word(idx: int, text: str, box: list[int]) -> dict[str, Any]:
+    return {"idx": idx, "text": text, "location": {"page_number": 1, "bounding_box": box}}
+
+
+_RANGE_WORDS = {
+    w["idx"]: w
+    for w in [
+        _word(0, "Gas", [100, 100, 150, 130]),
+        _word(1, "Delivery", [160, 100, 330, 130]),
+        _word(2, "Charge", [100, 140, 190, 170]),  # next line
+        _word(3, "$", [400, 100, 410, 130]),
+        _word(4, "318", [410, 100, 460, 130]),
+        _word(5, ".", [460, 100, 465, 130]),
+        _word(6, "40", [465, 100, 490, 130]),
+    ]
+}
+
+
+def test_word_ranges_become_one_box_per_line() -> None:
+    from dgml_core.grounded import _boxes_from_word_ranges
+
+    assert _boxes_from_word_ranges([[3, 6]], _RANGE_WORDS) == [[400, 100, 490, 130]]
+    # A value wrapping onto a second line: two ranges, two boxes.
+    assert _boxes_from_word_ranges([[0, 1], [2, 2]], _RANGE_WORDS) == [
+        [100, 100, 330, 130],
+        [100, 140, 190, 170],
+    ]
+
+
+@pytest.mark.parametrize("ranges", [[], [[6, 3]], [[3]], [[3, 99]], [["3", "4"]], "3-6"])
+def test_malformed_or_unknown_word_ranges_locate_nothing(ranges: Any) -> None:
+    from dgml_core.grounded import _boxes_from_word_ranges
+
+    assert _boxes_from_word_ranges(ranges, _RANGE_WORDS) is None
+
+
+def test_extract_values_phase3_locates_by_word_ranges(workspace: Workspace) -> None:
+    """On a page with words, phase 3 names the value's words and code builds
+    the box from them: the model never writes a coordinate."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    # "286" printed twice, with nothing to tell phase 2 which is the value.
+    _seed_page_text(
+        workspace,
+        fid,
+        page=1,
+        width=2550,
+        height=3300,
+        words=[
+            {"t": "286", "l": [2366, 1163, 2415, 1192]},
+            {"t": "286", "l": [1544, 1592, 1600, 1625]},
+        ],
+    )
+    workspace.blobs.put_blob(layout.file_page_image_key(fid, 1), _png_header(2550, 3300))
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    phase1_values = {"title": {"text": "286", "locations": [{"page_number": 1}]}}
+    phase3_args = {"locations": [{"id": "a", "words": [[1, 1]]}]}
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch(
+        "litellm.completion",
+        side_effect=[
+            _tool_call_response("submit_values", {"values": phase1_values}, call_id="p1"),
+            _tool_call_response("submit_locations", phase3_args, call_id="p3"),
+        ],
+    ) as mock_completion:
+        result = extract_values(workspace, ds_id, fid, config=config)
+
+    assert mock_completion.call_count == 2
+    tool = mock_completion.call_args_list[1].kwargs["tools"][0]["function"]
+    entry = tool["parameters"]["properties"]["locations"]["items"]
+    assert set(entry["properties"]) == {"id", "words"}
+    assert result.values["title"]["locations"] == [
+        {"page_number": 1, "bounding_box": [1544, 1592, 1600, 1625]}
+    ]
+
+
 def test_extract_values_phase3_states_the_image_size(workspace: Workspace) -> None:
     """With words on the page the pixel contract stays, and the prompt says how
     big the image is, so pixel coordinates have a known frame."""
@@ -1332,7 +1409,10 @@ def test_extract_values_phase3_states_the_image_size(workspace: Workspace) -> No
         result = extract_values(workspace, ds_id, fid, config=config)
 
     kwargs = mock_completion.call_args_list[1].kwargs
-    assert "IMAGE PIXELS" in kwargs["messages"][0]["content"]
+    # Pages with words are answered with word ranges, not pixels; the size
+    # line stays to give the table's pixel positions a frame.
+    assert "WORD CONTRACT" in kwargs["messages"][0]["content"]
+    assert "IMAGE PIXELS" not in kwargs["messages"][0]["content"]
     assert "2550 x 3300 pixels (width x height)" in kwargs["messages"][1]["content"][0]["text"]
     # pages with words keep the default budget; only the grid path is lowered
     assert kwargs["reasoning_effort"] == "high"

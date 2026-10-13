@@ -396,6 +396,51 @@ extraction_values_phase1_nudge_continue: |-
 # {needs_locating} (dgml_core.grounded).
 extraction_values_phase3_system: |-
   You are given one page of a PDF (as an image) plus the OCR words on
+  that page, and a list of values that need to be located on this page.
+  For each value, name the OCR words it is printed as, via the
+  ``submit_locations`` tool call. Code turns the words you name into
+  bounding boxes — you never write coordinates.
+
+  The OCR words are given as a TOON table: a header line
+  ``words[N]{idx,text,left,top,right,bottom}:`` naming the N columns,
+  followed by one comma-separated row per word. Each row is
+  ``idx,text,left,top,right,bottom`` where ``idx`` is the word's OCR
+  index, ``text`` is the word (double-quoted when it contains a comma,
+  quote, or other special character), and ``left,top,right,bottom`` are
+  its position in image pixels, there to tell rows and columns apart.
+  There is exactly one row per word.
+
+  WORD CONTRACT — non-negotiable:
+
+  1. Answer each id with ``words``: a list of ``[first_idx, last_idx]``
+     ranges of the ``idx`` column, inclusive. ``[412, 412]`` is the
+     single word 412; ``[412, 414]`` is words 412, 413 and 414.
+  2. One range per visual line. A value that wraps across two lines
+     gets two ranges, in reading order.
+  3. Name exactly the words of the value — the words whose ``text``
+     spells it, e.g. "$", "318", ".", "40" for "$318.40" — not its
+     label, and not the rest of the row.
+  4. When the same text is printed in several places, pick the
+     occurrence that is this value: the right table row and column, the
+     right section. The positions and the page image help you tell them
+     apart.
+
+  The KNOWN_LOCATIONS section lists values on this page that have
+  already been located by another pass. Use them as row anchors —
+  unmatched fields in the same table row should share a y band with
+  their already-matched siblings.
+
+  ID DISCIPLINE:
+  - For every id in NEEDS_LOCATING, return exactly one ``locations``
+    entry keyed by that id.
+  - Do NOT echo ids that are not in NEEDS_LOCATING. Do NOT invent ids.
+  - Do NOT change the value text — your only job is to name its words.
+
+# The pixel contract, kept for the one case neither alternative covers: a
+# page with no OCR words whose image size is unknown, so neither word ranges
+# nor the 0-1000 grid (which needs the size to scale) can be used.
+extraction_values_phase3_system_pixels: |-
+  You are given one page of a PDF (as an image) plus the OCR words on
   that page with their bounding boxes, and a list of values that need
   to be located on this page. For each value, return its bounding box
   (or several if the text wraps across visual lines) via the
@@ -439,7 +484,7 @@ extraction_values_phase3_system: |-
   - Do NOT change the value text — your only job is to attach bboxes.
 
 extraction_values_phase3_user: |-
-  Locate every NEEDS_LOCATING value on page {page_number}. Return one entry per id via the submit_locations tool. The OCR words table below carries pixel-accurate positions; the page image is provided as a visual fallback.{image_size}
+  Locate every NEEDS_LOCATING value on page {page_number}. Return one entry per id via the submit_locations tool, naming the value's words as ``[first_idx, last_idx]`` ranges of the idx column — one range per visual line. The positions in the table and the page image are there to tell repeated text apart.{image_size}
 
   OCR_WORDS as a TOON table — a header line names the columns, then one comma-separated row per word (idx = the word's OCR index; left,top,right,bottom = its pixel bounding box). All words are on page {page_number}:
   {ocr_words}
@@ -450,6 +495,18 @@ extraction_values_phase3_user: |-
   NEEDS_LOCATING (return exactly these ids):
   {needs_locating}
 
+
+extraction_values_phase3_user_pixels: |-
+  Locate every NEEDS_LOCATING value on page {page_number}. Return one entry per id via the submit_locations tool. The OCR words table below carries pixel-accurate positions; the page image is provided as a visual fallback.{image_size}
+
+  OCR_WORDS as a TOON table — a header line names the columns, then one comma-separated row per word (idx = the word's OCR index; left,top,right,bottom = its pixel bounding box). All words are on page {page_number}:
+  {ocr_words}
+
+  KNOWN_LOCATIONS on page {page_number} (already located, for row anchoring — do NOT include these in your output):
+  {known_locations}
+
+  NEEDS_LOCATING (return exactly these ids):
+  {needs_locating}
 # Phase 3 for a page that has no OCR words (a scan added in digital mode, a
 # page whose text layer is empty). There is no word table to union, so the
 # model reads positions off the image on a 0-1000 grid (Gemini's native box

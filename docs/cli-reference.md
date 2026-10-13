@@ -1320,7 +1320,10 @@ Return the DocSet's extraction guidance as `{docset_id, guidance}`. Errors
 
 Extract values from a file against the DocSet schema and write a `dg:extraction`
 element into the file's core `<stem>.dgml.xml`. Runs a three-phase pipeline
-(LLM text+pages → code OCR matching → per-page LLM bbox). If the file already has
+(LLM text+pages → code OCR matching → per-page LLM location for what matching
+couldn't place). On a page with OCR words, phase 3 names the value's words by
+index and code builds the boxes from them; on a page without, it draws boxes on
+a 0-1000 grid of the page image. If the file already has
 a generated document tree the extraction is added alongside it
 (`mode: full-extraction`); otherwise a minimal core file is created
 (`mode: extraction`). `extraction_stats.json` is written only under the global

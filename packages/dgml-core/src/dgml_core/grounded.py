@@ -125,6 +125,8 @@ from .pages import PdfConfig, load_pdf_config, pdf_page_count_bytes, slice_pages
 from .prompts import PromptKey
 from .prompts import get as prompt
 from .storage import Workspace
+from .textmatch import Word as TextWord
+from .textmatch import line_groups
 from .toon import encode_phase3_words
 from .usage import (
     OPERATION_EXTRACT_VALUES,
@@ -1711,6 +1713,7 @@ def _phase3_call_for_page(
     # 0-1000 frame, so the boxes land in the page's top-left corner. Ask for
     # that frame outright and scale it to pixels here.
     normalized = image_size is not None and not page_words.get("words")
+    by_words = bool(page_words.get("words"))
     user_text = _phase3_user_prompt(
         page_number=page_number,
         items=items,
@@ -1719,9 +1722,13 @@ def _phase3_call_for_page(
         image_size=image_size,
         grid=normalized,
     )
-    system_key = (
-        PromptKey.VALUES_PHASE3_SYSTEM_NO_WORDS if normalized else PromptKey.VALUES_PHASE3_SYSTEM
-    )
+    if normalized:
+        system_key = PromptKey.VALUES_PHASE3_SYSTEM_NO_WORDS
+    elif by_words:
+        system_key = PromptKey.VALUES_PHASE3_SYSTEM
+    else:
+        # No words and no known image size: only the pixel contract is left.
+        system_key = PromptKey.VALUES_PHASE3_SYSTEM_PIXELS
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": prompt(system_key)},
         {
@@ -1732,7 +1739,7 @@ def _phase3_call_for_page(
             ],
         },
     ]
-    tools = [_submit_locations_tool([it.id for it in items])]
+    tools = [_submit_locations_tool([it.id for it in items], by_words=by_words)]
 
     # reasoning_effort is set unconditionally — the wrapper drops it for
     # Anthropic-routed models because tool_choice forces a function call
@@ -1785,7 +1792,15 @@ def _phase3_call_for_page(
                 f"phase 3 page {page_number}: malformed JSON args: {exc}"
             ) from exc
         locations, dropped = _parse_submit_locations(
-            args, page_number, image_size=image_size, normalized=normalized
+            args,
+            page_number,
+            image_size=image_size,
+            normalized=normalized,
+            words_by_idx=(
+                {w["idx"]: w for w in page_words["words"] if isinstance(w.get("idx"), int)}
+                if by_words
+                else None
+            ),
         )
         return _Phase3PageResult(locations=locations, grid=normalized, boxes_dropped=dropped)
 
@@ -1794,12 +1809,111 @@ def _phase3_call_for_page(
     )
 
 
+def _submit_word_ranges_tool(ids: list[str]) -> dict[str, Any]:
+    """The ``by_words`` form of :func:`_submit_locations_tool`. Copying four
+    pixel coordinates per box out of a page-long word table is where models
+    slip — mixing one row's x with another's y, miscopying an edge — so the
+    model names words by their ``idx`` and :func:`_boxes_from_word_ranges`
+    does the geometry."""
+    return {
+        "type": "function",
+        "function": {
+            "name": _TOOL_SUBMIT_LOCATIONS,
+            "description": (
+                "Submit the OCR words of each requested id's value, as word index "
+                "ranges. Each id corresponds to a value already extracted from the "
+                "document; you are only locating it, not changing text."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "locations": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "id": {"type": "string", "enum": ids},
+                                "words": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {
+                                        # [first_idx, last_idx], inclusive: the
+                                        # value's words on one visual line.
+                                        "type": "array",
+                                        "items": {"type": "integer", "minimum": 0},
+                                        "minItems": 2,
+                                        "maxItems": 2,
+                                    },
+                                },
+                            },
+                            "required": ["id", "words"],
+                        },
+                    }
+                },
+                "required": ["locations"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def _boxes_from_word_ranges(
+    ranges: Any, words_by_idx: dict[int, dict[str, Any]]
+) -> list[list[int]] | None:
+    """One ``[left, top, right, bottom]`` box per visual line covering the
+    words named by *ranges* (``[first_idx, last_idx]`` pairs, inclusive), or
+    ``None`` when a range is malformed or names a word the page doesn't have
+    — the value then stays unresolved rather than half-located."""
+    if not isinstance(ranges, list) or not ranges:
+        return None
+    picked: dict[int, dict[str, Any]] = {}
+    for pair in ranges:
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or not all(isinstance(i, int) for i in pair)
+            or pair[0] > pair[1]
+        ):
+            return None
+        for idx in range(pair[0], pair[1] + 1):
+            word = words_by_idx.get(idx)
+            if word is None:
+                return None
+            picked[idx] = word
+    lines = line_groups(
+        [
+            TextWord(
+                idx=idx,
+                text=str(w.get("text", "")),
+                text_norm=str(w.get("text", "")),
+                left=int(w["location"]["bounding_box"][0]),
+                top=int(w["location"]["bounding_box"][1]),
+                right=int(w["location"]["bounding_box"][2]),
+                bottom=int(w["location"]["bounding_box"][3]),
+            )
+            for idx, w in picked.items()
+        ]
+    )
+    return [
+        [
+            min(w.left for w in line),
+            min(w.top for w in line),
+            max(w.right for w in line),
+            max(w.bottom for w in line),
+        ]
+        for line in lines
+    ]
+
+
 def _parse_submit_locations(
     args: dict[str, Any],
     page_number: int,
     *,
     image_size: tuple[int, int] | None = None,
     normalized: bool = False,
+    words_by_idx: dict[int, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], int]:
     """Parse a ``submit_locations`` tool-args payload into
     ``({id → locations}, boxes_dropped)``. Malformed entries are dropped
@@ -1809,7 +1923,12 @@ def _parse_submit_locations(
     scaled to ``image_size`` pixels. A box that is empty or inverted, or (with
     ``image_size`` known) leaves the page, is dropped rather than stored and
     counted in ``boxes_dropped``: the value then stays unresolved instead of
-    pointing at the wrong spot."""
+    pointing at the wrong spot.
+
+    With ``words_by_idx`` (a page with OCR words) an entry's ``words`` ranges
+    are turned into boxes by :func:`_boxes_from_word_ranges`; a malformed or
+    unknown range counts as one dropped box. An entry that answers with
+    ``bounding_boxes`` anyway is still read as pixels."""
     raw = args.get("locations")
     out: dict[str, list[dict[str, Any]]] = {}
     dropped = 0
@@ -1819,8 +1938,17 @@ def _parse_submit_locations(
         if not isinstance(entry, dict):
             continue
         item_id = entry.get("id")
+        if not isinstance(item_id, str):
+            continue
+        if words_by_idx is not None and "words" in entry:
+            boxes = _boxes_from_word_ranges(entry.get("words"), words_by_idx)
+            if boxes is None:
+                dropped += 1
+            else:
+                out[item_id] = [{"page_number": page_number, "bounding_box": b} for b in boxes]
+            continue
         bboxes = entry.get("bounding_boxes")
-        if not isinstance(item_id, str) or not isinstance(bboxes, list):
+        if not isinstance(bboxes, list):
             continue
         locs: list[dict[str, Any]] = []
         for bbox in bboxes:
@@ -1998,7 +2126,12 @@ def _phase3_user_prompt(
         if image_size is not None
         else ""
     )
-    return prompt(PromptKey.VALUES_PHASE3_USER).format(
+    user_key = (
+        PromptKey.VALUES_PHASE3_USER
+        if page_words.get("words")
+        else PromptKey.VALUES_PHASE3_USER_PIXELS
+    )
+    return prompt(user_key).format(
         page_number=page_number,
         image_size=size_line,
         ocr_words=encode_phase3_words(page_words.get("words", [])),
@@ -2007,10 +2140,16 @@ def _phase3_user_prompt(
     )
 
 
-def _submit_locations_tool(ids: list[str]) -> dict[str, Any]:
+def _submit_locations_tool(ids: list[str], *, by_words: bool = False) -> dict[str, Any]:
     """Tool spec for phase 3's submit. ``id`` is constrained to the set
     of ids we're asking about so the model can't invent extras and we
-    don't need to filter on the way back."""
+    don't need to filter on the way back.
+
+    With ``by_words`` (a page with OCR words) each id is answered with word
+    index ranges, one per visual line, and code builds the boxes from those
+    words; otherwise with boxes (the 0-1000 grid on a page without words)."""
+    if by_words:
+        return _submit_word_ranges_tool(ids)
     return {
         "type": "function",
         "function": {
