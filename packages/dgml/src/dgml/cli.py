@@ -2720,7 +2720,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     from dgml_core.grounded import (
         generate_schema,
         load_grounded_config,
-        parse_values_reasoning_effort,
+        parse_reasoning_effort,
     )
 
     store = DocSetStore(ws)
@@ -2788,9 +2788,9 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     if sub == "extract":
         if args.values_effort is not None:
             # Validated here too so the error names the flag, not the library kwarg.
-            parse_values_reasoning_effort(args.values_effort, source="--values-effort")
+            parse_reasoning_effort(args.values_effort, source="--values-effort")
         if args.locations_effort is not None:
-            parse_values_reasoning_effort(args.locations_effort, source="--locations-effort")
+            parse_reasoning_effort(args.locations_effort, source="--locations-effort")
         result = extract_file(
             ws,
             args.docset_id,

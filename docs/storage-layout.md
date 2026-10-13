@@ -682,7 +682,10 @@ Field rules:
   wrapper drops the budget); every other provider does, and at the default it is
   the larger half of a Gemini values model's extraction latency. A page that
   goes through the no-words grid path (no OCR words and a known image size)
-  keeps its own `"medium"`, which this field does not change.
+  keeps its own `"medium"`, which this field does not change. The value is
+  checked by name, not against what the model supports: one the provider
+  refuses fails in phase 3, after the values call has been paid for, on the
+  first page that needs grounding.
 
 ### `generation` (required for `dgml docset generate`)
 

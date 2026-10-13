@@ -74,7 +74,7 @@ then litellm's own env var. See [the `[models]` tiers](storage-layout.md#the-mod
 | Section | TOML table | Notes |
 |---|---|---|
 | `Models(family, light, standard, advanced, expert, anthropic_api_key, google_api_key, openai_api_key)` | `[models]` | `family` expands into the four tiers; an explicit tier (a `Model`) wins. A provider key serves every model of that provider that carries none of its own. |
-| `Grounded(schema_model, values_model, max_tool_iters, values_reasoning_effort)` | `[grounded]` | Extraction (`values_model`, advanced tier) and schema generation (`schema_model`, expert tier). |
+| `Grounded(schema_model, values_model, max_tool_iters, values_reasoning_effort, locations_reasoning_effort)` | `[grounded]` | Extraction (`values_model`, advanced tier) and schema generation (`schema_model`, expert tier). |
 | `Classification(model, max_pages, naming_attempts)` | `[classification]` | Light tier. |
 | `Ocr(provider, max_concurrency, options)` | `[ocr]` | `options` are the provider's own fields, validated by its `parse_config`. |
 | `Pdf(provider)` | `[pdf]` | `ghostscript` (default) or `pypdfium2`. |

@@ -174,7 +174,9 @@ _DEFAULT_REASONING_EFFORT = "high"
 # ``tool_choice``, so the LLM wrapper drops ``reasoning_effort`` for
 # Anthropic-routed models and the value would be inert there on Claude — but it
 # is NOT dropped for other providers. Location grounding on pages with OCR words
-# keeps the default; see _PHASE3_GRID_REASONING_EFFORT for pages without them.
+# takes ``grounded.locations_reasoning_effort`` (_LOCATIONS_REASONING_EFFORT
+# unless the workspace sets it); see _PHASE3_GRID_REASONING_EFFORT for pages
+# without them.
 _VALUES_REASONING_EFFORT = "medium"
 
 # What ``grounded.values_reasoning_effort`` (``--values-effort``) and
@@ -182,9 +184,20 @@ _VALUES_REASONING_EFFORT = "medium"
 # effort names litellm takes, sent as given, plus ``"default"``, which sends no
 # ``reasoning_effort`` at all and leaves the budget to the provider. ``"none"``
 # is litellm's own value and is sent (it asks the provider to turn thinking
-# off), which is why omitting the field needs a word of its own.
-VALUES_REASONING_EFFORT_CHOICES = ("none", "minimal", "low", "medium", "high", "xhigh")
-VALUES_REASONING_EFFORT_PROVIDER_DEFAULT = "default"
+# off), which is why omitting the field needs a word of its own. The names
+# are checked here, not against what the model supports: a budget the
+# provider refuses fails at the call that sends it.
+REASONING_EFFORT_CHOICES = ("none", "minimal", "low", "medium", "high", "xhigh")
+REASONING_EFFORT_PROVIDER_DEFAULT = "default"
+# The names these had when only the values effort was configurable.
+VALUES_REASONING_EFFORT_CHOICES = REASONING_EFFORT_CHOICES
+VALUES_REASONING_EFFORT_PROVIDER_DEFAULT = REASONING_EFFORT_PROVIDER_DEFAULT
+
+# Location grounding on a page with OCR words (phase 3) runs at the general
+# default unless ``grounded.locations_reasoning_effort`` says otherwise. This
+# is the one owner of that default: GroundedConfig carries it and the phase-3
+# functions take the configured value as a required argument.
+_LOCATIONS_REASONING_EFFORT = _DEFAULT_REASONING_EFFORT
 
 # Location grounding on a page with no OCR words (the 0-1000 grid path) runs at
 # "medium". There the model only reads a position off the image; at "high" it
@@ -192,7 +205,8 @@ VALUES_REASONING_EFFORT_PROVIDER_DEFAULT = "default"
 # on Gemini over 30 records-retrieval documents, most of them scans, 3 repeats:
 # "medium" placed as many boxes on scanned pages as "high", for about half the
 # grounding cost; "low" was cheaper again but started to miss boxes. Pages with
-# words keep the default, which that measurement did not cover.
+# words take ``grounded.locations_reasoning_effort`` (default
+# _LOCATIONS_REASONING_EFFORT), which that measurement did not cover.
 _PHASE3_GRID_REASONING_EFFORT = "medium"
 
 
@@ -281,25 +295,31 @@ class GroundedConfig:
     # either way (the call forces its tool); every other provider sends it,
     # and at the default it is the larger half of a Gemini values model's
     # latency. A page on the no-words grid path keeps _PHASE3_GRID_REASONING_EFFORT.
-    locations_reasoning_effort: str | None = _DEFAULT_REASONING_EFFORT
+    # Checked by name only: a budget the model refuses fails in phase 3, after
+    # the values call has been paid for, on the first page that needs grounding.
+    locations_reasoning_effort: str | None = _LOCATIONS_REASONING_EFFORT
 
 
-def parse_values_reasoning_effort(raw: Any, *, source: str) -> str | None:
+def parse_reasoning_effort(raw: Any, *, source: str) -> str | None:
     """Validate a reasoning effort (values or locations) from the config file
     or the CLI.
 
     Returns the effort to send, or ``None`` for ``"default"`` (send nothing).
-    ``source`` names where the value came from, for the error message.
+    ``source`` names where the value came from, for the error message. The
+    name is checked, not the model's support for it.
     """
-    if raw == VALUES_REASONING_EFFORT_PROVIDER_DEFAULT:
+    if raw == REASONING_EFFORT_PROVIDER_DEFAULT:
         return None
-    if isinstance(raw, str) and raw in VALUES_REASONING_EFFORT_CHOICES:
+    if isinstance(raw, str) and raw in REASONING_EFFORT_CHOICES:
         return raw
     accepted = ", ".join(
-        repr(v)
-        for v in (*VALUES_REASONING_EFFORT_CHOICES, VALUES_REASONING_EFFORT_PROVIDER_DEFAULT)
+        repr(v) for v in (*REASONING_EFFORT_CHOICES, REASONING_EFFORT_PROVIDER_DEFAULT)
     )
     raise GroundedConfigInvalid(f"{source} must be one of {accepted} if set (got {raw!r})")
+
+
+# The parser's name when only the values effort was configurable.
+parse_values_reasoning_effort = parse_reasoning_effort
 
 
 def load_grounded_config(
@@ -354,18 +374,18 @@ def load_grounded_config(
     ):
         raise GroundedConfigInvalid("'grounded.max_tool_iters' must be a positive integer if set")
     values_reasoning_effort = (
-        parse_values_reasoning_effort(
+        parse_reasoning_effort(
             sec["values_reasoning_effort"], source="'grounded.values_reasoning_effort'"
         )
         if "values_reasoning_effort" in sec
         else _VALUES_REASONING_EFFORT
     )
     locations_reasoning_effort = (
-        parse_values_reasoning_effort(
+        parse_reasoning_effort(
             sec["locations_reasoning_effort"], source="'grounded.locations_reasoning_effort'"
         )
         if "locations_reasoning_effort" in sec
-        else _DEFAULT_REASONING_EFFORT
+        else _LOCATIONS_REASONING_EFFORT
     )
 
     return GroundedConfig(
@@ -1300,7 +1320,7 @@ def _run_phase3(
     api_base: str | None,
     max_tool_iters: int,
     totals: dict[str, Any],
-    reasoning_effort: str | None = _DEFAULT_REASONING_EFFORT,
+    reasoning_effort: str | None,
 ) -> tuple[dict[str, Any], int, int, int, int]:
     """Resolve ``unmatched`` items via one LLM call per page, run in
     parallel across pages.
@@ -1392,7 +1412,7 @@ def _phase3_call_for_page(
     api_base: str | None,
     max_tool_iters: int,
     totals: dict[str, Any],
-    reasoning_effort: str | None = _DEFAULT_REASONING_EFFORT,
+    reasoning_effort: str | None,
 ) -> _Phase3PageResult:
     """One litellm call: send the page + ids that need locating, return
     ``{id: [{page_number, bounding_box}, ...]}`` parsed from the model's
@@ -1451,9 +1471,11 @@ def _phase3_call_for_page(
     # reasoning_effort is set unconditionally — the wrapper drops it for
     # Anthropic-routed models because tool_choice forces a function call
     # below, and Anthropic rejects extended thinking with forced tools. A
-    # page with OCR words takes the configured locations effort (the module
-    # default unless the workspace set ``grounded.locations_reasoning_effort``,
-    # ``None`` = send none); the no-words grid path keeps its own constant.
+    # page with OCR words takes the configured locations effort
+    # (``grounded.locations_reasoning_effort``, ``None`` = send none); the
+    # no-words grid path keeps its own constant. The effort was checked by name
+    # at load time, not against the model: one the provider refuses fails here,
+    # after phase 1 has been paid for.
     llm_config = LLMConfig(
         model=model,
         api_key=api_key,
@@ -2866,6 +2888,8 @@ def _resolve_api_key(literal: str | None, env_name: str | None) -> str | None:
 
 __all__ = [
     "DEFAULT_MAX_TOOL_ITERS",
+    "REASONING_EFFORT_CHOICES",
+    "REASONING_EFFORT_PROVIDER_DEFAULT",
     "VALUES_REASONING_EFFORT_CHOICES",
     "VALUES_REASONING_EFFORT_PROVIDER_DEFAULT",
     "ExtractionResult",
