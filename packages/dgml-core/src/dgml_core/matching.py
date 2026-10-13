@@ -350,17 +350,27 @@ class BoxCheck(NamedTuple):
 def _snap_to_line(
     words: list[_Word], text: str, box: list[int], page: int
 ) -> list[dict[str, Any]] | None:
-    """The locations of the one span on *box*'s line whose words match
-    *text* exactly, or ``None`` when there isn't exactly one. A model that
-    found the right row but drew the box over the wrong column is corrected;
-    anything less certain is not guessed."""
+    """The locations of the span nearest *box*, among those on its line(s)
+    whose words match *text* exactly — or ``None`` when there is none, or two
+    are equally near. A model that found the right row but drew the box over
+    the wrong column (or straddling two rows) is corrected; a tie is not
+    guessed."""
     top, bottom = box[1], box[3]
-    candidates = []
+    cx, cy = (box[0] + box[2]) / 2, (top + bottom) / 2
+    scored: list[tuple[float, tuple[int, int]]] = []
     for start, end in _find_spans(text, words):
         span = words[start:end]
-        if any(w.top < bottom and w.bottom > top for w in span):
-            candidates.append(_span_to_locations((start, end), words, _PageDims(1, 1), page))
-    return candidates[0] if len(candidates) == 1 else None
+        if not any(w.top < bottom and w.bottom > top for w in span):
+            continue
+        sx = (min(w.left for w in span) + max(w.right for w in span)) / 2
+        sy = (min(w.top for w in span) + max(w.bottom for w in span)) / 2
+        scored.append((((sx - cx) ** 2 + (sy - cy) ** 2) ** 0.5, (start, end)))
+    if not scored:
+        return None
+    scored.sort()
+    if len(scored) > 1 and scored[1][0] - scored[0][0] < 1:
+        return None
+    return _span_to_locations(scored[0][1], words, _PageDims(1, 1), page)
 
 
 def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
@@ -370,9 +380,9 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
     on the wrong span — a total boxed on a neighbouring number in the same
     row. Wherever the page has a text layer the box can be checked: the words
     whose centres fall inside it must read as the value (see
-    :func:`_box_agrees`). A box that fails is moved to the one span on its
-    own line whose words match the value exactly (counted as snapped), or,
-    when there isn't exactly one, keeps only its page number (counted as
+    :func:`_box_agrees`). A box that fails is moved to the nearest span on
+    its own line(s) whose words match the value exactly (counted as snapped),
+    or, when there is none or two tie, keeps only its page number (counted as
     rejected) — so a value left with no box at all is then dropped like any
     value grounding couldn't box. A box with no words under it, a value with no letters or
     digits ("$"), or a page with no text layer can't be checked and is kept.

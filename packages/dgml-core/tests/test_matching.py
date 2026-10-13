@@ -1647,3 +1647,27 @@ def test_ocr_noise_is_tolerated(workspace: Workspace) -> None:
 def test_box_with_no_words_or_a_value_with_no_letters_is_kept(workspace: Workspace) -> None:
     assert _verify(workspace, "48216", [10, 500, 90, 530])[0] == 0
     assert _verify(workspace, "$", [1003, 100, 1105, 130])[0] == 0
+
+
+def test_box_straddling_two_rows_snaps_to_the_nearer_match(workspace: Workspace) -> None:
+    """A usage total: "286" printed on two adjacent rows; the model's
+    box straddles both but sits over the lower one's column."""
+    from dgml_core.matching import verify_boxes
+
+    rows = [
+        {"t": "286", "l": [2366, 1163, 2415, 1192]},  # chart row
+        {"t": "277", "l": [1003, 1192, 1059, 1225]},
+        {"t": "286", "l": [1507, 1192, 1560, 1225]},  # meter row
+    ]
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=rows)
+    values: dict[str, Any] = {
+        "V": {
+            "text": "286",
+            "locations": [{"page_number": 1, "bounding_box": [990, 1170, 1070, 1225]}],
+        }
+    }
+    check = verify_boxes(workspace, "f1aaaaaaaaaa", values)
+    assert (check.snapped, check.rejected) == (1, 0)
+    assert values["V"]["locations"] == [
+        {"page_number": 1, "bounding_box": [1507, 1192, 1560, 1225]}
+    ]

@@ -1408,10 +1408,10 @@ That gives four cases:
 Where the page has a text layer, every box is checked against it: the words
 inside a box must read as its value (a piece of a wrapped value, a loose box
 that also takes in the label, and OCR noise all pass). A box drawn on the wrong
-span, such as a total boxed on a neighbouring number, moves to the one span on
-its own line whose words match the value exactly (`matching.snapped_boxes`).
-When there isn't exactly one such span, the box is stripped
-(`matching.rejected_boxes`).
+span, such as a total boxed on a neighbouring number, moves to the nearest span on
+its own line (or lines) whose words match the value exactly
+(`matching.snapped_boxes`). When there is no such span, or two are equally
+near, the box is stripped (`matching.rejected_boxes`).
 
 A printed value (in full or in part) left with no bounding box is
 **dropped**, not written: without `dg:origin` it would read as
