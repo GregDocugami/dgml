@@ -52,8 +52,9 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -94,10 +95,14 @@ from .extraction_xml import (
 )
 from .files import FileStore
 from .llm import (
+    CallResult,
     LLMConfig,
     _mark_document_cacheable,
+    _no_text_detail,
     call_with_tools,
     is_anthropic_model,
+    is_request_rejection,
+    is_request_too_large,
     model_max_output_tokens,
 )
 from .matching import (
@@ -110,6 +115,7 @@ from .matching import (
 )
 from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .ocr import _image_dimensions as _png_dimensions
+from .pages import PdfConfig, load_pdf_config, pdf_page_count_bytes, slice_pages
 from .prompts import PromptKey
 from .prompts import get as prompt
 from .storage import Workspace
@@ -123,6 +129,8 @@ from .usage import (
     add_partial,
     record_usage,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---- Constants ------------------------------------------------------------
 
@@ -205,11 +213,34 @@ _DEFAULT_TIMEOUT_SECONDS = 1800
 # across instances of the document kind, few enough to keep cost bounded.
 DEFAULT_SCHEMA_SAMPLE_SIZE = 3
 
+logger = logging.getLogger(__name__)
+
 _TOOL_GET_PAGE_WORDS = "get_page_words"
 _TOOL_SUBMIT_SCHEMA = "submit_schema"
 _TOOL_SUBMIT_VALUES = "submit_values"
 _TOOL_APPEND_ENTRIES = "append_entries"
 _TOOL_SUBMIT_LOCATIONS = "submit_locations"
+
+# Phase-1 turns per attempt that may end with plain text (no tool call)
+# before the attempt fails. Reachable only where phase 1 runs on auto tool
+# choice (see _run_extract_loop): on Anthropic, on an endpoint that rejected
+# "required", and where litellm's drop_params removed it. There a model
+# sometimes answers in prose, asks a question, or writes the submission as
+# JSON text instead of calling the tool. Each such turn is answered with a
+# reminder and retried, still on auto. Retries do not spend max_tool_iters.
+_MAX_NO_TOOL_CALL_RETRIES = 2
+
+# How much of a text-only reply the error message quotes.
+_NO_TOOL_CALL_REPLY_PREVIEW_CHARS = 500
+
+# (model, api_base, reasoning_effort) endpoints shown to refuse
+# tool_choice="required": a request sent with it was rejected and the same
+# request on auto then succeeded. The effort is part of the key because a
+# Claude model behind an unrecognised alias rejects "required" only together
+# with thinking. Later
+# attempts against them start on auto instead of re-sending a doomed request,
+# and the warning is emitted once, when an endpoint is added.
+_REQUIRED_TOOL_CHOICE_REJECTED: set[tuple[str, str | None, str | None]] = set()
 
 
 # ---- Config ---------------------------------------------------------------
@@ -267,22 +298,38 @@ def parse_values_reasoning_effort(raw: Any, *, source: str) -> str | None:
     raise GroundedConfigInvalid(f"{source} must be one of {accepted} if set (got {raw!r})")
 
 
-def load_grounded_config(workspace: Workspace) -> GroundedConfig:
+def load_grounded_config(
+    workspace: Workspace,
+    *,
+    schema_model: str | None = None,
+    values_model: str | None = None,
+) -> GroundedConfig:
     """Resolve the two grounded models (schema generation → ``expert`` tier,
     value extraction → ``advanced`` tier) and their credentials from the merged
     config's ``[grounded]`` section and ``[models]`` tiers. A model set on the
-    section overrides its tier."""
+    section overrides its tier.
+
+    ``schema_model`` / ``values_model`` are per-call overrides and resolve
+    exactly as if written in ``[grounded]``: the section's own ``schema_*`` /
+    ``values_*`` credentials still apply, and nothing a tier carries does.
+    """
     merged = load_merged_config(workspace)
+    overrides = {
+        key: model
+        for key, model in (("schema_model", schema_model), ("values_model", values_model))
+        if model is not None
+    }
+    if overrides:
+        section = merged.get(ConfigSection.GROUNDED)
+        base: dict[str, Any] = section if isinstance(section, dict) else {}
+        merged = {**merged, ConfigSection.GROUNDED: {**base, **overrides}}
     schema = resolve_tiered_model(
         merged,
         section_name=ConfigSection.GROUNDED,
         tier=Tier.EXPERT,
         invalid=GroundedConfigInvalid,
         missing=GroundedConfigMissing,
-        model_field="schema_model",
-        key_field="schema_api_key",
-        env_field="schema_api_key_env",
-        base_field="schema_api_base",
+        prefix="schema_",
     )
     values = resolve_tiered_model(
         merged,
@@ -290,10 +337,7 @@ def load_grounded_config(workspace: Workspace) -> GroundedConfig:
         tier=Tier.ADVANCED,
         invalid=GroundedConfigInvalid,
         missing=GroundedConfigMissing,
-        model_field="values_model",
-        key_field="values_api_key",
-        env_field="values_api_key_env",
-        base_field="values_api_base",
+        prefix="values_",
     )
 
     section = merged.get(ConfigSection.GROUNDED)
@@ -464,6 +508,12 @@ def generate_schema(
     to fit *all* of them, not just one. Callers (the CLI) decide how
     to pick the sample.
 
+    If the provider refuses the request as too large, every sample stays in
+    it but the largest are cut to their leading pages (a fair share of half
+    what was just sent), the model is told which samples are partial, and the
+    call is retried. A sample whose first page alone exceeds its share is
+    left out with a warning. A request the provider accepts is unchanged.
+
     Raises :class:`SchemaGenerationFailed` on any non-config failure
     (no files, missing PDF, malformed LLM response, network error).
     """
@@ -474,20 +524,10 @@ def generate_schema(
 
     # Read every PDF up front so a permission/missing-file error fails
     # the call before we burn an LLM API request.
-    pdf_blocks: list[dict[str, Any]] = []
-    for fid in file_ids:
-        pdf_bytes = _pdf_bytes(workspace, fid)
-        pdf_blocks.append(_pdf_content_block(pdf_bytes))
+    originals = [(fid, _pdf_bytes(workspace, fid)) for fid in file_ids]
+    samples = [_SchemaSample(fid, pdf) for fid, pdf in originals]
 
     api_key = _resolve_api_key(config.schema_api_key, config.schema_api_key_env)
-    user_content: list[dict[str, Any]] = [
-        {"type": "text", "text": _schema_user_prompt(len(file_ids))},
-    ]
-    user_content.extend(pdf_blocks)
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": prompt(PromptKey.SCHEMA_SYSTEM)},
-        {"role": "user", "content": user_content},
-    ]
     tools = [_submit_schema_tool()]
     # max_tokens=None so the wrapper doesn't add the max_tokens alias alongside
     # max_completion_tokens. reasoning_effort is set unconditionally; the
@@ -508,22 +548,45 @@ def generate_schema(
         context={"from_file_ids": list(file_ids)},
     )
 
-    try:
-        result = call_with_tools(
-            llm_config,
-            messages=messages,
-            tools=tools,
-            tool_choice={"type": "function", "function": {"name": _TOOL_SUBMIT_SCHEMA}},
-            # Deliberately NOT cached: the cacheable prefix is tools + system,
-            # and this system prompt is well short of the provider's minimum
-            # cacheable prefix, so a breakpoint would create no entry. Schema
-            # generation also runs once per docset, so there is no reuse to
-            # capture even if it did.
-        )
-    except Exception as exc:
-        raise SchemaGenerationFailed(
-            f"schema generation call failed: {type(exc).__name__}: {exc}"
-        ) from exc
+    pdf_config: PdfConfig | None = None
+    while True:
+        try:
+            result = call_with_tools(
+                llm_config,
+                messages=_schema_messages(samples),
+                tools=tools,
+                tool_choice={"type": "function", "function": {"name": _TOOL_SUBMIT_SCHEMA}},
+                # Deliberately NOT cached: the cacheable prefix is tools + system,
+                # and this system prompt is well short of the provider's minimum
+                # cacheable prefix, so a breakpoint would create no entry. Schema
+                # generation also runs once per docset, so there is no reuse to
+                # capture even if it did.
+            )
+            break
+        except Exception as exc:
+            if not is_request_too_large(exc):
+                raise SchemaGenerationFailed(
+                    f"schema generation call failed: {type(exc).__name__}: {exc}"
+                ) from exc
+            if pdf_config is None:
+                try:
+                    pdf_config = load_pdf_config(workspace)
+                except Exception as config_exc:
+                    raise SchemaGenerationFailed(
+                        f"schema generation call failed: {type(exc).__name__}: {exc} "
+                        f"The samples could not be trimmed: {config_exc}"
+                    ) from exc
+            # Halve what the refused request carried; samples are cut from the
+            # originals each round, so the budget only ever shrinks.
+            budget = sum(_b64_len(len(sample.pdf)) for sample in samples) // 2
+            samples = _fit_samples(workspace, originals, budget, pdf_config)
+            if not samples:
+                raise SchemaGenerationFailed(
+                    f"the planning documents are too large for one schema request to "
+                    f"{config.schema_model!r}, even trimmed to their first page: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+    _warn_trimmed_samples(file_ids, samples)
     fields = _parse_submit_call(result.response, expected_tool=_TOOL_SUBMIT_SCHEMA, field="fields")
 
     if not isinstance(fields, list):
@@ -532,6 +595,134 @@ def generate_schema(
         return field_tree_to_rnc(fields, workspace=workspace.organization, docset_name=docset_name)
     except SchemaInvalid as exc:
         raise SchemaGenerationFailed(f"LLM returned an invalid field tree: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class _SchemaSample:
+    """A planning document as sent to schema generation: the whole PDF, or
+    (``pages_sent`` set) its first ``pages_sent`` of ``total_pages`` pages."""
+
+    file_id: str
+    pdf: bytes
+    pages_sent: int | None = None
+    total_pages: int | None = None
+
+
+def _schema_messages(samples: list[_SchemaSample]) -> list[dict[str, Any]]:
+    user_content: list[dict[str, Any]] = [
+        {"type": "text", "text": _schema_user_prompt(len(samples))},
+    ]
+    excerpts = [
+        f"- Sample {i} (pages 1-{s.pages_sent} of {s.total_pages})"
+        for i, s in enumerate(samples, start=1)
+        if s.pages_sent is not None
+    ]
+    if excerpts:
+        # Only on a retry after the provider refused the request as too large.
+        user_content.append(
+            {
+                "type": "text",
+                "text": prompt(PromptKey.SCHEMA_USER_EXCERPTS).format(excerpts="\n".join(excerpts)),
+            }
+        )
+    user_content.extend(_pdf_content_block(s.pdf) for s in samples)
+    return [
+        {"role": "system", "content": prompt(PromptKey.SCHEMA_SYSTEM)},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def _b64_len(n: int) -> int:
+    """Length of the base64 encoding of *n* bytes."""
+    return 4 * ((n + 2) // 3)
+
+
+def _fit_samples(
+    workspace: Workspace,
+    originals: list[tuple[str, bytes]],
+    budget: int,
+    pdf_config: PdfConfig,
+) -> list[_SchemaSample]:
+    """The planning documents cut to fit *budget* base64 bytes between them.
+
+    The budget is shared max-min fairly: a document within an equal share is
+    sent whole, and the larger ones split what is left and are sent as the
+    leading pages that fit their share (sliced with the workspace's PDF engine
+    and measured, since pages differ in size). A document whose first page
+    alone exceeds its share is left out. Order is kept.
+    """
+    sizes = {fid: _b64_len(len(pdf)) for fid, pdf in originals}
+    shares: dict[str, int] = {}
+    remaining, left = budget, len(originals)
+    for fid, _pdf in sorted(originals, key=lambda item: sizes[item[0]]):
+        share = remaining // left
+        shares[fid] = min(sizes[fid], share)
+        remaining -= shares[fid]
+        left -= 1
+
+    fitted: list[_SchemaSample] = []
+    for fid, pdf in originals:
+        share = shares[fid]
+        if sizes[fid] <= share:
+            fitted.append(_SchemaSample(fid, pdf))
+            continue
+        sample = _leading_pages(workspace, fid, pdf, share, pdf_config)
+        if sample is not None:
+            fitted.append(sample)
+    return fitted
+
+
+def _leading_pages(
+    workspace: Workspace, file_id: str, pdf: bytes, share: int, pdf_config: PdfConfig
+) -> _SchemaSample | None:
+    """The longest leading page range of *pdf* found to fit *share* base64
+    bytes, or ``None`` when even page 1 does not."""
+    count = FileStore(workspace).get(file_id).page_count
+    if not isinstance(count, int) or count <= 0:
+        try:
+            count = pdf_page_count_bytes(pdf)
+        except Exception:
+            return None  # unreadable, so it cannot be cut; it is already too big whole
+    if count <= 1:
+        return None
+    whole = _b64_len(len(pdf))
+    pages = max(1, min(count - 1, count * share // whole))
+    while True:
+        try:
+            sliced = slice_pages(pdf, range(1, pages + 1), config=pdf_config, total_pages=count)
+        except Exception as exc:
+            raise SchemaGenerationFailed(
+                f"could not cut file '{file_id}' to its first {pages} pages to fit the "
+                f"schema request: {type(exc).__name__}: {exc}"
+            ) from exc
+        size = _b64_len(len(sliced))
+        if size <= share:
+            return _SchemaSample(file_id, sliced, pages_sent=pages, total_pages=count)
+        if pages == 1:
+            return None
+        pages = max(1, min(pages - 1, pages * share // size))
+
+
+def _warn_trimmed_samples(file_ids: list[str], samples: list[_SchemaSample]) -> None:
+    """Warn about the samples a too-large request cost: those sent partial and
+    those left out. Silent when every sample went whole."""
+    sent = {s.file_id for s in samples}
+    for fid in file_ids:
+        if fid not in sent:
+            logger.warning(
+                "schema generation: left out file %s; even its first page did not fit "
+                "in the request",
+                fid,
+            )
+    partial = [
+        f"{s.file_id} (pages 1-{s.pages_sent} of {s.total_pages})" for s in samples if s.pages_sent
+    ]
+    if partial:
+        logger.warning(
+            "schema generation: the samples were too large for one request; sent the "
+            "leading pages of %s",
+            ", ".join(partial),
+        )
 
 
 def _schema_user_prompt(n_files: int) -> str:
@@ -647,13 +838,14 @@ class ExtractionResult:
     core file was created with only the ``dg:extraction`` element.
     ``tool_calls`` is the count of ``get_page_words`` grounding lookups the
     model performed before finalizing — a rough proxy for how much grounding it
-    leaned on.
+    leaned on. ``model`` is the values model that produced it.
     """
 
     values: dict[str, Any]
     tool_calls: int
     xml_key: str
     mode: str
+    model: str
 
 
 def extract_values(
@@ -699,6 +891,12 @@ def extract_values(
     """
     store = DocSetStore(workspace)
     rnc_schema = store.get_schema(docset_id)  # RNC text; raises SchemaNotFound
+    # The .dgml.xml is written under the (docset, file) pair's prefix, which only the
+    # docset's file list reaches — so an unassigned file would get an orphan artifact.
+    if not store.is_assigned(docset_id, file_id):
+        raise FileNotFound(
+            f"file '{file_id}' is not assigned to docset '{docset_id}'; assign it first"
+        )
     # A stored schema is not re-checked on read; here it is about to be used.
     vocab = check_invariant_paths(parse_rnc(rnc_schema))
     schema = rnc_to_json_schema(rnc_schema)
@@ -738,6 +936,8 @@ def extract_values(
     phase1_tool_schema_mode = "inlined"
     phase1_chunk_calls = 0
     phase1_truncated_retries = 0
+    phase1_pdf_parts: list[tuple[int, int]] = []
+    phase1_counters = {"envelope_repairs": 0, "no_tool_call_retries": 0}
 
     try:
         # --- Phase 1: text + page numbers, no bboxes (LLM) ----------
@@ -755,7 +955,9 @@ def extract_values(
         # after, so the cached prefix is unchanged between the two attempts.
         schema_text = _values_phase1_user_prompt(phase1_schema, guidance)
 
-        def _phase1_messages(*, chunked: bool) -> list[dict[str, Any]]:
+        def _phase1_messages(
+            *, chunked: bool, pdf: bytes, part: _PdfPart | None
+        ) -> list[dict[str, Any]]:
             # Rebuilt per attempt — _run_extract_loop mutates its message list.
             anthropic = is_anthropic_model(config.values_model)
             schema_block: dict[str, Any] = {"type": "text", "text": schema_text}
@@ -770,7 +972,11 @@ def extract_values(
                 user_content.append(
                     {"type": "text", "text": prompt(PromptKey.VALUES_PHASE1_RETRY_CHUNKED)}
                 )
-            user_content.append(_pdf_content_block(pdf_bytes))
+            if part is not None:
+                # Only when the whole document was refused as too large. After
+                # the schema block, so its cache entry still serves every part.
+                user_content.append({"type": "text", "text": part.prompt_text()})
+            user_content.append(_pdf_content_block(pdf))
             if anthropic and chunked:
                 # The per-file PDF earns a breakpoint only here. Chunked mode
                 # is several turns over one unchanged prefix, so turns after
@@ -793,42 +999,94 @@ def extract_values(
         # re-raises once its own latch is set, the loop runs at most three
         # attempts (initial + one per latch) before terminating.
         chunked = False
-        while True:
-            tool_schema = (
-                _PERMISSIVE_VALUES_PARAM
-                if phase1_tool_schema_mode == "permissive"
-                else phase1_tool_schema
-            )
-            try:
-                phase1_args, phase1_tool_calls, phase1_chunk_calls = _run_extract_loop(
-                    workspace=workspace,
-                    file_id=file_id,
-                    messages=_phase1_messages(chunked=chunked),
-                    tools=_phase1_tools(tool_schema, chunked=chunked),
-                    chunked=chunked,
-                    model=config.values_model,
-                    api_key=api_key,
-                    api_base=api_base,
-                    max_tool_iters=config.max_tool_iters,
-                    totals=phase1_totals,
-                    reasoning_effort=config.values_reasoning_effort,
+
+        def _phase1_run(pdf: bytes, part: _PdfPart | None) -> tuple[dict[str, Any], int, int]:
+            nonlocal chunked, phase1_tool_schema_mode, phase1_truncated_retries
+            while True:
+                tool_schema = (
+                    _PERMISSIVE_VALUES_PARAM
+                    if phase1_tool_schema_mode == "permissive"
+                    else phase1_tool_schema
                 )
-                break
-            except _OutputTruncated as exc:
-                if chunked:
-                    raise ValuesExtractionFailed(
-                        f"{exc} The chunked-submission retry was truncated too; "
-                        "consider a model with a higher output ceiling or "
-                        "splitting the document."
-                    ) from exc
-                chunked = True
-                phase1_truncated_retries += 1
-            except ValuesExtractionFailed as exc:
-                if phase1_tool_schema_mode == "permissive" or not _is_tool_schema_too_large(exc):
-                    raise
-                # Gemini's constrained decoder rejected the inlined schema;
-                # the model still sees the full schema in the user prompt.
-                phase1_tool_schema_mode = "permissive"
+                try:
+                    return _run_extract_loop(
+                        workspace=workspace,
+                        file_id=file_id,
+                        vocab=vocab,
+                        counters=phase1_counters,
+                        messages=_phase1_messages(chunked=chunked, pdf=pdf, part=part),
+                        tools=_phase1_tools(tool_schema, chunked=chunked),
+                        chunked=chunked,
+                        model=config.values_model,
+                        api_key=api_key,
+                        api_base=api_base,
+                        max_tool_iters=config.max_tool_iters,
+                        totals=phase1_totals,
+                        reasoning_effort=config.values_reasoning_effort,
+                        page_offset=part.first_page - 1 if part is not None else 0,
+                    )
+                except _OutputTruncated as exc:
+                    if chunked:
+                        raise ValuesExtractionFailed(
+                            f"{exc} The chunked-submission retry was truncated too; "
+                            "consider a model with a higher output ceiling or "
+                            "splitting the document."
+                        ) from exc
+                    chunked = True
+                    phase1_truncated_retries += 1
+                except ValuesExtractionFailed as exc:
+                    if phase1_tool_schema_mode == "permissive" or not _is_tool_schema_too_large(
+                        exc
+                    ):
+                        raise
+                    # Gemini's constrained decoder rejected the inlined schema;
+                    # the model still sees the full schema in the user prompt.
+                    phase1_tool_schema_mode = "permissive"
+
+        # The whole PDF goes in one request, as it always has. Only when the
+        # provider refuses that request as too large is the document split
+        # into page ranges, halving until each part is accepted.
+        try:
+            phase1_args, phase1_tool_calls, phase1_chunk_calls = _phase1_run(pdf_bytes, None)
+        except ValuesExtractionFailed as exc:
+            if not is_request_too_large(exc):
+                raise
+            parts = _phase1_in_parts(
+                workspace,
+                file_id,
+                pdf_bytes,
+                model=config.values_model,
+                run=_phase1_run,
+                refused=exc,
+            )
+            phase1_args, phase1_tool_calls, phase1_chunk_calls = _merge_parts(parts)
+            phase1_pdf_parts = [(p.first_page, p.last_page) for p, _ in parts]
+        phase1_duration = round(time.monotonic() - phase1_started, 3)
+        # Keys that name no schema root, and roots whose value has the wrong
+        # shape, are dropped at serialization (the writer walks vocab.roots).
+        # A tree that had keys but keeps nothing would land as an empty
+        # <dg:extraction/> reported as success: refuse it here so the failure
+        # is visible. An empty tree, or one whose roots are all null, stays a
+        # legal "nothing found" outcome (the serializer reads null as "not
+        # extracted"), and leaf internals (a leaf without text, a collection
+        # of malformed entries) stay the serializer's business, as before.
+        # Recorded before the refusal below can raise, so a refused run's
+        # --debug usage row and stats sidecar still carry what phase 1 did.
+        tool_calls_total += phase1_tool_calls
+        phase1_layout = phase1_args.get("layout") or None
+        if not isinstance(phase1_layout, dict):
+            phase1_layout = None
+        submitted_keys = sorted(k for k, v in phase1_args["values"].items() if v is not None)
+        kept = _prune_to_vocabulary(phase1_args["values"], vocab)
+        if submitted_keys and not kept:
+            shown = ", ".join(repr(k) for k in submitted_keys[:6])
+            if len(submitted_keys) > 6:
+                shown += f" and {len(submitted_keys) - 6} more"
+            raise ValuesExtractionFailed(
+                f"{_TOOL_SUBMIT_VALUES!r} returned nothing that fits the schema: got keys "
+                f"{shown}, expected roots {sorted(tag.name for tag in vocab.roots)} "
+                "shaped as the schema defines; refusing to write an empty extraction"
+            )
         # Enforce the vocabulary code-side on exactly the paths whose payload
         # never met a provider-side shape check: permissive mode (the values
         # parameter was a bare object) and chunked mode (append_entries
@@ -838,13 +1096,8 @@ def extract_values(
         # phases 2/3 rather than at serialization — a behavior change beyond
         # what these fallbacks need.
         if phase1_tool_schema_mode == "permissive" or chunked:
-            phase1_args["values"] = _prune_to_vocabulary(phase1_args["values"], vocab)
+            phase1_args["values"] = kept
         phase1_values = phase1_args["values"]
-        phase1_layout = phase1_args.get("layout") or None
-        if not isinstance(phase1_layout, dict):
-            phase1_layout = None
-        tool_calls_total += phase1_tool_calls
-        phase1_duration = round(time.monotonic() - phase1_started, 3)
         # The merged extracted_value leaf shape lets a sloppy model blur the
         # grounded/computed boundary; normalize before phases 2/3 (and the
         # serializer) so their invariants hold regardless.
@@ -908,8 +1161,15 @@ def extract_values(
         # tree (full-extraction), or written as a standalone dg:chunk when no
         # tree exists yet (extraction).
         # Read again after phase 3, as before: a file deleted meanwhile
-        # raises here rather than getting an orphan XML written for it.
+        # raises here rather than getting an orphan XML written for it. Same
+        # for the assignment: `unassign` during the LLM phases cleared the
+        # pair's prefix, and writing now would recreate an orphan under it.
         stem = Path(FileStore(workspace).get(file_id).original_filename).stem
+        if not store.is_assigned(docset_id, file_id):
+            # `unassign` also deleted the pair's stats doc; the `finally` must not
+            # put it back.
+            write_stats = False
+            raise FileNotFound(f"file '{file_id}' is no longer assigned to docset '{docset_id}'")
         xml_key = layout.dgml_xml_key(docset_id, file_id, stem)
         existing = (
             workspace.blobs.get_blob(xml_key).decode("utf-8")
@@ -927,7 +1187,11 @@ def extract_values(
         workspace.blobs.put_blob(xml_key, doc.encode("utf-8"))
         outcome = OUTCOME_OK
         return ExtractionResult(
-            values=final_values, tool_calls=tool_calls_total, xml_key=xml_key, mode=mode
+            values=final_values,
+            tool_calls=tool_calls_total,
+            xml_key=xml_key,
+            mode=mode,
+            model=config.values_model,
         )
     except ValuesExtractionFailed as exc:
         error_msg = str(exc)
@@ -1002,6 +1266,9 @@ def extract_values(
                     phase1_tool_schema=phase1_tool_schema_mode,
                     phase1_chunk_calls=phase1_chunk_calls,
                     phase1_truncated_retries=phase1_truncated_retries,
+                    phase1_pdf_parts=phase1_pdf_parts,
+                    phase1_envelope_repairs=phase1_counters["envelope_repairs"],
+                    phase1_no_tool_call_retries=phase1_counters["no_tool_call_retries"],
                 )
         except Exception:
             pass
@@ -1069,6 +1336,9 @@ def _write_extraction_stats(
     phase1_tool_schema: str,
     phase1_chunk_calls: int,
     phase1_truncated_retries: int,
+    phase1_envelope_repairs: int,
+    phase1_no_tool_call_retries: int,
+    phase1_pdf_parts: list[tuple[int, int]] | None = None,
 ) -> None:
     """Write ``extraction_stats.json`` into the file's marker directory.
 
@@ -1091,6 +1361,17 @@ def _write_extraction_stats(
                 # times phase 1 was restarted with the explicit chunking
                 # directive after a finish_reason='length' truncation.
                 "truncated_retries": phase1_truncated_retries,
+                # [first_page, last_page] of each page-range part, present only
+                # when the provider refused the whole document as too large and
+                # phase 1 ran once per part.
+                **({"pdf_parts": [list(p) for p in phase1_pdf_parts]} if phase1_pdf_parts else {}),
+                # submit_values calls whose envelope had to be repaired before
+                # the tree could be read (see _repair_submit_values_args).
+                "envelope_repairs": phase1_envelope_repairs,
+                # turns that ended with no tool call and were retried with a
+                # reminder (never forced; reachable only where phase 1 runs on
+                # auto tool choice: Anthropic, or a fallback from "required").
+                "no_tool_call_retries": phase1_no_tool_call_retries,
                 **phase1_totals,
             },
             "phase2": {"duration_s": phase2_duration},
@@ -1704,6 +1985,215 @@ def _merge_values(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]
     return base
 
 
+# ---- Phase 1 over page-range parts (a document refused as too large) ------
+
+
+@dataclass(frozen=True)
+class _PdfPart:
+    """One page range of a document, sent to phase 1 as its own PDF."""
+
+    first_page: int
+    last_page: int
+    total_pages: int
+
+    def prompt_text(self) -> str:
+        return prompt(PromptKey.VALUES_PHASE1_PART).format(
+            first_page=self.first_page,
+            last_page=self.last_page,
+            total_pages=self.total_pages,
+        )
+
+
+_Phase1Run = tuple[dict[str, Any], int, int]
+
+
+def _phase1_in_parts(
+    workspace: Workspace,
+    file_id: str,
+    pdf_bytes: bytes,
+    *,
+    model: str,
+    run: Callable[[bytes, _PdfPart | None], _Phase1Run],
+    refused: ValuesExtractionFailed,
+) -> list[tuple[_PdfPart, _Phase1Run]]:
+    """Run phase 1 over page ranges of a document whose whole-PDF request the
+    provider refused as too large (*refused*).
+
+    The document is cut in half, and any half the provider refuses too is cut
+    again, until each part is accepted. Parts are sliced with the workspace's
+    PDF engine, the same one generation's windows use. Returns each part with
+    its phase-1 result, in document order. A single page that is still too
+    large fails the file.
+    """
+    record_count = FileStore(workspace).get(file_id).page_count
+    try:
+        page_count = (
+            record_count
+            if isinstance(record_count, int) and record_count > 0
+            else pdf_page_count_bytes(pdf_bytes)
+        )
+        pdf_config = load_pdf_config(workspace)
+    except Exception as exc:
+        raise ValuesExtractionFailed(
+            f"{refused} The document could not be split into page ranges: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if page_count <= 1:
+        raise ValuesExtractionFailed(
+            f"page 1 alone is too large for one extraction request to {model!r}: {refused}"
+        ) from refused
+    logger.info(
+        "extraction: %s refused file %s (%d pages, %d bytes) as too large for one "
+        "request; sending it in page ranges",
+        model,
+        file_id,
+        page_count,
+        len(pdf_bytes),
+    )
+
+    def attempt(first: int, last: int) -> list[tuple[_PdfPart, _Phase1Run]]:
+        try:
+            sliced = slice_pages(
+                pdf_bytes, range(first, last + 1), config=pdf_config, total_pages=page_count
+            )
+        except Exception as exc:
+            raise ValuesExtractionFailed(
+                f"{refused} Slicing pages {first}-{last} out of it failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        part = _PdfPart(first_page=first, last_page=last, total_pages=page_count)
+        try:
+            return [(part, run(sliced, part))]
+        except ValuesExtractionFailed as exc:
+            if not is_request_too_large(exc):
+                raise
+            if first == last:
+                raise ValuesExtractionFailed(
+                    f"page {first} alone is too large for one extraction request "
+                    f"to {model!r}: {exc}"
+                ) from exc
+            mid = (first + last) // 2
+            return attempt(first, mid) + attempt(mid + 1, last)
+
+    mid = (1 + page_count) // 2
+    return attempt(1, mid) + attempt(mid + 1, page_count)
+
+
+def _merge_parts(parts: list[tuple[_PdfPart, _Phase1Run]]) -> _Phase1Run:
+    """Combine the phase-1 results of a document's parts into one, as if the
+    whole document had been read at once: page numbers go back to the
+    document's, values merge in document order (see :func:`_merge_part_values`),
+    the first part to describe an array's layout wins, and the counts add up."""
+    values: dict[str, Any] = {}
+    merged_layout: dict[str, Any] = {}
+    tool_calls = chunk_calls = 0
+    for part, (args, part_tool_calls, part_chunk_calls) in parts:
+        part_values = args["values"]
+        _offset_page_numbers(part_values, part.first_page - 1)
+        _merge_part_values(values, part_values)
+        part_layout = args.get("layout")
+        if isinstance(part_layout, dict):
+            for key, value in part_layout.items():
+                merged_layout.setdefault(key, value)
+        tool_calls += part_tool_calls
+        chunk_calls += part_chunk_calls
+    merged: dict[str, Any] = {"values": values}
+    if merged_layout:
+        merged["layout"] = merged_layout
+    return merged, tool_calls, chunk_calls
+
+
+def _offset_page_numbers(values: Any, offset: int) -> None:
+    """Shift every location's ``page_number`` by *offset*, in place: a part's
+    values number its own PDF's pages from 1."""
+    if not offset:
+        return
+    if isinstance(values, dict):
+        locations = values.get("locations")
+        if "text" in values and isinstance(locations, list):
+            for loc in locations:
+                page = loc.get("page_number") if isinstance(loc, dict) else None
+                if isinstance(page, int) and not isinstance(page, bool):
+                    loc["page_number"] = page + offset
+            return
+        for value in values.values():
+            _offset_page_numbers(value, offset)
+    elif isinstance(values, list):
+        for value in values:
+            _offset_page_numbers(value, offset)
+
+
+def _renumber_page_words(result: dict[str, Any], page: int) -> None:
+    """Show a ``get_page_words`` result under the page number the model asked
+    for (its part's numbering), in place."""
+    result["page"] = page
+    for word in result.get("words", []):
+        location = word.get("location")
+        if isinstance(location, dict):
+            location["page_number"] = page
+
+
+def _is_empty_leaf(value: Any) -> bool:
+    """A leaf or scalar that carries no value."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, dict) and "text" in value:
+        text = value.get("text")
+        return text is None or (isinstance(text, str) and not text.strip())
+    return False
+
+
+def _rebase_ref(ref: str, base: dict[str, Any]) -> str:
+    """Rewrite a later part's ``derived_from`` path for the merged tree: an
+    index into an array the merge appends to *base*'s copy of it moves past
+    *base*'s entries."""
+    path = parse_path(ref)
+    if path is None:
+        return ref
+    cur: Any = base
+    for i, seg in enumerate(path):
+        if isinstance(seg, int):
+            if isinstance(cur, list):
+                return path_to_str((*path[:i], seg + len(cur), *path[i + 1 :]))
+            return ref
+        if not isinstance(cur, dict):
+            return ref
+        cur = cur.get(seg)
+    return ref
+
+
+def _merge_tree(base: dict[str, Any], extra: dict[str, Any]) -> None:
+    for key, value in extra.items():
+        current = base.get(key)
+        if isinstance(current, list) and isinstance(value, list):
+            current.extend(value)
+        elif (
+            isinstance(current, dict)
+            and isinstance(value, dict)
+            and "text" not in current
+            and "text" not in value
+        ):
+            _merge_tree(current, value)
+        elif key not in base or _is_empty_leaf(current):
+            base[key] = value
+
+
+def _merge_part_values(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Merge one part's values into those of the parts before it, in place on
+    *base*: arrays concatenate (each part submits only its own pages' entries,
+    in document order), objects merge recursively, and a leaf keeps the
+    earliest part's value unless that one is empty. *extra*'s ``derived_from``
+    paths are first rebased onto the concatenated arrays. Returns *base*."""
+    for _path, leaf in walk_computed_leaves(extra):
+        refs = leaf.get("derived_from")
+        if isinstance(refs, list):
+            leaf["derived_from"] = [_rebase_ref(r, base) if isinstance(r, str) else r for r in refs]
+    _merge_tree(base, extra)
+    return base
+
+
 def _apply_append_entries(acc_args: dict[str, Any] | None, args: dict[str, Any]) -> dict[str, Any]:
     """Apply one ``append_entries`` call to the accumulated values; the
     returned dict is the tool result (an ``error`` key means the call was
@@ -1785,6 +2275,158 @@ def _append_entries_tool() -> dict[str, Any]:
     }
 
 
+_ENVELOPE_KEYS = frozenset({"values", "layout", "done"})
+
+
+def _repair_submit_values_args(
+    args: dict[str, Any], vocab: Vocabulary, *, chunked: bool = False
+) -> tuple[dict[str, Any], str | None]:
+    """Undo the ways a model mis-shapes a ``submit_values`` call, or leave it alone.
+
+    Three shapes have been captured in the wild, all from Anthropic models on
+    ordinary one-page invoices (dgml-io/dgml#154, #150). The tree inside each
+    is complete and correct; only the envelope around it is wrong:
+
+    * ``{"values": {"values": {...}, "layout": {...}}}`` -- the tool's own
+      parameter envelope repeated one level down, with ``values`` the only
+      top-level key.
+    * ``{"values": {"values": {...}}, "layout": {...}}`` -- the same, with
+      ``layout`` left at the top.
+    * ``{"values": "{\"values\": {...}}, \"layout\": {...} }"}`` -- the
+      envelope serialized as a JSON *string*, usually with the outer object
+      closed one brace early so the rest of the envelope trails it as text
+      (see :func:`_decode_string_envelope`).
+
+    Left alone, the first two pass every later phase (the nested leaves ground
+    fine) and then serialize as an empty ``<dg:extraction/>`` reported as a
+    success; the third raises.
+
+    The decision is by shape, not by key name: a candidate tree *fits* when
+    :func:`_prune_to_vocabulary` keeps something of it, the same check that
+    decides what serializes. A ``values`` object that fits is never touched,
+    whatever else it carries, so a well-formed tree always wins; a repair
+    happens only when the object as sent fits nothing and exactly one
+    candidate (one level down, or inside the string) does. When a schema
+    itself names a root ``values`` or ``layout`` the readings can collide: a
+    nested envelope then looks well-formed and is left alone, and a string
+    both readings of which fit is refused rather than guessed; either call
+    behaves as before this repair existed. Fitting is the vocabulary's
+    root-and-shape check, not a leaf check, so a leaf missing its ``text``
+    is the serializer's business as before. One envelope needs no fit: an
+    inner tree that is empty (a legal "nothing found") is recognized when
+    the wrapper around it carries only the envelope's own keys. Returns the
+    repaired ``args`` and a short label of the repair, or ``(args, None)``.
+    """
+
+    def fits(candidate: Any) -> bool:
+        return isinstance(candidate, dict) and bool(_prune_to_vocabulary(candidate, vocab))
+
+    def wraps_an_empty_tree(candidate: dict[str, Any]) -> bool:
+        inner = candidate.get("values")
+        return isinstance(inner, dict) and not inner and set(candidate) <= _ENVELOPE_KEYS
+
+    values = args.get("values")
+    if fits(values):
+        return args, None
+    repaired: dict[str, Any]
+    if isinstance(values, str) and values.lstrip().startswith("{"):
+        envelope = _decode_string_envelope(values)
+        if envelope is None:
+            return args, None
+        inner_fits, outer_fits = fits(envelope.get("values")), fits(envelope)
+        if (inner_fits or wraps_an_empty_tree(envelope)) and not outer_fits:
+            repaired = {"values": envelope["values"]}
+            _carry_envelope_fields(repaired, args, envelope, chunked=chunked)
+        elif outer_fits and not inner_fits:
+            # The string held the tree itself. A layout or done beside its
+            # roots is carried out as an envelope field; in the tree it is
+            # not a root and the serializer ignores it, as before.
+            repaired = {"values": envelope}
+            _carry_envelope_fields(repaired, args, envelope, chunked=chunked)
+        else:
+            return args, None
+        return repaired, "string"
+    if isinstance(values, dict) and (fits(values.get("values")) or wraps_an_empty_tree(values)):
+        repaired = {"values": values["values"]}
+        _carry_envelope_fields(repaired, args, values, chunked=chunked)
+        return repaired, "nested"
+    return args, None
+
+
+def _is_layout(candidate: Any) -> bool:
+    """Whether ``candidate`` is a ``layout`` the loop can use: a dict of
+    per-array descriptors of the shape :func:`_layout_param_schema`
+    declares (a known ``kind``, ``columns`` a list of names when present,
+    nothing else). An empty dict describes no array, so it is not one: a
+    ``layout: {}`` on the call must not shadow a populated layout left
+    inside the mis-shaped ``values``."""
+    if not isinstance(candidate, dict) or not candidate:
+        return False
+    for descriptor in candidate.values():
+        if not isinstance(descriptor, dict) or not set(descriptor) <= {"kind", "columns"}:
+            return False
+        if descriptor.get("kind") not in ("table", "free_form"):
+            return False
+        columns = descriptor.get("columns")
+        if columns is not None and not (
+            isinstance(columns, list) and all(isinstance(c, str) for c in columns)
+        ):
+            return False
+    return True
+
+
+def _carry_envelope_fields(
+    repaired: dict[str, Any],
+    outer: dict[str, Any],
+    inner: dict[str, Any] | None,
+    *,
+    chunked: bool,
+) -> None:
+    """Carry ``layout`` and ``done`` into a repaired call, by validity.
+
+    The call's own field wins when it is valid (a layout of known
+    descriptors, a ``bool`` done); otherwise the copy the model left inside
+    the mis-shaped ``values`` fills in, when it is valid. Anything else is
+    dropped, and the loop's defaults apply. ``done`` is a chunked-protocol
+    field: in single-shot mode it is not carried, so a stray ``done: false``
+    cannot turn one submission into a continuation the model was never
+    offered.
+    """
+    checks: list[tuple[str, Callable[[Any], bool]]] = [("layout", _is_layout)]
+    if chunked:
+        checks.append(("done", lambda v: isinstance(v, bool)))
+    for key, valid in checks:
+        outer_value = outer.get(key)
+        inner_value = inner.get(key) if inner is not None else None
+        if valid(outer_value):
+            repaired[key] = outer_value
+        elif valid(inner_value):
+            repaired[key] = inner_value
+
+
+def _decode_string_envelope(text: str) -> dict[str, Any] | None:
+    """Decode a ``submit_values`` envelope the model serialized as a string.
+
+    The damage seen is the outer object closed one brace early, so the rest
+    of the envelope (``"layout": {...}``, ``"done": false``) trails the first
+    complete object as extra text. Moving that brace to the end turns the
+    whole string back into the object the model meant to send, every field
+    included. Trailing text that does not read that way is not understood,
+    and ``None`` leaves the call to fail loudly as before.
+    """
+    text = text.strip()
+    try:
+        lead, end = json.JSONDecoder().raw_decode(text)
+    except ValueError:
+        return None
+    if text[end:].strip():
+        try:
+            lead = json.loads(text[: end - 1] + text[end:])
+        except ValueError:
+            return None
+    return lead if isinstance(lead, dict) else None
+
+
 def _run_extract_loop(
     *,
     workspace: Workspace,
@@ -1796,18 +2438,26 @@ def _run_extract_loop(
     api_base: str | None,
     max_tool_iters: int,
     totals: dict[str, Any],
+    vocab: Vocabulary,
+    counters: dict[str, int],
     chunked: bool = False,
     reasoning_effort: str | None = _VALUES_REASONING_EFFORT,
+    page_offset: int = 0,
 ) -> tuple[dict[str, Any], int, int]:
     """Run a multi-turn extraction loop until the model finishes submitting.
 
-    Returns ``(submit_args, tool_calls_run, chunk_calls)`` — ``submit_args``
+    Returns ``(submit_args, tool_calls_run, chunk_calls)``: ``submit_args``
     carries the merged ``values`` tree plus optional sibling fields like
     ``layout``; ``chunk_calls`` counts the submission calls (1 for the
     ordinary single ``submit_values``, more when the model used the chunked
-    protocol). Mutates ``totals`` by adding cost/token deltas from every
-    litellm call so the surrounding ``extract_values`` records a single
-    usage row across both phases.
+    protocol).
+    Mutates ``totals`` by adding cost/token deltas from every litellm call
+    so the surrounding ``extract_values`` records a single usage row across
+    both phases, and ``counters["envelope_repairs"]`` for every submission
+    whose argument envelope had to be unwrapped first (see
+    :func:`_repair_submit_values_args`, which decides against ``vocab``),
+    and ``counters["no_tool_call_retries"]`` for every turn that ended with
+    no tool call and was retried; all survive a loop that fails afterwards.
 
     Two submission protocols:
 
@@ -1828,15 +2478,42 @@ def _run_extract_loop(
     A turn that stops with ``finish_reason == "length"`` raises
     :class:`_OutputTruncated` so the caller can retry with an explicit
     chunking directive.
+
+    Every provider but Anthropic gets ``tool_choice="required"`` on every
+    call, so a text-only turn cannot happen there, unless litellm's global
+    ``drop_params`` silently removes the parameter for a provider it believes
+    lacks it (the call then runs on auto, as it did before "required"). A call that an endpoint
+    rejects as an invalid request is resent once on auto; when that succeeds,
+    the endpoint is remembered as refusing ``"required"`` (warned about once)
+    and this and later attempts against it run on auto. On auto (Anthropic,
+    see below, or such an endpoint) a text-only turn that stopped normally
+    (``finish_reason`` ``"stop"``, or none reported) is retried up to
+    :data:`_MAX_NO_TOOL_CALL_RETRIES` times per attempt, outside the
+    ``max_tool_iters`` budget: the reply is kept in the history and a
+    reminder to call ``submit_values`` follows it (or, for a chunked run that
+    already recorded part of its submission, to continue with
+    ``append_entries``, since a resent full tree would duplicate its entries).
+    A retry is never forced, so the turn that produces the values keeps its
+    thinking budget. A text-only turn that did not stop normally (a content
+    filter, a refusal stop) fails at once. Every failure quotes the reply's
+    ``finish_reason``, whether it was reasoning only, and its opening text.
+
+    *page_offset* is non-zero when the PDF sent is a page range of the file
+    that starts after page *page_offset*. The model numbers that PDF's pages
+    from 1, so a ``get_page_words`` lookup reads page ``page + page_offset``
+    and the result is shown under the model's own number. The values it
+    submits keep the PDF's numbering; the caller shifts them.
     """
-    # Phase 1 uses tool_choice="auto" (the default in call_with_tools) so
-    # the model can call get_page_words between turns. With auto choice
-    # the wrapper keeps reasoning_effort for every provider, including
-    # Anthropic — only forced tool_choice triggers the Anthropic drop. That
-    # also makes this the only call site where the reasoning budget has any
-    # effect on Claude, which is why :data:`_VALUES_REASONING_EFFORT` applies
-    # here and nowhere else. ``reasoning_effort`` is that constant unless the
-    # workspace set ``grounded.values_reasoning_effort`` (``None`` = send none).
+    # Phase 1 leaves Anthropic on tool_choice="auto" (omitted on the wire)
+    # because any forced choice, "required" included, makes the wrapper drop
+    # reasoning_effort for Anthropic, which rejects thinking with forced tool
+    # use. Auto keeps extended thinking on for Claude. That also makes this
+    # the only call site where the reasoning budget has any effect on Claude,
+    # which is why :data:`_VALUES_REASONING_EFFORT` applies here and nowhere
+    # else. Other providers keep their reasoning under a forced choice, so
+    # they get "required" and can never end a turn without a tool call.
+    # ``reasoning_effort`` is that constant unless the workspace set
+    # ``grounded.values_reasoning_effort`` (``None`` = send none).
     llm_config = LLMConfig(
         model=model,
         api_key=api_key,
@@ -1851,6 +2528,13 @@ def _run_extract_loop(
     tool_calls_run = 0
     chunk_calls = 0
     acc_args: dict[str, Any] | None = None  # accumulated submit_values args
+    no_tool_call_retries = 0
+    endpoint = (model, api_base, reasoning_effort)
+    tool_choice = (
+        None
+        if is_anthropic_model(model) or endpoint in _REQUIRED_TOOL_CHOICE_REJECTED
+        else "required"
+    )
 
     def _ack(call_id: str, name: str, payload: dict[str, Any]) -> None:
         messages.append(
@@ -1862,13 +2546,41 @@ def _run_extract_loop(
             }
         )
 
-    for _ in range(max_tool_iters):
+    turns = 0
+    while turns < max_tool_iters:
         try:
             # Always cached: the system prompt and the schema block ahead of the
             # per-file PDF are byte-identical for every file in the docset, so
             # each file after the first reads that prefix instead of re-sending
             # it. ``call_with_tools`` no-ops the marker for non-Anthropic models.
-            result = call_with_tools(llm_config, messages=messages, tools=tools, cache=True)
+            try:
+                result = call_with_tools(
+                    llm_config, messages=messages, tools=tools, tool_choice=tool_choice, cache=True
+                )
+            except Exception as exc:
+                # Some endpoints refuse "required" (an OpenAI-compatible server
+                # without forced tool choice, or Claude behind an alias that
+                # is_anthropic_model cannot recognise, which then rejects
+                # thinking under a forced choice). Resend once on auto, which
+                # is what phase 1 sent before "required". Only a request
+                # rejection qualifies: a timeout or rate limit would only be
+                # repeated, a schema overflow belongs to the caller's
+                # permissive-schema fallback, and a body too large for the
+                # provider belongs to the page-range split. A failing resend raises its own
+                # error, the one the auto request alone would have produced.
+                if not (
+                    tool_choice == "required"
+                    and is_request_rejection(exc)
+                    and not _is_tool_schema_too_large(exc)
+                    and not is_request_too_large(exc)
+                ):
+                    raise
+                result = call_with_tools(llm_config, messages=messages, tools=tools, cache=True)
+                # The same request succeeded once tool choice was left to the
+                # model, so "required" was the cause: stay on auto for this
+                # attempt and start later ones there.
+                _remember_required_tool_choice_rejected(endpoint, exc)
+                tool_choice = None
         except Exception as exc:
             raise ValuesExtractionFailed(
                 f"extraction call failed: {type(exc).__name__}: {exc}"
@@ -1893,11 +2605,49 @@ def _run_extract_loop(
             )
 
         if not result.tool_calls:
-            raise ValuesExtractionFailed(
-                "model returned no tool call; the run is required to end "
-                f"with a {_TOOL_SUBMIT_VALUES!r} call carrying the final values"
+            # Only a normal stop is worth a reminder: a content filter or a
+            # refusal stop would end the same way again, and each retry
+            # resends the document.
+            # No finish_reason at all is common on OpenAI-compatible servers
+            # and says nothing abnormal happened, so it is retried too.
+            if (
+                result.finish_reason not in ("stop", None)
+                or no_tool_call_retries >= _MAX_NO_TOOL_CALL_RETRIES
+            ):
+                raise ValuesExtractionFailed(
+                    "model returned no tool call; the run is required to end "
+                    f"with a {_TOOL_SUBMIT_VALUES!r} call carrying the final values "
+                    f"(after {no_tool_call_retries} retries on this attempt; last "
+                    f"reply: {_describe_text_reply(result)})"
+                )
+            no_tool_call_retries += 1
+            counters["no_tool_call_retries"] += 1
+            if logger.isEnabledFor(logging.INFO):
+                logger.info(
+                    "file %s: phase-1 reply had no tool call (%s); retry %d of %d",
+                    file_id,
+                    _describe_text_reply(result),
+                    no_tool_call_retries,
+                    _MAX_NO_TOOL_CALL_RETRIES,
+                )
+            # Keep the reply so the model sees what it said; an empty assistant
+            # turn is rejected by some providers, so it is dropped instead.
+            if isinstance(result.content, str) and result.content.strip():
+                messages.append({"role": "assistant", "content": result.content})
+            # A chunked run that already recorded a done=false submission is
+            # mid-sequence: lists merge by concatenation, so a resent full tree
+            # would duplicate every entry already recorded.
+            nudge = (
+                PromptKey.VALUES_PHASE1_NUDGE_CONTINUE
+                if chunked and acc_args is not None
+                else PromptKey.VALUES_PHASE1_NUDGE_SUBMIT
             )
+            messages.append({"role": "user", "content": prompt(nudge)})
+            # A retry does not spend the turn budget, so running out of turns
+            # never cuts one short; _MAX_NO_TOOL_CALL_RETRIES bounds them.
+            continue
 
+        turns += 1
         messages.append(_serialize_assistant_message(result.message))
 
         for call in result.tool_calls:
@@ -1910,6 +2660,9 @@ def _run_extract_loop(
                 ) from exc
 
             if name == _TOOL_SUBMIT_VALUES:
+                args, repaired = _repair_submit_values_args(args, vocab, chunked=chunked)
+                if repaired is not None:
+                    counters["envelope_repairs"] += 1
                 values = args.get("values")
                 if not isinstance(values, dict):
                     raise ValuesExtractionFailed(
@@ -1962,10 +2715,12 @@ def _run_extract_loop(
                     tool_result: dict[str, Any] = get_page_words(
                         workspace,
                         file_id,
-                        page,
+                        page + page_offset if page >= 1 else page,
                         start_idx if isinstance(start_idx, int) else None,
                         end_idx if isinstance(end_idx, int) else None,
                     )
+                    if page_offset:
+                        _renumber_page_words(tool_result, page)
                 except Exception as exc:
                     # Bubble tool errors back to the model as a tool result;
                     # don't fail the whole extraction on a bad lookup.
@@ -1979,6 +2734,40 @@ def _run_extract_loop(
         f"extraction exceeded max_tool_iters={max_tool_iters} "
         f"without producing a {_TOOL_SUBMIT_VALUES!r} call"
     )
+
+
+def _remember_required_tool_choice_rejected(
+    endpoint: tuple[str, str | None, str | None], exc: BaseException
+) -> None:
+    """Record that *endpoint* refuses ``tool_choice="required"`` and warn the
+    first time.
+
+    On auto a model may end a turn without a tool call, which the reminder
+    retries cover but cannot rule out, so the fallback is worth surfacing."""
+    if endpoint in _REQUIRED_TOOL_CHOICE_REJECTED:
+        return
+    _REQUIRED_TOOL_CHOICE_REJECTED.add(endpoint)
+    model = endpoint[0]
+    logger.warning(
+        "values model %r rejected tool_choice='required' (%s: %s); phase-1 "
+        "extraction falls back to auto tool choice for it",
+        model,
+        type(exc).__name__,
+        str(exc)[:300],
+    )
+
+
+def _describe_text_reply(result: CallResult) -> str:
+    """Summarize a text-only model reply for an error or log message: the
+    opening of its text (whitespace collapsed), then :func:`_no_text_detail`'s
+    ``finish_reason`` and whether the reply was reasoning only, which is what
+    tells a model that spent its budget thinking apart from an empty reply."""
+    content = result.content
+    text = " ".join(content.split()) if isinstance(content, str) else ""
+    if len(text) > _NO_TOOL_CALL_REPLY_PREVIEW_CHARS:
+        text = text[:_NO_TOOL_CALL_REPLY_PREVIEW_CHARS] + "..."
+    shown = json.dumps(text) if text else "no text"
+    return shown + _no_text_detail(result.response)
 
 
 def _normalize_leaf_provenance(values: Any) -> None:
