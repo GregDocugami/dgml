@@ -317,16 +317,18 @@ def _box_key(text: str) -> str:
     return _BOX_KEY_RE.sub("", text.lower())
 
 
-def _box_agrees(words: list[_Word], key: str) -> bool:
+def _box_agrees(words: list[_Word], key: str, *, one_of_several: bool = False) -> bool:
     """True when the words inside a box read as the value whose *key* it
-    claims to locate: the box holds a piece of it (one line of a wrapped
-    value), a run of its words spells it (a loose box that also takes in a
-    label), or the two are close enough to be OCR noise."""
+    claims to locate: a run of its words spells it (a loose box that also
+    takes in a label counts), the two are close enough to be OCR noise, or —
+    only when the value has several boxes (*one_of_several*) — the box holds a
+    piece of it, one line of a wrapped value. A lone box holding a piece is
+    clipped: it disagrees, and snaps to the full span."""
     keys = [_box_key(w.text) for w in words]
     joined = "".join(keys)
     if not joined:
         return True
-    if joined in key:
+    if joined == key or (one_of_several and joined in key):
         return True
     for i in range(len(keys)):
         run = ""
@@ -404,6 +406,9 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
         locations = leaf.get("locations")
         if not key or not isinstance(locations, list):
             continue
+        boxed = sum(
+            1 for loc in locations if isinstance(loc, dict) and loc.get("bounding_box") is not None
+        )
         checked: list[Any] = []
         for loc in locations:
             box = loc.get("bounding_box") if isinstance(loc, dict) else None
@@ -421,7 +426,7 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
                 ),
                 key=lambda w: (round(w.y_center / max(w.height, 1)), w.left),
             )
-            if _box_agrees(inside, key):
+            if _box_agrees(inside, key, one_of_several=boxed > 1):
                 checked.append(loc)
             elif (moved := _snap_to_line(page_words(page), text, box, page)) is not None:
                 checked.extend(moved)

@@ -1637,7 +1637,28 @@ def test_loose_box_that_takes_in_the_label_is_kept(workspace: Workspace) -> None
 
 
 def test_box_holding_one_line_of_a_wrapped_value_is_kept(workspace: Workspace) -> None:
-    assert _verify(workspace, "Total Therms 48216 due", [1400, 100, 1500, 130])[0] == 0
+    from dgml_core.matching import verify_boxes
+
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=_METER_ROW)
+    values: dict[str, Any] = {
+        "V": {
+            "text": "Total Therms 48216 due",
+            "locations": [
+                {"page_number": 1, "bounding_box": [1400, 100, 1500, 130]},
+                {"page_number": 1, "bounding_box": [1507, 100, 1600, 130]},
+            ],
+        }
+    }
+    assert verify_boxes(workspace, "f1aaaaaaaaaa", values) == (0, 0)
+
+
+def test_lone_box_holding_part_of_the_value_snaps_to_the_whole(workspace: Workspace) -> None:
+    """A clipped "Gas Delivery": one box over "Delivery"
+    only. A lone box must hold the whole value, so it snaps to the full span."""
+    assert _verify(workspace, "Total Therms", [1455, 100, 1500, 130]) == (
+        1,
+        [{"page_number": 1, "bounding_box": [1400, 100, 1500, 130]}],
+    )
 
 
 def test_ocr_noise_is_tolerated(workspace: Workspace) -> None:
