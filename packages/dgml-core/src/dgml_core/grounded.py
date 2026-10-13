@@ -91,6 +91,7 @@ from .extraction_xml import (
     count_dropped_inputs,
     count_unnormalized_enum_values,
     count_unsupported_claims,
+    drop_unboxed_values,
     embed_extraction_into,
     has_document_tree,
     standalone_extraction_doc,
@@ -970,6 +971,7 @@ def extract_values(
     dropped_inputs = 0
     unsupported_values = 0
     repaired_inputs = 0
+    dropped_unboxed_values = 0
     unnormalized_enums = 0
     derivations_checked = 0
     derivations_mismatched = 0
@@ -1218,7 +1220,12 @@ def extract_values(
         # After grounding, so evidence that never got a box (and so emits no
         # dg:chunk) counts as dropped too — and a calculated or inferred value
         # left with nothing it used is an unsupported claim.
-        dropped_inputs = citations.dropped + count_dropped_inputs(final_values)
+        # A printed value grounding couldn't box can't be tied to the page:
+        # drop it rather than write it with no dg:origin (where it would read
+        # as unsupported, or as inferred if it named inputs).
+        unboxed = drop_unboxed_values(final_values)
+        dropped_unboxed_values = unboxed.values
+        dropped_inputs = citations.dropped + unboxed.inputs + count_dropped_inputs(final_values)
         unsupported_values = demoted_claims + count_unsupported_claims(final_values)
 
         # Extracted values live as a dg:extraction element in the file's core
@@ -1325,6 +1332,7 @@ def extract_values(
                     dropped_inputs=dropped_inputs,
                     unsupported_values=unsupported_values,
                     repaired_inputs=repaired_inputs,
+                    dropped_unboxed_values=dropped_unboxed_values,
                     unnormalized_enums=unnormalized_enums,
                     derivations_checked=derivations_checked,
                     derivations_mismatched=derivations_mismatched,
@@ -1398,6 +1406,7 @@ def _write_extraction_stats(
     dropped_inputs: int,
     unsupported_values: int,
     repaired_inputs: int,
+    dropped_unboxed_values: int,
     unnormalized_enums: int,
     derivations_checked: int,
     derivations_mismatched: int,
@@ -1476,6 +1485,8 @@ def _write_extraction_stats(
             # Inputs whose cited text matched a different entry of the same
             # array than the index the model gave: re-pointed there.
             "repaired_inputs": repaired_inputs,
+            # Printed values phases 2/3 found no box for: not written.
+            "dropped_unboxed_values": dropped_unboxed_values,
             "unnormalized_enum_values": unnormalized_enums,
             "derivations_checked": derivations_checked,
             "derivations_mismatched": derivations_mismatched,

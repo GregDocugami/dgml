@@ -414,6 +414,102 @@ def verify_input_citations(values: dict[str, Any]) -> CitationResult:
     return CitationResult(repaired, dropped)
 
 
+# ── printed values grounding couldn't box are dropped ────────────────────────
+
+
+class UnboxedResult(NamedTuple):
+    """What :func:`drop_unboxed_values` removed: printed values with no box,
+    and inputs that named one of them."""
+
+    values: int
+    inputs: int
+
+
+def drop_unboxed_values(values: dict[str, Any]) -> UnboxedResult:
+    """Remove every printed value that grounding couldn't box, in place.
+
+    A leaf with ``locations`` says the page prints it (in full, or in part).
+    If phases 2/3 found no bounding box for any of them, the value can't be
+    tied to the page: writing it without ``dg:origin`` would read as
+    unsupported (or, with ``inputs``, as an inferred judgment), so it is not
+    written at all. A row or section emptied by the removals goes too.
+
+    Removing a list entry shifts the ones after it, so every remaining
+    ``inputs`` path is re-indexed to match; an input naming a removed value is
+    dropped. Unprinted values (no ``locations``) are untouched — they have no
+    boxes by design."""
+    removed: set[LeafPath] = set()
+    removed_index: dict[LeafPath, list[int]] = {}
+    count = 0
+
+    def prune(node: Any, path: LeafPath) -> bool:
+        nonlocal count
+        if isinstance(node, dict):
+            if _is_leaf(node):
+                if "locations" in node and _origin_from_locations(node["locations"]) is None:
+                    count += 1
+                    removed.add(path)
+                    return True
+                return False
+            had = bool(node)
+            for key in list(node):
+                if prune(node[key], path + (key,)):
+                    del node[key]
+            if had and not node:
+                removed.add(path)
+                return True
+            return False
+        if isinstance(node, list):
+            had = bool(node)
+            kept = []
+            for i, entry in enumerate(node):
+                if prune(entry, path + (i,)):
+                    removed_index.setdefault(path, []).append(i)
+                else:
+                    kept.append(entry)
+            node[:] = kept
+            if had and not node:
+                removed.add(path)
+                return True
+        return False
+
+    prune(values, ())
+    if not removed:
+        return UnboxedResult(0, 0)
+
+    def remap(path: LeafPath) -> LeafPath | None:
+        if any(path[:k] in removed for k in range(1, len(path) + 1)):
+            return None
+        out: list[Any] = []
+        for k, seg in enumerate(path):
+            if isinstance(seg, int):
+                seg -= sum(1 for r in removed_index.get(path[:k], ()) if r < seg)
+            out.append(seg)
+        return tuple(out)
+
+    dropped_inputs = 0
+    for _path, leaf in walk_all_leaves(values):
+        refs = leaf.get("inputs")
+        if not isinstance(refs, list):
+            continue
+        kept_refs: list[Any] = []
+        for raw in refs:
+            parsed = parse_path(raw) if isinstance(raw, str) else None
+            if parsed is None:
+                kept_refs.append(raw)  # malformed; counted downstream
+                continue
+            moved = remap(parsed)
+            if moved is None:
+                dropped_inputs += 1
+            else:
+                kept_refs.append(path_to_str(moved))
+        if kept_refs:
+            leaf["inputs"] = kept_refs
+        else:
+            del leaf["inputs"]
+    return UnboxedResult(count, dropped_inputs)
+
+
 _DERIVATION_TOLERANCE = Decimal("0.05")
 
 

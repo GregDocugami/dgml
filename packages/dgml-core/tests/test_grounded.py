@@ -1332,11 +1332,14 @@ def test_extract_values_phase3_drops_a_box_off_the_page(workspace: Workspace) ->
     ):
         result = extract_values(workspace, ds_id, fid, config=config)
 
-    assert result.values["title"]["locations"] == [{"page_number": 1}]
+    # The only box was off the page, so the value has none: it is dropped
+    # rather than written with no dg:origin.
+    assert "title" not in result.values
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None
     phase3 = stats["phases"]["phase3"]
     assert (phase3["grid_pages"], phase3["boxes_dropped"]) == (0, 1)
+    assert stats["matching"]["dropped_unboxed_values"] == 1
 
 
 @pytest.mark.parametrize(
@@ -1541,6 +1544,7 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
         "dropped_inputs": 0,
         "unsupported_values": 0,
         "repaired_inputs": 0,
+        "dropped_unboxed_values": 0,
         "unnormalized_enum_values": 0,
         "derivations_checked": 0,
         "derivations_mismatched": 0,
@@ -2467,6 +2471,7 @@ def test_extract_values_calculated_field_end_to_end(workspace: Workspace) -> Non
         "dropped_inputs": 0,
         "unsupported_values": 0,
         "repaired_inputs": 0,
+        "dropped_unboxed_values": 0,
         "unnormalized_enum_values": 0,
         "derivations_checked": 0,
         "derivations_mismatched": 0,
@@ -3570,14 +3575,15 @@ def test_extract_values_phase3_skips_a_page_the_file_does_not_have(workspace: Wo
     assert result.values["title"]["locations"] == [
         {"page_number": 1, "bounding_box": [10, 20, 30, 40]}
     ]
-    assert result.values["subtitle"]["text"] == "Farewell"
-    assert result.values["subtitle"]["locations"] == [{"page_number": 2}]
+    # Cited on a page the file doesn't have, so never boxed: dropped.
+    assert "subtitle" not in result.values
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None and stats["outcome"] == "ok"
     assert stats["phases"]["phase3"]["page_calls"] == 1
     assert stats["phases"]["phase3"]["pages_out_of_range"] == 1
     assert stats["matching"]["matched_phase3"] == 1
     assert stats["matching"]["unmatched"] == 1
+    assert stats["matching"]["dropped_unboxed_values"] == 1
 
 
 def test_extract_values_phase3_makes_no_call_when_every_page_is_missing(
@@ -3597,11 +3603,11 @@ def test_extract_values_phase3_makes_no_call_when_every_page_is_missing(
         result = extract_values(workspace, ds_id, fid, config=config)
 
     assert mock_completion.call_count == 1
-    assert result.values["title"]["locations"] == [{"page_number": 3}]
-    # Persisted like any other unresolved leaf: the text is kept, a location
-    # without a box is not written, so it reads back with no locations.
+    # Like any printed value grounding couldn't box, it is dropped rather
+    # than written with no dg:origin.
+    assert "title" not in result.values
     xml = workspace.blobs.get_blob(result.xml_key).decode("utf-8")
-    assert dgml_xml_to_values(xml)["title"] == {"text": "Hello world", "locations": []}
+    assert dgml_xml_to_values(xml) == {}
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None and stats["outcome"] == "ok"
     assert stats["phases"]["phase3"]["page_calls"] == 0

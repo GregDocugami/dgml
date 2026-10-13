@@ -21,6 +21,7 @@ from dgml_core.extraction_xml import (
     count_dropped_inputs,
     count_unsupported_claims,
     dgml_xml_to_values,
+    drop_unboxed_values,
     embed_extraction_into,
     has_extraction,
     provenance_issues,
@@ -824,6 +825,69 @@ def test_uncited_relative_path_is_anchored_too() -> None:
     values["Meters"][0]["Tax"]["inputs"] = ["Items[3].Amount"]
     assert verify_input_citations(values).repaired == 2  # Tax's input and Category's
     assert values["Meters"][0]["Tax"]["inputs"] == ["Meters[0].Items[3].Amount"]
+
+
+# ── printed values grounding couldn't box ─────────────────────────────────────
+
+_BOX = [{"page_number": 1, "bounding_box": [1, 2, 3, 4]}]
+_NO_BOX = [{"page_number": 1}]
+
+
+def test_unboxed_printed_value_is_dropped_and_later_inputs_reindexed() -> None:
+    values: dict[str, Any] = {
+        "Items": [
+            {"Amount": {"text": "1.00", "locations": _BOX}},
+            {"Amount": {"text": "2.00", "locations": _NO_BOX}},  # row empties: gone
+            {"Amount": {"text": "3.00", "locations": _BOX}},
+        ],
+        "Total": {
+            "text": "4.00",
+            "method": "calculated",
+            "inputs": ["Items[0].Amount", "Items[1].Amount", "Items[2].Amount"],
+        },
+    }
+    result = drop_unboxed_values(values)
+    assert (result.values, result.inputs) == (1, 1)
+    assert [i["Amount"]["text"] for i in values["Items"]] == ["1.00", "3.00"]
+    # Items[2] is now Items[1]; the input naming the dropped row is gone.
+    assert values["Total"]["inputs"] == ["Items[0].Amount", "Items[1].Amount"]
+
+
+def test_unboxed_partly_printed_value_is_dropped_not_read_as_inferred() -> None:
+    values: dict[str, Any] = {
+        "CommencementDate": {"text": "March 1, 2026", "locations": _BOX},
+        "PeriodStart": {
+            "text": "3/1",
+            "value": "2026-03-01",
+            "locations": _NO_BOX,
+            "inputs": ["CommencementDate"],
+        },
+    }
+    assert drop_unboxed_values(values).values == 1
+    assert "PeriodStart" not in values
+
+
+def test_unprinted_and_partly_boxed_values_are_kept() -> None:
+    values: dict[str, Any] = {
+        "Name": {"text": "Acme", "locations": _BOX},
+        # One of two printed spots boxed: still tied to the page.
+        "Currency": {"text": "$", "locations": _BOX + _NO_BOX, "inputs": ["Name"]},
+        "Region": {"text": "EMEA", "method": "inferred", "inputs": ["Name"]},
+        "Grace": {"text": "0", "method": "defaulted"},
+    }
+    before = {k: dict(v) for k, v in values.items()}
+    assert drop_unboxed_values(values) == (0, 0)
+    assert values == before
+
+
+def test_value_whose_inputs_were_all_dropped_becomes_unsupported() -> None:
+    values: dict[str, Any] = {
+        "Hq": {"text": "Berlin", "locations": _NO_BOX},
+        "Region": {"text": "EMEA", "method": "inferred", "inputs": ["Hq"]},
+    }
+    assert drop_unboxed_values(values) == (1, 1)
+    assert values == {"Region": {"text": "EMEA", "method": "inferred"}}
+    assert count_unsupported_claims(values) == 1
 
 
 def _end_date_vocab() -> Vocabulary:
