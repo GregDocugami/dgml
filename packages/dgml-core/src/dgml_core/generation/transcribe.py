@@ -26,6 +26,7 @@ import dataclasses
 import json
 import re
 import tempfile
+import unicodedata
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -475,13 +476,55 @@ _GATE_RECALL = 0.85
 _GATE_MIN_TOKENS = 50
 _GATE_RETRIES = 1
 
+# ── per-page completeness ───────────────────────────────────────────────────
+# The window gate pools every page's words, so it is blind to ONE page lost out
+# of ten: the window still scores ~90%. That is the common loss, and it has a
+# position. Across 15 DocFinQA filings (1,766 pages, window size 10), ~25% of
+# window-FIRST pages were missing from the output against ~3% of other pages;
+# in a further filing, every attempt at a window -- retry, both split halves --
+# dropped its first page, and a split only made a new first page to drop. An
+# explicit "begin at page N, skip nothing" instruction left all three test
+# windows at 0-6% on their first page, so this is not a wording problem.
+# Transcribed ALONE, the same pages came back at 74-99%.
+#
+# Each page is therefore scored on its own, against the window's output, by
+# _PAGE_GATE_NGRAM-word sequences. Single words are the wrong measure here: a
+# page that was never transcribed still recalls 60-74% of its words, credited
+# by common words, years and figures other pages of the window share, while
+# sequences only match text that page actually contributed -- lost pages score
+# 0-8%, the lowest intact page 24%. A LEADING run of pages below
+# _PAGE_GATE_RECALL is re-transcribed one page at a time, each alone (a
+# one-page window has no later page to skip to), and put back in front of the
+# window's output; that position is known by construction, so no page markers
+# are needed in the reply. A low page mid-window is logged, not rescued: where
+# it belongs in the output is not known without them.
+_PAGE_GATE_RECALL = 0.15
+_PAGE_GATE_NGRAM = 4
+# A page flagged by the check above is not always missing: a table the PDF text
+# layer reads column by column scores low on sequences while every cell is in
+# the output (13 of 93 flags on the 15 filings). Prepending the rescue would
+# then DUPLICATE the page. So the rescue is compared with the window's own
+# output word by word, with multiplicity, after the window's other pages have
+# claimed their words (_share_already_present) -- order-free, so a table the two
+# calls serialise differently still matches -- and kept only when less than
+# this share of it is already there.
+_RESCUE_DUPLICATE_SHARE = 0.5
+
+
+def _tokens(text: str) -> list[str]:
+    """The coverage tokenizer over NFKC-normalised text. PDF text layers carry
+    typographic ligatures ('ofﬁcers', 'proﬁt') where the model writes plain
+    letters; without normalisation every such word -- and every sequence
+    through it -- reads as missing, on both the window gate and the page check."""
+    return coverage._tokenize(unicodedata.normalize("NFKC", text))
+
 
 def _page_token_lists(page_text_dir: Path | str | None) -> list[list[str]]:
     """Per-page token lists from a workspace page_text/ dir ([] without one)."""
     if page_text_dir is None:
         return []
     pages = coverage.read_workspace_page_texts(Path(page_text_dir))
-    return [coverage._tokenize(p) for p in pages]
+    return [_tokens(p) for p in pages]
 
 
 def _payload_text(payload: dict[str, Any]) -> str:
@@ -500,13 +543,89 @@ def _window_recall(payload: dict[str, Any], expected: list[str]) -> float:
     """Multiset recall of the window's page words within the window's output."""
     if not expected:
         return 1.0
-    have = Counter(coverage._tokenize(_payload_text(payload)))
+    have = Counter(_tokens(_payload_text(payload)))
     matched = 0
     for tok in expected:
         if have[tok] > 0:
             have[tok] -= 1
             matched += 1
     return matched / len(expected)
+
+
+def _page_recalls(
+    payload: dict[str, Any], pages: list[int], page_tokens: list[list[str]]
+) -> dict[int, float | None]:
+    """Each page's _PAGE_GATE_NGRAM-sequence recall within the window's output.
+
+    None for a page too short to judge (fewer than _GATE_MIN_TOKENS words) or
+    without extracted text. The expected side is per page -- the file's own
+    page_text -- so the reply needs no page markers for this to work.
+    """
+    k = _PAGE_GATE_NGRAM
+    out = _tokens(_payload_text(payload))
+    have = {tuple(out[i : i + k]) for i in range(len(out) - k + 1)}
+    res: dict[int, float | None] = {}
+    for p in pages:
+        toks = page_tokens[p] if p < len(page_tokens) else []
+        grams = [tuple(toks[i : i + k]) for i in range(len(toks) - k + 1)]
+        if len(toks) < _GATE_MIN_TOKENS or not grams:
+            res[p] = None
+        else:
+            res[p] = sum(g in have for g in grams) / len(grams)
+    return res
+
+
+def _share_already_present(
+    rescued: dict[str, Any], window: dict[str, Any], others_expected: list[str]
+) -> float:
+    """Share of the rescued page's words -- counted with multiplicity -- that the
+    window's output still holds once its OTHER pages have taken their own.
+
+    Order-free on purpose: the rescue and the window may serialise the same table
+    differently (row by row, column by column), so comparing sequences would miss
+    a duplicate. Counting per word would over-credit instead -- a lost page's
+    common words are all over the window -- which is why each other page's
+    expected words are claimed first ("the" six times on page 1 must be found six
+    times beyond what pages 2-10 need). On 15 filings, genuinely lost pages score
+    a median 0% on this; pages actually present, 89%.
+    """
+    supply = Counter(_tokens(_payload_text(window)))
+    supply.subtract(Counter(others_expected))
+    need = Counter(_tokens(_payload_text(rescued)))
+    total = sum(need.values())
+    if not total:
+        return 0.0
+    return sum(min(c, max(0, supply[t])) for t, c in need.items()) / total
+
+
+def _drop_repeated_lead(window: dict[str, Any], rescued: dict[str, Any]) -> dict[str, Any]:
+    """The window payload minus leading blocks that repeat a rescued block.
+
+    A window that skips its first page sometimes keeps a fragment of it -- a
+    section heading from the bottom of the page -- before resuming on the next
+    page, so that fragment is already in the rescued page. Only exact repeats
+    among the first few blocks are dropped: anything else is the window's own.
+    """
+    norm = lambda b: re.sub(r"\W+", " ", _payload_text({"blocks": [b]})).strip().lower()  # noqa: E731
+    seen = {norm(b) for b in rescued.get("blocks", []) or [] if isinstance(b, dict)}
+    blocks = [b for b in window.get("blocks", []) or [] if isinstance(b, dict)]
+    i = 0
+    while i < min(3, len(blocks)) and norm(blocks[i]) and norm(blocks[i]) in seen:
+        i += 1
+    return {**window, "blocks": blocks[i:]} if i else window
+
+
+def _leading_lost_pages(recalls: dict[int, float | None], pages: list[int]) -> list[int]:
+    """The run of pages at the window's start whose recall is below
+    _PAGE_GATE_RECALL -- the pages to re-transcribe alone. Stops at the first
+    page that is present or cannot be judged."""
+    lead: list[int] = []
+    for p in pages:
+        r = recalls.get(p)
+        if r is None or r >= _PAGE_GATE_RECALL:
+            break
+        lead.append(p)
+    return lead
 
 
 def _payload_tail(payload: dict[str, Any]) -> str:
@@ -694,6 +813,74 @@ def transcribe_document(
                             f"{doc_name} {wlog}: split halves cover "
                             f"{merged_recall:.0%} — keeping the split"
                         )
+            # Stage-3: pages the window skipped at its start (see the per-page
+            # completeness note above). Runs whatever produced `best` -- a first
+            # try, a retry or a kept split.
+            if page_tokens:
+                page_recall = _page_recalls(best[2], page_indices, page_tokens)
+                lead = _leading_lost_pages(page_recall, page_indices)
+                if lead:
+                    log(
+                        f"{doc_name} {wlog}: page(s) {', '.join(str(p + 1) for p in lead)} "
+                        f"missing from the window's output "
+                        f"({', '.join(f'{page_recall[p]:.0%}' for p in lead)} "
+                        f"{_PAGE_GATE_NGRAM}-gram recall); transcribing each alone"
+                    )
+                    rescued: list[dict[str, Any]] = []
+                    ctx = context
+                    for p in lead:
+                        got = run_attempts([p], ctx, f"{wlog}p{p + 1}", f"{wfile}p{p + 1}")
+                        r_p = _page_recalls(got[2], [p], page_tokens)[p] if got else None
+                        if got is None or r_p is None or r_p < _PAGE_GATE_RECALL:
+                            log(
+                                f"{doc_name} {wlog}: page {p + 1} still missing "
+                                f"when transcribed alone"
+                            )
+                            break
+                        others = [
+                            t
+                            for q in page_indices
+                            if q not in lead and q < len(page_tokens)
+                            for t in page_tokens[q]
+                        ]
+                        dup = _share_already_present(got[2], best[2], others)
+                        if dup >= _RESCUE_DUPLICATE_SHARE:
+                            log(
+                                f"{doc_name} {wlog}: page {p + 1} was present after all "
+                                f"({dup:.0%} of its re-transcription is already in the window); "
+                                f"keeping the window as is"
+                            )
+                            break
+                        rescued.append(got[2])
+                        ctx = _payload_tail(got[2])
+                    if rescued:
+                        merged = rescued[0]
+                        for more in rescued[1:]:
+                            merged = _merge_payloads(merged, more)
+                        # the window's `continues` now finishes the last RESCUED
+                        # page's final block, which is where its text belongs
+                        merged = _merge_payloads(merged, _drop_repeated_lead(best[2], merged))
+                        best = (
+                            _window_recall(merged, expected),
+                            json.dumps(merged, ensure_ascii=False),
+                            merged,
+                        )
+                        log(
+                            f"{doc_name} {wlog}: rescued {len(rescued)} leading page(s); "
+                            f"window now covers {best[0]:.0%} of the pages' words"
+                        )
+                mid = [
+                    p + 1
+                    for p in page_indices
+                    if p not in lead
+                    and page_recall[p] is not None
+                    and page_recall[p] < _PAGE_GATE_RECALL  # type: ignore[operator]
+                ]
+                if mid:
+                    log(
+                        f"{doc_name} {wlog}: page(s) {', '.join(map(str, mid))} look missing "
+                        f"mid-window; not rescued (their place in the output is unknown)"
+                    )
             recall, raw, payload = best
             if gate_on and recall < _GATE_RECALL:
                 log(f"{doc_name} {wlog}: keeping best attempt at {recall:.0%} page-word coverage")

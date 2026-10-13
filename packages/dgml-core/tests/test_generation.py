@@ -2288,6 +2288,210 @@ def test_transcribe_window_gate_splits_stubborn_window(
     assert len(kept["blocks"]) == 2
 
 
+def _ten_pages(tmp_path: Path) -> tuple[Path, list[list[str]]]:
+    """Ten pages of 60 distinct words -- one lost page leaves a window at 90%,
+    above _GATE_RECALL, which is the case the pooled gate cannot see."""
+    pages = [[f"p{n}w{i:02d}" for i in range(60)] for n in range(1, 11)]
+    pt_dir = tmp_path / "page_text"
+    pt_dir.mkdir()
+    for n, words in enumerate(pages, 1):
+        (pt_dir / f"page_{n}.json").write_text(
+            json.dumps({"page": n, "words": [{"t": w} for w in words]})
+        )
+    return pt_dir, pages
+
+
+def _blocks_json(*blocks: dict) -> str:
+    return json.dumps({"continues": "", "blocks": list(blocks)})
+
+
+def test_transcribe_rescues_a_skipped_first_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window that silently skips its FIRST page passes the pooled gate (90%);
+    the per-page check finds the page, transcribes it alone, and puts it first."""
+    from dgml_core.generation import document as document_mod
+    from dgml_core.generation import transcribe as transcribe_mod
+
+    pt_dir, pages = _ten_pages(tmp_path)
+    monkeypatch.setattr(transcribe_mod, "pdf_page_count", lambda _p: 10)
+    monkeypatch.setattr(document_mod, "slice_pdf", lambda _b, idx, **_kw: bytes(idx))
+    instructions: list[str] = []
+    rest = " ".join(w for pg in pages[1:] for w in pg)
+
+    def fake_call(config: llm.LLMConfig, **kwargs: object) -> str:
+        instr = kwargs["user_content"][0]["text"]  # type: ignore[index]
+        instructions.append(instr)
+        if "pages 1-10" in instr:
+            return _fake_window_json(rest.split())  # page 1 skipped
+        assert "pages 1-1 of" in instr  # "pages 1-1" alone also matches "pages 1-10"
+        return _fake_window_json(pages[0])
+
+    monkeypatch.setattr(llm, "call_continued", fake_call)
+    logs: list[str] = []
+    blocks = transcribe_mod.transcribe_document(
+        b"%PDF-fake",
+        doc_name="doc.pdf",
+        config=llm.LLMConfig(model="anthropic/claude-haiku-4-5"),
+        cache_dir=tmp_path,
+        debug=True,
+        page_text_dir=pt_dir,
+        log=logs.append,
+    )
+    # no retry and no split: the pooled gate was satisfied, only the page gate fired
+    assert sum("pages 1-10" in i for i in instructions) == 1
+    assert sum("pages 1-1 of" in i for i in instructions) == 1
+    assert [b.text for b in blocks] == [" ".join(pages[0]), rest]
+    assert any("page(s) 1 missing" in m for m in logs)
+    kept = json.loads((tmp_path / "doc_w01_raw.json").read_text())
+    assert kept["blocks"][0]["text"] == " ".join(pages[0])
+
+
+def test_transcribe_logs_but_does_not_move_a_mid_window_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page lost MID-window is reported, not rescued: without page markers in
+    the reply there is no known place to put it back."""
+    from dgml_core.generation import document as document_mod
+    from dgml_core.generation import transcribe as transcribe_mod
+
+    pt_dir, pages = _ten_pages(tmp_path)
+    monkeypatch.setattr(transcribe_mod, "pdf_page_count", lambda _p: 10)
+    monkeypatch.setattr(document_mod, "slice_pdf", lambda _b, idx, **_kw: bytes(idx))
+    calls: list[str] = []
+
+    def fake_call(config: llm.LLMConfig, **kwargs: object) -> str:
+        calls.append(kwargs["user_content"][0]["text"])  # type: ignore[index]
+        return _fake_window_json([w for n, pg in enumerate(pages) if n != 4 for w in pg])
+
+    monkeypatch.setattr(llm, "call_continued", fake_call)
+    logs: list[str] = []
+    transcribe_mod.transcribe_document(
+        b"%PDF-fake",
+        doc_name="doc.pdf",
+        config=llm.LLMConfig(model="anthropic/claude-haiku-4-5"),
+        cache_dir=tmp_path,
+        page_text_dir=pt_dir,
+        log=logs.append,
+    )
+    assert len(calls) == 1
+    assert any("page(s) 5 look missing mid-window" in m for m in logs)
+
+
+def test_transcribe_rescue_does_not_repeat_a_kept_heading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window that skips its first page but keeps that page's closing heading
+    must not end up with the heading twice once the page is rescued."""
+    from dgml_core.generation import document as document_mod
+    from dgml_core.generation import transcribe as transcribe_mod
+
+    pt_dir, pages = _ten_pages(tmp_path)
+    monkeypatch.setattr(transcribe_mod, "pdf_page_count", lambda _p: 10)
+    monkeypatch.setattr(document_mod, "slice_pdf", lambda _b, idx, **_kw: bytes(idx))
+    heading = {"structure": "heading", "level": 3, "lim": "", "text": "Performance Awards"}
+    rest = " ".join(w for pg in pages[1:] for w in pg)
+
+    def fake_call(config: llm.LLMConfig, **kwargs: object) -> str:
+        instr = kwargs["user_content"][0]["text"]  # type: ignore[index]
+        if "pages 1-10" in instr:
+            return _blocks_json(heading, {"structure": "p", "text": rest})
+        return _blocks_json({"structure": "p", "text": " ".join(pages[0])}, heading)
+
+    monkeypatch.setattr(llm, "call_continued", fake_call)
+    blocks = transcribe_mod.transcribe_document(
+        b"%PDF-fake",
+        doc_name="doc.pdf",
+        config=llm.LLMConfig(model="anthropic/claude-haiku-4-5"),
+        cache_dir=tmp_path,
+        page_text_dir=pt_dir,
+    )
+    assert [b.text for b in blocks] == [" ".join(pages[0]), "Performance Awards", rest]
+
+
+def test_transcribe_rescue_is_not_prepended_when_the_page_was_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A table the PDF text layer reads column by column scores ~0% on sequences
+    even though the window transcribed every cell row by row. The rescue then
+    matches the PDF order -- and must still be recognised as a duplicate, by
+    counting words rather than sequences, and not be prepended."""
+    from dgml_core.generation import document as document_mod
+    from dgml_core.generation import transcribe as transcribe_mod
+
+    pt_dir, pages = _ten_pages(tmp_path)
+    grid = [[f"r{i}c{j}" for j in range(10)] for i in range(6)]
+    column_major = [grid[i][j] for j in range(10) for i in range(6)]
+    (pt_dir / "page_1.json").write_text(
+        json.dumps({"page": 1, "words": [{"t": w} for w in column_major]})
+    )
+    monkeypatch.setattr(transcribe_mod, "pdf_page_count", lambda _p: 10)
+    monkeypatch.setattr(document_mod, "slice_pdf", lambda _b, idx, **_kw: bytes(idx))
+    rest = " ".join(w for pg in pages[1:] for w in pg)
+    rows = [{"structure": "row", "cells": row} for row in grid]
+    calls: list[str] = []
+
+    def fake_call(config: llm.LLMConfig, **kwargs: object) -> str:
+        instr = kwargs["user_content"][0]["text"]  # type: ignore[index]
+        calls.append(instr)
+        if "pages 1-10" in instr:
+            return _blocks_json(*rows, {"structure": "p", "text": rest})
+        return _blocks_json({"structure": "p", "text": " ".join(column_major)})
+
+    monkeypatch.setattr(llm, "call_continued", fake_call)
+    logs: list[str] = []
+    blocks = transcribe_mod.transcribe_document(
+        b"%PDF-fake",
+        doc_name="doc.pdf",
+        config=llm.LLMConfig(model="anthropic/claude-haiku-4-5"),
+        cache_dir=tmp_path,
+        page_text_dir=pt_dir,
+        log=logs.append,
+    )
+    assert len(calls) == 2  # the window, then the rescue that proved unnecessary
+    assert any("page(s) 1 missing" in m for m in logs)
+    assert any("page 1 was present after all" in m for m in logs)
+    # the window's own rows, once -- no prepended copy of the table
+    assert [b.cells for b in blocks[:6]] == grid
+    assert [b.text for b in blocks[6:]] == [rest]
+
+
+def test_transcribe_ligatures_do_not_look_like_a_missing_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PDF text layers spell 'proﬁt' with a ligature where the model writes
+    'profit'. Normalised (NFKC), the page is simply present: no rescue call."""
+    from dgml_core.generation import document as document_mod
+    from dgml_core.generation import transcribe as transcribe_mod
+
+    pt_dir, pages = _ten_pages(tmp_path)
+    ligature = [f"pro\ufb01t{i:02d}" for i in range(60)]
+    (pt_dir / "page_1.json").write_text(
+        json.dumps({"page": 1, "words": [{"t": w} for w in ligature]})
+    )
+    monkeypatch.setattr(transcribe_mod, "pdf_page_count", lambda _p: 10)
+    monkeypatch.setattr(document_mod, "slice_pdf", lambda _b, idx, **_kw: bytes(idx))
+    plain = [w.replace("\ufb01", "fi") for w in ligature]
+    calls: list[str] = []
+
+    def fake_call(config: llm.LLMConfig, **kwargs: object) -> str:
+        calls.append(kwargs["user_content"][0]["text"])  # type: ignore[index]
+        return _fake_window_json(plain + [w for pg in pages[1:] for w in pg])
+
+    monkeypatch.setattr(llm, "call_continued", fake_call)
+    logs: list[str] = []
+    transcribe_mod.transcribe_document(
+        b"%PDF-fake",
+        doc_name="doc.pdf",
+        config=llm.LLMConfig(model="anthropic/claude-haiku-4-5"),
+        cache_dir=tmp_path,
+        page_text_dir=pt_dir,
+        log=logs.append,
+    )
+    assert len(calls) == 1
+    assert not any("missing" in m for m in logs)
+
+
 def test_derive_schema_examples_are_consistent() -> None:
     """Inline examples are observed VALUES (caption text like 'Effective Date'
     for EffectiveDate is filtered); a section labeled via its heading keeps
