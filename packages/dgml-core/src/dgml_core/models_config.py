@@ -144,8 +144,6 @@ class Model:
 Credentials = tuple[str | None, str | None]
 """An ``(api_key, api_key_env)`` pair; at most one is set."""
 
-_NO_CREDENTIALS: Credentials = (None, None)
-
 
 def provider_of(model: str) -> str | None:
     """The :data:`~dgml_core.default_config.PROVIDERS` key serving ``model``'s
@@ -267,11 +265,19 @@ def normalize_models_layer(models: dict[str, Any]) -> dict[str, Any]:
     group is completed with explicit ``None``s. A tier credential whose tier this layer does
     not set is an error: a key is written beside its model, and a layer boundary must
     not separate them — that is how a key ends up following a model it was never
-    meant for. Runs per layer, before the merge."""
+    meant for. Runs per layer, before the merge.
+
+    The provider keys are validated and **consumed** here — written onto this layer's
+    tiers, then dropped — so they never reach the merged table. Two layers may each
+    hold one form of a provider's key; only both forms in one layer is a clash."""
     family = models.get("family")
     if isinstance(family, str) and family not in PROVIDER_MODELS:
         return dict(models)  # the family is the error; load_models_config reports it
     out = dict(expand_family(models))
+    providers = {p: _credentials(out, f"{p}_", "models", ModelsConfigInvalid) for p in PROVIDERS}
+    for p in PROVIDERS:
+        out.pop(f"{p}_api_key", None)
+        out.pop(f"{p}_api_key_env", None)
     for t in TIERS:
         prefix = f"{t}_"
         model = out.get(t.value)
@@ -289,9 +295,11 @@ def normalize_models_layer(models: dict[str, Any]) -> dict[str, Any]:
         has_own = any(out.get(f"{prefix}{suffix}") is not None for suffix in _GROUP_SUFFIXES)
         provider = provider_of(model)
         if not has_own and provider is not None:
-            for suffix in ("api_key", "api_key_env"):
-                if (value := out.get(f"{provider}_{suffix}")) is not None:
-                    out[f"{prefix}{suffix}"] = value
+            api_key, api_key_env = providers[provider]
+            if api_key is not None:
+                out[f"{prefix}api_key"] = api_key
+            if api_key_env is not None:
+                out[f"{prefix}api_key_env"] = api_key_env
         _complete_group(out, prefix)
     return out
 
@@ -337,10 +345,6 @@ def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
         raise invalid(
             f"'models.family' must be one of {', '.join(sorted(PROVIDER_MODELS))}; got {family!r}"
         )
-    # Provider keys were consumed per layer; validated here only so a literal/env-name
-    # clash is reported against the key the user actually wrote.
-    for p in PROVIDERS:
-        _credentials(section, f"{p}_", "models", invalid)
     tiers: dict[str, Model] = {}
     for t in TIERS:
         model = _opt_str(section.get(t.value), f"models.{t}", invalid)

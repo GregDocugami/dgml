@@ -357,3 +357,17 @@ def test_keys_in_the_environment_name_their_model_there_too(
     monkeypatch.setenv("DGML_MODELS__ANTHROPIC_API_KEY_ENV", "ANT")
     merged = load_merged_config(workspace)[ConfigSection.MODELS]
     assert merged["advanced_api_key_env"] == "ANT"
+
+
+def test_one_provider_key_form_per_layer_is_not_a_clash(workspace: Workspace) -> None:
+    """Each layer consumes its own provider key onto its own tiers; the keys never
+    reach the merged table, so one form in the user config and the other in the
+    workspace config cannot collide there."""
+    _write_user_config({"models": {"family": "anthropic", "anthropic_api_key": "ant"}})
+    write_config(workspace, {"models": {"anthropic_api_key_env": "ANT"}})
+    merged = load_merged_config(workspace)[ConfigSection.MODELS]
+    assert not any(k.startswith("anthropic_") for k in merged), merged
+    # The user layer's tiers took the user layer's key; the workspace key, with no
+    # tier of its provider in its layer, was simply unused.
+    assert merged["advanced_api_key"] == "ant"
+    assert "advanced_api_key_env" not in merged

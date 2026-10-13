@@ -86,11 +86,12 @@ def test_every_section_renders_its_loader_keys() -> None:
         clustering=Clustering({"scenario": {"pooling_pages": 2}}),
     )
     assert cfg.sections == {
+        # `anthropic_api_key` is consumed by `build()`, not kept: it is written onto
+        # tiers of its provider that lack a key, and `advanced` has its own.
         ConfigSection.MODELS: {
             "advanced": "a/m",
             "advanced_api_key": "ak",
             "advanced_api_base": "https://a",
-            "anthropic_api_key": "k",
         },
         ConfigSection.GROUNDED: {
             "schema_model": "s",

@@ -201,11 +201,13 @@ def test_tier_credentials_without_the_tier_are_rejected() -> None:
 
 @pytest.mark.parametrize("prefix", ["light_", "openai_"])
 def test_key_and_env_name_clash_is_rejected(prefix: str) -> None:
+    """Both forms in one layer: a tier's pair is caught at load, a provider's where it
+    is consumed — the normalizer, since provider keys never reach the merged table."""
     table = {"light": "openai/x", f"{prefix}api_key": "k", f"{prefix}api_key_env": "K"}
     with pytest.raises(
         ModelsConfigInvalid, match=f"'models.{prefix}api_key' / 'models.{prefix}api_key_env'"
     ):
-        load_models_config(_merged(table))
+        _normalized(table)
 
 
 def test_provider_key_fills_its_layers_tiers_by_model_prefix_unless_the_tier_has_its_own() -> None:
@@ -346,3 +348,9 @@ def test_normalize_rejects_a_section_credential_without_its_model_in_the_layer()
         {"values_model": "m", "values_api_key_env": "K"}, ConfigSection.GROUNDED
     )
     assert out["values_api_key_env"] == "K" and out["values_api_base"] is None
+
+
+def test_provider_keys_are_consumed_and_dropped_by_the_layer() -> None:
+    out = normalize_models_layer({"family": "anthropic", "anthropic_api_key": "ant"})
+    assert "anthropic_api_key" not in out
+    assert out["advanced_api_key"] == "ant"

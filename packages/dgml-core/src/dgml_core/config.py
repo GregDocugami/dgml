@@ -27,8 +27,12 @@ The workspace config is assembled by merging, in increasing precedence:
 The merge is pydantic-settings' source combination (``deep_update`` across
 sources): each config section is modelled as a permissive ``dict`` field, so a
 higher-priority layer overrides only the keys it sets and inherits the rest.
-The env-var convention is the pydantic-settings standard — ``env_prefix="DGML_"``
-with ``env_nested_delimiter="__"`` — so ``DGML_MODELS__ADVANCED=…`` sets
+The one exception is a model's credential group: each layer is normalized first
+(:func:`_normalize_layer`), so a layer that sets a model also sets ``None`` for
+the credentials it leaves unset and replaces the group whole rather than
+pairing its model with a lower layer's key. The env-var convention is the
+pydantic-settings standard — ``env_prefix="DGML_"`` with
+``env_nested_delimiter="__"`` — so ``DGML_MODELS__ADVANCED=…`` sets
 ``models.advanced``. (``DGML_HOME`` / ``DGML_DEBUG`` have no ``__`` and match no
 declared field, so ``extra="ignore"`` drops them — they never reach the config.)
 
