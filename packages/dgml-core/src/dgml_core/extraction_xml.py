@@ -424,11 +424,13 @@ def verify_input_citations(values: dict[str, Any]) -> CitationResult:
 
 
 class UnboxedResult(NamedTuple):
-    """What :func:`drop_unboxed_values` removed: printed values with no box,
-    and inputs that named one of them."""
+    """What :func:`drop_unboxed_values` removed: printed values with no box
+    (``paths`` names each as ``"path=text"``), and inputs that named one of
+    them."""
 
     values: int
     inputs: int
+    paths: list[str]
 
 
 def drop_unboxed_values(values: dict[str, Any]) -> UnboxedResult:
@@ -447,6 +449,7 @@ def drop_unboxed_values(values: dict[str, Any]) -> UnboxedResult:
     removed: set[LeafPath] = set()
     removed_index: dict[LeafPath, list[int]] = {}
     count = 0
+    dropped_paths: list[str] = []
 
     def prune(node: Any, path: LeafPath) -> bool:
         nonlocal count
@@ -454,6 +457,7 @@ def drop_unboxed_values(values: dict[str, Any]) -> UnboxedResult:
             if _is_leaf(node):
                 if "locations" in node and _origin_from_locations(node["locations"]) is None:
                     count += 1
+                    dropped_paths.append(f"{path_to_str(path)}={node.get('text')}")
                     removed.add(path)
                     return True
                 return False
@@ -481,7 +485,7 @@ def drop_unboxed_values(values: dict[str, Any]) -> UnboxedResult:
 
     prune(values, ())
     if not removed:
-        return UnboxedResult(0, 0)
+        return UnboxedResult(0, 0, [])
 
     def remap(path: LeafPath) -> LeafPath | None:
         if any(path[:k] in removed for k in range(1, len(path) + 1)):
@@ -513,7 +517,7 @@ def drop_unboxed_values(values: dict[str, Any]) -> UnboxedResult:
             leaf["inputs"] = kept_refs
         else:
             del leaf["inputs"]
-    return UnboxedResult(count, dropped_inputs)
+    return UnboxedResult(count, dropped_inputs, dropped_paths)
 
 
 _DERIVATION_TOLERANCE = Decimal("0.05")

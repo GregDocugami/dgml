@@ -1417,7 +1417,8 @@ A printed value (in full or in part) left with no bounding box is
 **dropped**, not written: without `dg:origin` it would read as
 unsupported, or, if it named inputs, as an inferred judgment. Inputs that named
 a dropped value are dropped too, and array indices after it are renumbered.
-Dropped values are counted in `matching.dropped_unboxed_values`.
+Dropped values are counted in `matching.dropped_unboxed_values` and listed
+as `"path=text"` in `matching.dropped_unboxed`.
 
 A value printed in part keeps its boxes **and** names its inputs, so one
 element holds the whole fact:

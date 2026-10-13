@@ -973,6 +973,7 @@ def extract_values(
     unsupported_values = 0
     repaired_inputs = 0
     dropped_unboxed_values = 0
+    dropped_unboxed_paths: list[str] = []
     rejected_boxes = 0
     snapped_boxes = 0
     unnormalized_enums = 0
@@ -1234,6 +1235,7 @@ def extract_values(
         snapped_boxes, rejected_boxes = box_check
         unboxed = drop_unboxed_values(final_values)
         dropped_unboxed_values = unboxed.values
+        dropped_unboxed_paths = unboxed.paths
         dropped_inputs = citations.dropped + unboxed.inputs + count_dropped_inputs(final_values)
         unsupported_values = demoted_claims + count_unsupported_claims(final_values)
 
@@ -1342,6 +1344,7 @@ def extract_values(
                     unsupported_values=unsupported_values,
                     repaired_inputs=repaired_inputs,
                     dropped_unboxed_values=dropped_unboxed_values,
+                    dropped_unboxed_paths=dropped_unboxed_paths,
                     rejected_boxes=rejected_boxes,
                     snapped_boxes=snapped_boxes,
                     unnormalized_enums=unnormalized_enums,
@@ -1418,6 +1421,7 @@ def _write_extraction_stats(
     unsupported_values: int,
     repaired_inputs: int,
     dropped_unboxed_values: int,
+    dropped_unboxed_paths: list[str],
     rejected_boxes: int,
     snapped_boxes: int,
     unnormalized_enums: int,
@@ -1500,6 +1504,9 @@ def _write_extraction_stats(
             "repaired_inputs": repaired_inputs,
             # Printed values phases 2/3 found no box for: not written.
             "dropped_unboxed_values": dropped_unboxed_values,
+            # Which ones ("path=text"), so a drop is diagnosable without
+            # re-running the extraction.
+            "dropped_unboxed": dropped_unboxed_paths,
             # Boxes whose words on the text layer don't read as their value:
             # moved to the one exact match on their line (snapped), or, with
             # no single match there, stripped (rejected).

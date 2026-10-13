@@ -862,6 +862,7 @@ def test_unboxed_printed_value_is_dropped_and_later_inputs_reindexed() -> None:
     }
     result = drop_unboxed_values(values)
     assert (result.values, result.inputs) == (1, 1)
+    assert result.paths == ["Items[1].Amount=2.00"]
     assert [i["Amount"]["text"] for i in values["Items"]] == ["1.00", "3.00"]
     # Items[2] is now Items[1]; the input naming the dropped row is gone.
     assert values["Total"]["inputs"] == ["Items[0].Amount", "Items[1].Amount"]
@@ -890,7 +891,7 @@ def test_unprinted_and_partly_boxed_values_are_kept() -> None:
         "Grace": {"text": "0", "method": "defaulted"},
     }
     before = {k: dict(v) for k, v in values.items()}
-    assert drop_unboxed_values(values) == (0, 0)
+    assert drop_unboxed_values(values) == (0, 0, [])
     assert values == before
 
 
@@ -899,7 +900,7 @@ def test_value_whose_inputs_were_all_dropped_becomes_unsupported() -> None:
         "Hq": {"text": "Berlin", "locations": _NO_BOX},
         "Region": {"text": "EMEA", "method": "inferred", "inputs": ["Hq"]},
     }
-    assert drop_unboxed_values(values) == (1, 1)
+    assert drop_unboxed_values(values) == (1, 1, ["Hq=Berlin"])
     assert values == {"Region": {"text": "EMEA", "method": "inferred"}}
     assert count_unsupported_claims(values) == 1
 
