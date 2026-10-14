@@ -192,10 +192,14 @@ class ConvertOptions:
     # vocabulary open so labeling may add to it.
     vocab: TagVocab | None = None
     progress: Callable[[str], None] | None = field(default=None)
-    # Workspace to record LLM usage into. When set (and ``debug`` is True), the
-    # transcription/labeling calls append rows to ``usage.jsonl``; None disables
-    # recording (library/test callers that don't want telemetry).
+    # Workspace to record LLM usage into. When set (and ``record_usage`` is
+    # True), the transcription/labeling calls append rows to ``usage.jsonl``;
+    # None disables recording (library/test callers that don't want telemetry).
     workspace: Workspace | None = None
+    # Record cost/token rows for the generation's LLM calls. Independent of
+    # ``debug`` (the artifacts): the CLI sets both under --debug, a host can
+    # account for cost without writing debug files.
+    record_usage: bool = False
 
 
 def _config(
@@ -209,7 +213,7 @@ def _config(
         max_tokens=opts.max_tokens,
         thinking=opts.thinking,
         workspace=opts.workspace,
-        debug=opts.debug,
+        record_usage=opts.record_usage,
         operation=operation,
     )
 
@@ -314,9 +318,9 @@ def convert_batch(
 
     # One aggregated usage row for the whole labeling pass: label_documents
     # threads this single config through every call, so a scope on it folds
-    # them into one row (gated on --debug via the config). The labeling model is
-    # always configured independently of transcription (it may name a different
-    # provider), so it gets its own LLMConfig with its own credentials.
+    # them into one row (gated on ``record_usage`` via the config). The labeling
+    # model is always configured independently of transcription (it may name a
+    # different provider), so it gets its own LLMConfig with its own credentials.
     label_config = llm.LLMConfig(
         model=opts.label_model,
         api_key=opts.label_api_key,
@@ -325,7 +329,7 @@ def convert_batch(
         max_tokens=opts.max_tokens,
         thinking=opts.thinking,
         workspace=opts.workspace,
-        debug=opts.debug,
+        record_usage=opts.record_usage,
         operation=OPERATION_LABEL,
     )
     label_config.context = {"doc_count": len(docs)}

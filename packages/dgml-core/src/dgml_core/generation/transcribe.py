@@ -604,8 +604,8 @@ def transcribe_document(
     page_tokens = _page_token_lists(page_text_dir)
 
     # One usage row per document, aggregating every window's call (gated on
-    # --debug via the config). ``config`` is fresh per document in the pipeline,
-    # so setting the context here is safe and thread-local.
+    # ``record_usage`` via the config). ``config`` is fresh per document in the
+    # pipeline, so setting the context here is safe and thread-local.
     config.context = {"doc": doc_name}
     blocks: list[Block] = []
     counter = 0

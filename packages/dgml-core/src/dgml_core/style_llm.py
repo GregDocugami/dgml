@@ -114,7 +114,7 @@ def annotate_style_from_image(
     config: llm.LLMConfig,
     style_attr: str,
     origin_attr: str,
-    debug: bool = False,
+    record_usage: bool = False,
     max_concurrency: int = DEFAULT_STYLE_CONCURRENCY,
 ) -> int:
     """Set ``dg:style`` on grounded elements from a vision model's reading of
@@ -143,7 +143,7 @@ def annotate_style_from_image(
     about without asking.
 
     Each page is one vision call, which records its own ``usage.jsonl`` row
-    (labelled ``style_annotate``, gated on ``debug``) from the recording context
+    (labelled ``style_annotate``, gated on ``record_usage``) from the recording context
     carried on the per-page :class:`~dgml_core.llm.LLMConfig`. Row *order* in
     that log is completion order, not page order. Do not wrap a call to this
     function in :func:`dgml_core.llm.record_usage_for`: ``replace`` would hand
@@ -177,13 +177,13 @@ def annotate_style_from_image(
                 image_key=image_key,
                 blobs=workspace.blobs,
                 # One call per page → one usage row per page, via the recording
-                # context on this page's own config (gated on --debug in the
-                # call layer). The per-page copy also keeps that recording state
-                # thread-local.
+                # context on this page's own config (gated on ``record_usage``
+                # in the call layer). The per-page copy also keeps that
+                # recording state thread-local.
                 config=replace(
                     config,
                     workspace=workspace,
-                    debug=debug,
+                    record_usage=record_usage,
                     operation=OPERATION_STYLE_ANNOTATE,
                     context={"file_id": file_id, "page": page},
                 ),

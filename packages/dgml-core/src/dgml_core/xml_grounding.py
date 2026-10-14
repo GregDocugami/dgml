@@ -235,7 +235,7 @@ class _OTok:
 @dataclass(frozen=True)
 class GroundingResult:
     output_path: Path
-    # None when the stats sidecar wasn't written (write_stats=False); the stats
+    # None unless the stats sidecar was written (write_stats=True); the stats
     # dict is still returned in-memory regardless.
     stats_path: Path | None
     stats: dict[str, Any]
@@ -460,8 +460,8 @@ def ground_dgml_xml(
     output_path: Path | None = None,
     *,
     force: bool = False,
-    write_stats: bool = True,
-    debug: bool = False,
+    write_stats: bool = False,
+    record_usage: bool = False,
 ) -> GroundingResult:
     """Annotate the DGML XML at ``xml_path`` with ``dg:origin`` boxes,
     grounding against ``file_id``'s page OCR, and write the result.
@@ -469,20 +469,18 @@ def ground_dgml_xml(
     ``output_path`` defaults to a ``<stem>.dgml.grounded.xml`` sibling;
     pass ``output_path=xml_path`` (with ``force=True``) to ground in
     place — what ``dgml docset generate`` does so the canonical
-    ``<stem>.dgml.xml`` carries the boxes. When ``write_stats`` is set
-    (the default), a ``<stem>.dgml.grounding_stats.json`` sidecar with
-    match-rate telemetry is written next to the output; the returned
-    ``GroundingResult.stats`` is always populated regardless.
+    ``<stem>.dgml.xml`` carries the boxes. The returned
+    ``GroundingResult.stats`` is always populated; pass ``write_stats=True``
+    to also write it as a ``<stem>.dgml.grounding_stats.json`` sidecar next
+    to the output (the CLI does so under ``--debug``). Off by default so a
+    caller grounding into its own directory gets only the file it asked
+    for; with it off ``GroundingResult.stats_path`` is ``None``.
 
-    With ``write_stats=False`` the ``<stem>.dgml.grounding_stats.json``
-    sidecar is not written (the CLI suppresses it unless ``--debug``); the
-    grounded XML is still produced and the stats dict is still returned
-    in-memory, but ``GroundingResult.stats_path`` is ``None``.
-
-    ``debug`` gates ``usage.jsonl`` recording for the LLM-backed image-based
-    ``dg:style`` pass (OCR files with a ``style`` config) — like every other
-    LLM path, no ``--debug`` means no usage rows. Deterministic grounding does
-    no LLM work, so this is a no-op otherwise.
+    ``record_usage`` gates ``usage.jsonl`` recording for the LLM-backed
+    image-based ``dg:style`` pass (OCR files with a ``style`` config) — like
+    every other LLM path, off means no usage rows (the CLI turns it on under
+    ``--debug``). Deterministic grounding does no LLM work, so this is a no-op
+    otherwise.
 
     Raises :class:`FileNotFound` if the workspace has no ``page_text``
     for the file, :class:`GroundingFailed` if the XML cannot be parsed,
@@ -575,7 +573,7 @@ def ground_dgml_xml(
     # For opted-in OCR files, fill dg:style from the page images via an LLM
     # (best-effort). A no-op for digital/hybrid files and unconfigured workspaces.
     _maybe_style_from_image(
-        workspace, file_id, root, config=style_config, is_ocr=is_ocr, debug=debug
+        workspace, file_id, root, config=style_config, is_ocr=is_ocr, record_usage=record_usage
     )
 
     # Drop dg:style declarations a child merely inherits from an ancestor, so an
@@ -2018,7 +2016,7 @@ def _maybe_style_from_image(
     *,
     config: StyleConfig | None,
     is_ocr: bool,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> None:
     """Run the image-based ``dg:style`` pass when the workspace has a ``style``
     config section (``config`` is the pre-loaded, already-validated section, or
@@ -2032,8 +2030,8 @@ def _maybe_style_from_image(
     exactly as per-page failures are inside
     :func:`dgml_core.style_llm.annotate_style_from_image` — so the caller still
     writes the file with its ``dg:origin`` boxes intact rather than losing the
-    whole grounding to a style-only problem. ``debug`` gates the per-page
-    ``usage.jsonl`` recording done in the call layer."""
+    whole grounding to a style-only problem. ``record_usage`` gates the
+    per-page ``usage.jsonl`` recording done in the call layer."""
     if config is None or not is_ocr:
         return
 
@@ -2056,7 +2054,7 @@ def _maybe_style_from_image(
             config=llm_config,
             style_attr=_dg_attr_name(root, "style"),
             origin_attr=_dg_attr_name(root, "origin"),
-            debug=debug,
+            record_usage=record_usage,
         )
     except Exception:
         # Best-effort enhancement — never let it discard the grounding.

@@ -33,12 +33,13 @@ consistent:
   continuation in those cases (see :func:`supports_assistant_prefill`), so a
   caller gets one coherent output on every provider.
 - **Usage telemetry.** The call functions record usage themselves: when a
-  config carries a ``workspace`` and ``debug`` is set, each call appends one
-  :class:`UsageEvent` to ``usage.jsonl`` (labelled by ``config.operation`` /
+  config carries a ``workspace`` and ``record_usage`` is set, each call appends
+  one :class:`UsageEvent` to ``usage.jsonl`` (labelled by ``config.operation`` /
   ``config.context``), on both success and failure. Callers don't wire this up
   per call. :func:`record_usage_for` is an optional scope that aggregates the
-  calls inside it into a single row for multi-call operations. All recording is
-  gated on ``--debug``.
+  calls inside it into a single row for multi-call operations. Recording is
+  independent of debug artifacts: the CLI turns it on under ``--debug``, a
+  library caller sets ``record_usage=True`` directly.
 
 Lives at the package root (:mod:`dgml_core.llm`) so generation and the
 non-generation call sites share one implementation.
@@ -396,11 +397,13 @@ class LLMConfig:
     # Recording context carried on the config so the call functions log
     # ``usage.jsonl`` rows themselves rather than each caller wrapping the call.
     # ``workspace`` is where the row is written; recording is GATED on
-    # ``debug`` (no ``--debug`` → no rows, for every operation). ``operation``
-    # and ``context`` label the row. Leave ``workspace`` None (the default)
-    # for library callers that don't want telemetry.
+    # ``record_usage`` (off → no rows, for every operation). It is deliberately
+    # not tied to debug artifacts: a production host can account for cost
+    # without writing debug files. ``operation`` and ``context`` label the
+    # row. Leave ``workspace`` None (the default) for library callers that
+    # don't want telemetry.
     workspace: Workspace | None = None
-    debug: bool = False
+    record_usage: bool = False
     operation: str | None = None
     context: dict[str, Any] | None = None
     # Internal: set by an active :func:`record_usage_for` scope. While set,
@@ -1035,9 +1038,9 @@ def _completion_with_retry(kwargs: dict[str, Any], *, max_retries: int = 3) -> A
 
 
 def _usage_enabled(config: LLMConfig) -> bool:
-    """Usage recording happens only under ``--debug`` and only when a
+    """Usage recording happens only when ``record_usage`` is set and a
     workspace to write to is set on the config."""
-    return config.debug and config.workspace is not None
+    return config.record_usage and config.workspace is not None
 
 
 @contextmanager
@@ -1050,7 +1053,7 @@ def _record_call(config: LLMConfig) -> Iterator[dict[str, Any]]:
     - If an aggregation scope is active (``config._usage_sink`` set by
       :func:`record_usage_for`), fold the totals into it and write nothing —
       the scope emits one combined row.
-    - Otherwise, append one :class:`UsageEvent` (gated on ``--debug`` +
+    - Otherwise, append one :class:`UsageEvent` (gated on ``record_usage`` +
       workspace). A single call therefore yields a single row.
 
     Exceptions propagate after the totals are recorded, so a failed call
@@ -1070,7 +1073,7 @@ def _record_call(config: LLMConfig) -> Iterator[dict[str, Any]]:
     finally:
         if config._usage_sink is not None:
             add_partial(config._usage_sink, totals)
-        elif config.debug and config.workspace is not None:
+        elif config.record_usage and config.workspace is not None:
             record_usage(
                 config.workspace,
                 UsageEvent(
@@ -1323,8 +1326,8 @@ def record_usage_for(config: LLMConfig) -> Iterator[None]:
     ``usage.jsonl`` row, instead of one row per call.
 
     Recording context (``workspace``, ``operation``, ``context``) is read off
-    the config, and the whole scope is gated on ``config.debug`` — with
-    ``--debug`` off (or no workspace) this is a transparent no-op. Use it only
+    the config, and the whole scope is gated on ``config.record_usage`` — with
+    recording off (or no workspace) this is a transparent no-op. Use it only
     for a genuinely multi-call operation (e.g. a per-page extraction loop);
     single-call sites need no wrapper — the call records its own row.
 

@@ -519,8 +519,11 @@ skips the debug-only cache artifacts (raw LLM responses,
 `usage.jsonl` cost/token rows. Pass the global `--debug` flag
 (`uv run dgml --debug docset generate "$ds"`) to retain those artifacts and to
 record per-operation cost telemetry to `<workspace>/usage.jsonl` (this gating
-applies to every LLM command — classify, cluster, generate). Coverage summaries
-still print on stderr under `--verbose` regardless.
+applies to every LLM command — classify, cluster, generate, extraction
+extract). `--debug` also writes a value extraction's per-file
+`extraction_stats.json` (phase timings, cost, match counts) from `docset
+add-file`, auto-classifying `file add`, `cluster`, and `extraction extract`.
+Coverage summaries still print on stderr under `--verbose` regardless.
 
 **Parallelism.** `--max-parallel-calls` transcribes that many documents
 concurrently (windows *within* a document stay serial, since each window

@@ -427,7 +427,8 @@ def plan_links(xml: str, config: llm.LLMConfig, *, verify: bool = True) -> list[
     """
     root = etree.fromstring(xml.encode())
     elements = _elements(root)
-    # Propose + verify fold into one usage row (gated on --debug via the config).
+    # Propose + verify fold into one usage row (gated on ``record_usage`` via
+    # the config).
     with llm.record_usage_for(config):
         cands = _propose(elements, config)
         if verify and cands:

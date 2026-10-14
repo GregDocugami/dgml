@@ -55,7 +55,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -127,8 +127,8 @@ from .usage import (
     OUTCOME_OK,
     UsageEvent,
     add_partial,
-    record_usage,
 )
+from .usage import record_usage as _append_usage_event
 
 logger = logging.getLogger(__name__)
 
@@ -491,7 +491,7 @@ def generate_schema(
     *,
     config: GroundedConfig,
     docset_name: str,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> str:
     """Ask the configured LLM to propose an extraction schema from one or
     more PDFs of the same kind, returning the at-rest RELAX NG Compact form.
@@ -516,6 +516,9 @@ def generate_schema(
 
     Raises :class:`SchemaGenerationFailed` on any non-config failure
     (no files, missing PDF, malformed LLM response, network error).
+
+    ``record_usage`` appends one ``schema_generate`` row to the workspace's
+    ``usage.jsonl``; it is independent of debug artifacts.
     """
     if not file_ids:
         raise SchemaGenerationFailed(
@@ -532,8 +535,8 @@ def generate_schema(
     # max_tokens=None so the wrapper doesn't add the max_tokens alias alongside
     # max_completion_tokens. reasoning_effort is set unconditionally; the
     # wrapper drops it for Anthropic + forced tool_choice.
-    # Single call → records its own usage row (gated on --debug) from the
-    # context carried on the config.
+    # Single call → records its own usage row (gated on ``record_usage``) from
+    # the context carried on the config.
     llm_config = LLMConfig(
         model=config.schema_model,
         api_key=api_key,
@@ -543,7 +546,7 @@ def generate_schema(
         timeout=_DEFAULT_TIMEOUT_SECONDS,
         reasoning_effort=_DEFAULT_REASONING_EFFORT,
         workspace=workspace,
-        debug=debug,
+        record_usage=record_usage,
         operation=OPERATION_SCHEMA_GENERATE,
         context={"from_file_ids": list(file_ids)},
     )
@@ -839,6 +842,14 @@ class ExtractionResult:
     ``tool_calls`` is the count of ``get_page_words`` grounding lookups the
     model performed before finalizing — a rough proxy for how much grounding it
     leaned on. ``model`` is the values model that produced it.
+
+    ``usage`` is the cost/token accounting of the whole call — the same totals
+    the ``extract_values`` row in ``usage.jsonl`` carries (phase 1 + phase 3
+    summed; ``cost_usd`` and the token counts are ``None`` when the provider
+    did not report them) plus ``duration_s`` — and ``stats`` is the full
+    per-phase breakdown that ``extraction_stats.json`` holds. Both are
+    populated whether or not anything was persisted, so a host that keeps
+    telemetry out of the workspace can read them here.
     """
 
     values: dict[str, Any]
@@ -846,6 +857,8 @@ class ExtractionResult:
     xml_key: str
     mode: str
     model: str
+    usage: dict[str, Any] = field(default_factory=dict)
+    stats: dict[str, Any] = field(default_factory=dict)
 
 
 def extract_values(
@@ -854,8 +867,8 @@ def extract_values(
     file_id: str,
     *,
     config: GroundedConfig,
-    write_stats: bool = True,
-    debug: bool = False,
+    write_stats: bool = False,
+    record_usage: bool = False,
 ) -> ExtractionResult:
     """Ask the configured LLM to extract values from a file against a docset's schema.
 
@@ -882,12 +895,14 @@ def extract_values(
        never has to echo the whole structure, so phase-3 prompts and
        outputs stay small.
 
-    Cost telemetry (``--debug`` only, via ``debug``): a single
-    ``extract_values`` row in ``usage.jsonl`` sums phase 1 + 3 (phase 2 is
-    code only). Per-phase timings, costs, and match percentages are also
-    written to ``extraction_stats.json`` (unless ``write_stats=False``, which
-    the CLI sets unless ``--debug``) so the UX can render them without
-    re-deriving anything from the usage log.
+    Cost telemetry: with ``record_usage`` a single ``extract_values`` row in
+    ``usage.jsonl`` sums phase 1 + 3 (phase 2 is code only). With
+    ``write_stats`` the per-phase timings, costs, and match percentages are
+    stored as the pair's ``extraction_stats.json``. Both are off by default
+    and independent of debug artifacts (the CLI turns both on under
+    ``--debug``); the same numbers come back on the result as ``usage`` and
+    ``stats`` regardless, so a caller that persists neither can still read
+    them.
     """
     store = DocSetStore(workspace)
     rnc_schema = store.get_schema(docset_id)  # RNC text; raises SchemaNotFound
@@ -937,6 +952,51 @@ def extract_values(
     phase1_chunk_calls = 0
     phase1_truncated_retries = 0
     phase1_counters = {"envelope_repairs": 0, "no_tool_call_retries": 0}
+    # Both built once, on success before the return and otherwise in
+    # ``finally``, from whatever the phases got done; the same dicts are what
+    # the result carries and what ``usage.jsonl`` / ``extraction_stats.json``
+    # store, so the two views never disagree (``duration_s`` is a clock read).
+    stats_doc: dict[str, Any] | None = None
+    usage_doc: dict[str, Any] | None = None
+
+    def _usage_summary() -> dict[str, Any]:
+        return {
+            **_merge_totals(phase1_totals, phase3_totals),
+            "duration_s": round(time.monotonic() - started, 3),
+        }
+
+    def _stats_summary() -> dict[str, Any]:
+        return _build_extraction_stats(
+            model=config.values_model,
+            outcome=outcome,
+            error_msg=error_msg,
+            phase1_totals=phase1_totals,
+            phase3_totals=phase3_totals,
+            phase1_duration=phase1_duration,
+            phase2_duration=phase2_duration,
+            phase3_duration=phase3_duration,
+            phase3_page_calls=phase3_page_calls,
+            phase3_grid_pages=phase3_grid_pages,
+            phase3_boxes_dropped=phase3_boxes_dropped,
+            phase3_pages_out_of_range=phase3_pages_out_of_range,
+            phase2_matched=phase2_matched,
+            phase3_matched=phase3_matched,
+            unmatched=unmatched_count,
+            total_locations=total_locations,
+            computed_fields=computed_fields,
+            dropped_refs=dropped_refs,
+            unnormalized_enums=unnormalized_enums,
+            derivations_checked=derivations_checked,
+            derivations_mismatched=derivations_mismatched,
+            invariants_checked=invariants_checked,
+            invariant_violations=invariant_violations,
+            phase1_layout=phase1_layout,
+            phase1_tool_schema=phase1_tool_schema_mode,
+            phase1_chunk_calls=phase1_chunk_calls,
+            phase1_truncated_retries=phase1_truncated_retries,
+            phase1_envelope_repairs=phase1_counters["envelope_repairs"],
+            phase1_no_tool_call_retries=phase1_counters["no_tool_call_retries"],
+        )
 
     try:
         # --- Phase 1: text + page numbers, no bboxes (LLM) ----------
@@ -1155,12 +1215,16 @@ def extract_values(
             doc = standalone_extraction_doc(final_values, vocab=vocab)
         workspace.blobs.put_blob(xml_key, doc.encode("utf-8"))
         outcome = OUTCOME_OK
+        stats_doc = _stats_summary()
+        usage_doc = _usage_summary()
         return ExtractionResult(
             values=final_values,
             tool_calls=tool_calls_total,
             xml_key=xml_key,
             mode=mode,
             model=config.values_model,
+            usage=usage_doc,
+            stats=stats_doc,
         )
     except ValuesExtractionFailed as exc:
         error_msg = str(exc)
@@ -1171,24 +1235,26 @@ def extract_values(
         error_msg = f"{type(exc).__name__}: {exc}"
         raise
     finally:
-        # Usage recording is gated on --debug (like every other LLM path).
-        # This aggregates phase 1 + 3 into one row; the internal per-call
-        # configs carry no workspace, so they don't each auto-record.
-        if debug:
-            merged_totals = _merge_totals(phase1_totals, phase3_totals)
-            record_usage(
+        # Usage recording is gated on ``record_usage`` (like every other LLM
+        # path), not on debug artifacts. This aggregates phase 1 + 3 into one
+        # row; the internal per-call configs carry no workspace, so they
+        # don't each auto-record.
+        if record_usage:
+            if usage_doc is None:
+                usage_doc = _usage_summary()
+            _append_usage_event(
                 workspace,
                 UsageEvent(
                     at=now_iso(),
                     operation=OPERATION_EXTRACT_VALUES,
                     model=config.values_model,
-                    cost_usd=merged_totals["cost_usd"],
-                    prompt_tokens=merged_totals["prompt_tokens"],
-                    completion_tokens=merged_totals["completion_tokens"],
-                    total_tokens=merged_totals["total_tokens"],
-                    cache_read_tokens=merged_totals["cache_read_tokens"],
-                    cache_creation_tokens=merged_totals["cache_creation_tokens"],
-                    duration_s=round(time.monotonic() - started, 3),
+                    cost_usd=usage_doc["cost_usd"],
+                    prompt_tokens=usage_doc["prompt_tokens"],
+                    completion_tokens=usage_doc["completion_tokens"],
+                    total_tokens=usage_doc["total_tokens"],
+                    cache_read_tokens=usage_doc["cache_read_tokens"],
+                    cache_creation_tokens=usage_doc["cache_creation_tokens"],
+                    duration_s=usage_doc["duration_s"],
                     outcome=outcome,
                     context={
                         "file_id": file_id,
@@ -1200,44 +1266,12 @@ def extract_values(
             )
         # Even on failure, partial numbers help diagnose where we
         # stalled. Wrapped in try/except so telemetry can never break
-        # the caller. Suppressed entirely unless the caller opted in
-        # (the CLI does so only under --debug).
+        # the caller. Suppressed when the caller opted out.
         try:
             if write_stats:
-                _write_extraction_stats(
-                    workspace=workspace,
-                    docset_id=docset_id,
-                    file_id=file_id,
-                    model=config.values_model,
-                    outcome=outcome,
-                    error_msg=error_msg,
-                    phase1_totals=phase1_totals,
-                    phase3_totals=phase3_totals,
-                    phase1_duration=phase1_duration,
-                    phase2_duration=phase2_duration,
-                    phase3_duration=phase3_duration,
-                    phase3_page_calls=phase3_page_calls,
-                    phase3_grid_pages=phase3_grid_pages,
-                    phase3_boxes_dropped=phase3_boxes_dropped,
-                    phase3_pages_out_of_range=phase3_pages_out_of_range,
-                    phase2_matched=phase2_matched,
-                    phase3_matched=phase3_matched,
-                    unmatched=unmatched_count,
-                    total_locations=total_locations,
-                    computed_fields=computed_fields,
-                    dropped_refs=dropped_refs,
-                    unnormalized_enums=unnormalized_enums,
-                    derivations_checked=derivations_checked,
-                    derivations_mismatched=derivations_mismatched,
-                    invariants_checked=invariants_checked,
-                    invariant_violations=invariant_violations,
-                    phase1_layout=phase1_layout,
-                    phase1_tool_schema=phase1_tool_schema_mode,
-                    phase1_chunk_calls=phase1_chunk_calls,
-                    phase1_truncated_retries=phase1_truncated_retries,
-                    phase1_envelope_repairs=phase1_counters["envelope_repairs"],
-                    phase1_no_tool_call_retries=phase1_counters["no_tool_call_retries"],
-                )
+                if stats_doc is None:
+                    stats_doc = _stats_summary()
+                _write_extraction_stats(workspace, docset_id, file_id, stats_doc)
         except Exception:
             pass
 
@@ -1273,10 +1307,16 @@ def _merge_totals(*partials: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_extraction_stats(
+    workspace: Workspace, docset_id: str, file_id: str, stats: dict[str, Any]
+) -> None:
+    """Store *stats* as the pair's ``extraction_stats.json``."""
+    workspace.docs.put_doc(
+        layout.Collection.EXTRACTION_STATS, layout.pair_id(docset_id, file_id), stats
+    )
+
+
+def _build_extraction_stats(
     *,
-    workspace: Workspace,
-    docset_id: str,
-    file_id: str,
     model: str,
     outcome: str,
     error_msg: str | None,
@@ -1306,15 +1346,17 @@ def _write_extraction_stats(
     phase1_truncated_retries: int,
     phase1_envelope_repairs: int,
     phase1_no_tool_call_retries: int,
-) -> None:
-    """Write ``extraction_stats.json`` into the file's marker directory.
+) -> dict[str, Any]:
+    """The ``extraction_stats.json`` document for one extraction run — what
+    :func:`extract_values` returns as ``ExtractionResult.stats`` and, with
+    ``write_stats``, stores into the file's marker directory.
 
     Phase 2's row carries no cost/token fields because it never makes an
     LLM call. The three match counts together cover every phase-1
     location: ``phase2_matched + phase3_matched + unmatched == total``.
     Computed (reasoned) fields carry no locations, so they sit outside
     that invariant and are counted separately."""
-    stats = {
+    return {
         "completed_at": now_iso(),
         "model": model,
         "outcome": outcome,
@@ -1381,9 +1423,6 @@ def _write_extraction_stats(
         # vocabulary pruning.
         "phase1_tool_schema": phase1_tool_schema,
     }
-    workspace.docs.put_doc(
-        layout.Collection.EXTRACTION_STATS, layout.pair_id(docset_id, file_id), stats
-    )
 
 
 # ---- Phase 3: per-page LLM for unmatched items ----------------------------

@@ -2676,8 +2676,9 @@ def test_docset_generate_cache_dir_and_debug_threading(
     tmp_path: Path, text_pdf: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The cache dir is always set (it holds functional files the next run
-    reloads); --debug only flips ConvertOptions.debug, which gates the
-    debug-only artifacts. An explicit --cache-dir always wins."""
+    reloads); --debug flips ConvertOptions.debug, which gates the debug-only
+    artifacts, and ConvertOptions.record_usage, which gates the usage rows.
+    An explicit --cache-dir always wins."""
     ws = tmp_path / "ws"
     did = _init_with_docset(ws, capsys)
     main(_ws_args(ws) + ["file", "add", str(text_pdf)])
@@ -2712,10 +2713,12 @@ def test_docset_generate_cache_dir_and_debug_threading(
     default_opts = _run([], [])
     assert default_opts.cache_dir == cache_dir
     assert default_opts.debug is False
+    assert default_opts.record_usage is False
     # --debug: same cache dir, debug on (debug-only files also written).
     debug_opts = _run(["--debug"], [])
     assert debug_opts.cache_dir == cache_dir
     assert debug_opts.debug is True
+    assert debug_opts.record_usage is True
     # Explicit --cache-dir always wins.
     explicit = tmp_path / "mycache"
     assert _run([], ["--cache-dir", str(explicit)]).cache_dir == explicit
@@ -5790,9 +5793,10 @@ def test_extraction_extract_refuses_unknown_values_effort(
 def test_extraction_extract_records_usage_under_debug(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`extraction extract --debug` forwards debug into extract_values, so the
-    LLM cost/token row lands in usage.jsonl — same gating as every other LLM
-    op and the auto-extract path. Without --debug, no row is written."""
+    """`extraction extract --debug` turns on usage recording and the stats
+    document in extract_values, so the LLM cost/token row lands in usage.jsonl
+    and extraction_stats.json is stored — same gating as every other LLM op and
+    the auto-extract path. Without --debug, neither is written."""
     from dgml_core.usage import read_events
 
     ws = tmp_path / "ws"
@@ -5816,13 +5820,15 @@ def test_extraction_extract_records_usage_under_debug(
     response._hidden_params = {"response_cost": 0.004}
     response.usage = SimpleNamespace(prompt_tokens=300, completion_tokens=40, total_tokens=340)
 
-    # Without --debug: no usage row.
+    # Without --debug: no usage row and no stats document.
     fid = _fresh_file()
     with patch("litellm.completion", return_value=response):
         assert main(_ws_args(ws) + ["extraction", "extract", ds_id, fid]) == 0
     assert read_events(Workspace(root=ws)) == []
+    assert Workspace(root=ws).docs.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
 
-    # With --debug (global flag, precedes the subcommand): one extract_values row.
+    # With --debug (global flag, precedes the subcommand): one extract_values
+    # row, and the stats document.
     _wsx = Workspace(root=ws)
     _wsx.blobs.delete_blob(layout.dgml_xml_key(ds_id, fid, "doc"))  # re-extract cleanly
     with patch("litellm.completion", return_value=response):
@@ -5831,6 +5837,8 @@ def test_extraction_extract_records_usage_under_debug(
     assert len(events) == 1
     assert events[0]["operation"] == "extract_values"
     assert events[0]["cost_usd"] == 0.004
+    stats = Workspace(root=ws).docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None and stats["outcome"] == "ok"
 
 
 def test_docset_add_file_auto_extracts_when_schema_set(

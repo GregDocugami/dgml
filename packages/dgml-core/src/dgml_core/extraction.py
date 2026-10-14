@@ -43,7 +43,7 @@ def _auto_extract(
     file_id: str,
     *,
     write_stats: bool = False,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> dict[str, Any]:
     """Run LLM-backed value extraction on a freshly-assigned file.
 
@@ -70,7 +70,12 @@ def _auto_extract(
     block["model"] = config.values_model
     try:
         result = extract_values(
-            ws, docset_id, file_id, config=config, write_stats=write_stats, debug=debug
+            ws,
+            docset_id,
+            file_id,
+            config=config,
+            write_stats=write_stats,
+            record_usage=record_usage,
         )
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
@@ -93,7 +98,7 @@ def add_file_and_extract(
     file_id: str,
     *,
     write_stats: bool = False,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> dict[str, Any] | None:
     """Assign ``file_id`` to ``docset_id``; auto-extract if the DocSet has a schema.
 
@@ -101,17 +106,17 @@ def add_file_and_extract(
     when the DocSet has a schema set, else ``None`` — the omit-when-no-schema
     policy matches the existing ``dgml docset add-file`` contract.
 
-    ``write_stats`` and ``debug`` are forwarded to
-    :func:`dgml_core.grounded.extract_values`. Both default to off, like
-    :func:`extract_file`; CLI callers pass ``args.debug`` for both, so
-    ``extraction_stats.json`` and LLM usage rows are persisted only under
-    ``--debug``.
+    ``write_stats`` and ``record_usage`` are forwarded to
+    :func:`dgml_core.grounded.extract_values`: ``extraction_stats.json`` is
+    stored only when ``write_stats`` is set, and the LLM usage row only when
+    ``record_usage`` is (both off by default; the CLI sets both under
+    ``--debug``).
     """
     store = DocSetStore(ws)
     store.add_file(docset_id, file_id)
     if not store.has_schema(docset_id):
         return None
-    return _auto_extract(ws, docset_id, file_id, write_stats=write_stats, debug=debug)
+    return _auto_extract(ws, docset_id, file_id, write_stats=write_stats, record_usage=record_usage)
 
 
 def extract_file(
@@ -122,7 +127,7 @@ def extract_file(
     values_model: str | None = None,
     values_effort: str | None = None,
     write_stats: bool = False,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> ExtractionResult:
     """Extract ``file_id`` against ``docset_id``'s schema now — ``dgml extraction extract``.
 
@@ -140,7 +145,9 @@ def extract_file(
     own ``values_api_key`` / ``values_api_key_env`` / ``values_api_base`` still
     apply, and a tier's credentials never carry over to the new model
     (see :func:`~dgml_core.grounded.load_grounded_config`).
-    ``write_stats`` defaults to off, matching the CLI.
+    ``write_stats`` and ``record_usage`` (both off by default) are forwarded
+    to :func:`~dgml_core.grounded.extract_values`; the result's ``usage`` and
+    ``stats`` carry the same numbers either way.
     """
     from .grounded import extract_values, load_grounded_config, parse_values_reasoning_effort
 
@@ -153,5 +160,10 @@ def extract_file(
             ),
         )
     return extract_values(
-        ws, docset_id, file_id, config=config, write_stats=write_stats, debug=debug
+        ws,
+        docset_id,
+        file_id,
+        config=config,
+        write_stats=write_stats,
+        record_usage=record_usage,
     )
