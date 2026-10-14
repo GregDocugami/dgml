@@ -310,7 +310,33 @@ def _box_key(text: str) -> str:
     return _BOX_KEY_RE.sub("", text.lower())
 
 
-def _box_agrees(words: list[_Word], key: str, *, one_of_several: bool = False) -> bool:
+_CASE_KEY_RE = re.compile(r"[^0-9A-Za-z]+")
+
+
+def _case_key(text: str) -> str:
+    """Letters and digits only, case kept: :func:`_box_key` without folding."""
+    return _CASE_KEY_RE.sub("", text)
+
+
+def _cased(text: str | None) -> bool:
+    """True when runs for *text* are matched with case: it has letters."""
+    return text is not None and any(c.isalpha() for c in _case_key(text))
+
+
+def _run_keys(words: list[_Word], key: str, text: str | None) -> tuple[list[str], str]:
+    """The per-word keys and target that a run of *words* must spell. A value
+    with letters is matched with its capitalization: choosing *which* words
+    inside a loose box are the value ("Gas Delivery Charges" in a
+    sentence vs the "GAS DELIVERY CHARGES" heading) is where case
+    tells copies apart. A value with no letters, or no *text*, folds case."""
+    if text is not None and _cased(text):
+        return [_case_key(w.text) for w in words], _case_key(text)
+    return [_box_key(w.text) for w in words], key
+
+
+def _box_agrees(
+    words: list[_Word], key: str, *, one_of_several: bool = False, text: str | None = None
+) -> bool:
     """True when the words inside a box read as the value whose *key* it
     claims to locate: a run of its words spells it (a loose box that also
     takes in a label counts), the two are close enough to be OCR noise, or —
@@ -323,9 +349,12 @@ def _box_agrees(words: list[_Word], key: str, *, one_of_several: bool = False) -
         return True
     if joined == key or (one_of_several and joined in key):
         return True
-    if _run_spells(keys, key):
+    run_keys, run_target = _run_keys(words, key, text)
+    if _run_spells(run_keys, run_target):
         return True
-    if len(words) == 1 and _run_spells(_BOX_KEY_RE.split(words[0].text.lower()), key):
+    glued = _CASE_KEY_RE.split(words[0].text) if len(words) == 1 else []
+    parts = glued if _cased(text) else [part.lower() for part in glued]
+    if len(words) == 1 and _run_spells(parts, run_target):
         # One OCR word with the value glued to a label by punctuation
         # ("Total:$318.40", "Invoice#INV-12345"): whole parts of the word must
         # spell the value — "Paid" isn't in "Unpaid", "318.40" isn't in
@@ -347,8 +376,8 @@ def _reads_as(joined: str, key: str) -> bool:
 
 
 def _run_spells(parts: list[str], key: str) -> bool:
-    """True when a contiguous run of *parts* (already box keys: lowercase
-    letters and digits) joins to exactly *key*."""
+    """True when a contiguous run of *parts* (already keyed the way *key*
+    is) joins to exactly *key*."""
     for i in range(len(parts)):
         run = ""
         for part in parts[i:]:
@@ -360,12 +389,13 @@ def _run_spells(parts: list[str], key: str) -> bool:
     return False
 
 
-def _spelling_run(words: list[_Word], key: str) -> list[_Word] | None:
-    """The words of the first contiguous run of *words* that spells *key*,
-    when that run leaves other words in the box out — a box over a whole row,
-    or over a label and its value. ``None`` when every word is part of the
-    value, or no run spells it."""
-    keys = [_box_key(w.text) for w in words]
+def _spelling_run(words: list[_Word], key: str, text: str | None = None) -> list[_Word] | None:
+    """The words of the first contiguous run of *words* that spells *key*
+    (with its capitalization, when *text* has letters — see
+    :func:`_run_keys`), when that run leaves other words in the box out — a
+    box over a whole row, or over a label and its value. ``None`` when every
+    word is part of the value, or no run spells it."""
+    keys, key = _run_keys(words, key, text)
     for i in range(len(keys)):
         run = ""
         for j in range(i, len(keys)):
@@ -377,15 +407,38 @@ def _spelling_run(words: list[_Word], key: str) -> list[_Word] | None:
     return None
 
 
-def _wrapped_runs(boxes: list[list[_Word]], key: str) -> list[list[_Word]] | None:
+def _wrapped_runs(
+    boxes: list[list[_Word]], key: str, text: str | None = None
+) -> list[list[_Word]] | None:
     """For a value located by several boxes: one contiguous run of words per
     box, in box order, that together spell *key* exactly — or ``None`` when
     no choice of runs does. Each box must contribute; a box may hold more than
     its run (a loose box over the label, or the rest of a header row), and
     the run is what it locates. This is how a name composed of a section
     heading and a column header ("Gas Delivery" + "Tier 1") is boxed in
-    two places."""
-    keys = [[_box_key(w.text) for w in ws] for ws in boxes]
+    two places.
+
+    Runs are matched with the value's capitalization when it has letters (see
+    :func:`_run_keys`). Failing that, a case-folded match is accepted only when
+    every box is wholly its run — choosing words *within* a box is where case
+    decides between copies, and a box that is exactly its share needs no
+    choosing."""
+    folded = [[_box_key(w.text) for w in ws] for ws in boxes]
+    keys = [_run_keys(ws, key, text)[0] for ws in boxes]
+    target = _run_keys([], key, text)[1]
+    found = _solve_runs(boxes, keys, target)
+    if found is None and _cased(text):
+        loose = _solve_runs(boxes, folded, key)
+        if loose is not None and all(len(r) == len(ws) for r, ws in zip(loose, boxes, strict=True)):
+            found = loose
+    return found
+
+
+def _solve_runs(
+    boxes: list[list[_Word]], keys: list[list[str]], key: str
+) -> list[list[_Word]] | None:
+    """One contiguous, non-empty run per box, in box order, whose keys join
+    to exactly *key*; ``None`` when there is no such choice."""
 
     def solve(b: int, pos: int) -> list[list[_Word]] | None:
         if b == len(boxes):
@@ -445,14 +498,18 @@ def _snap_to_line(
     words: list[_Word], text: str, box: list[int], page: int
 ) -> list[dict[str, Any]] | None:
     """The locations of the span nearest *box*, among those on its line(s)
-    whose words match *text* exactly — or ``None`` when there is none, or two
-    are equally near. A model that found the right row but drew the box over
-    the wrong column (or straddling two rows) is corrected; a tie is not
-    guessed."""
+    whose words match *text* exactly (with case) — or, when its lines hold
+    none, of the one span on the page that does. ``None`` when there is none,
+    two are equally near, or the page prints the value more than once. A
+    model that found the right row but drew the box over the wrong column (or
+    straddling two rows) is corrected, and so is one that found a lookalike
+    elsewhere ("Gas Delivery Charges" in a sentence, for the "GAS
+    DELIVERY CHARGES" heading); a tie is not guessed."""
     top, bottom = box[1], box[3]
     cx, cy = (box[0] + box[2]) / 2, (top + bottom) / 2
+    spans = _find_spans(text, words)
     scored: list[tuple[float, tuple[int, int]]] = []
-    for start, end in _find_spans(text, words):
+    for start, end in spans:
         span = words[start:end]
         if not any(w.top < bottom and w.bottom > top for w in span):
             continue
@@ -460,6 +517,8 @@ def _snap_to_line(
         sy = (min(w.top for w in span) + max(w.bottom for w in span)) / 2
         scored.append((((sx - cx) ** 2 + (sy - cy) ** 2) ** 0.5, (start, end)))
     if not scored:
+        if len(spans) == 1:
+            return _span_to_locations(spans[0], words, _PageDims(1, 1), page)
         return None
     scored.sort()
     if len(scored) > 1 and scored[1][0] - scored[0][0] < 1:
@@ -546,7 +605,7 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
         # or do so up to OCR noise. Repeated copies (or boxes on other pages)
         # are each checked whole.
         boxed_words = [ws for _, ws in boxes if ws is not None]
-        runs = _wrapped_runs(boxed_words, key) if len(boxed_words) > 1 else None
+        runs = _wrapped_runs(boxed_words, key, text) if len(boxed_words) > 1 else None
         wrapped = runs is not None or (
             len(boxed_words) > 1
             and _reads_as("".join(_box_key(w.text) for ws in boxed_words for w in ws), key)
@@ -570,7 +629,7 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
                 else:
                     checked.append(loc)
                 continue
-            run = None if wrapped else _spelling_run(inside, key)
+            run = None if wrapped else _spelling_run(inside, key, text)
             if run is not None:
                 # A loose box (the whole row, or the label too): the run of
                 # its words that spells the value is the value — box that.
@@ -578,7 +637,7 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
                 checked.extend(tight)
                 snapped_locs.extend(tight)
                 snapped += 1
-            elif _box_agrees(inside, key, one_of_several=wrapped):
+            elif _box_agrees(inside, key, one_of_several=wrapped, text=text):
                 checked.append(loc)
             elif (moved := _snap_to_line(page_words(page), text, box, page)) is not None:
                 checked.extend(moved)

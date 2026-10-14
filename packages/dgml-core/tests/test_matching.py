@@ -1859,3 +1859,67 @@ def test_boxes_that_cannot_spell_the_value_together_are_judged_alone(
     check = verify_boxes(workspace, "f1aaaaaaaaaa", values)
     assert check.rejected == 2
     assert values["Name"]["locations"] == [{"page_number": 1}, {"page_number": 1}]
+
+
+# Section labels: the section heading prints in capitals; the totals line
+# carries the same words in a sentence.
+_LABEL_PAGE = [
+    {"t": "GAS", "l": [100, 1272, 160, 1305]},
+    {"t": "DELIVERY", "l": [170, 1272, 380, 1305]},
+    {"t": "CHARGES", "l": [390, 1272, 500, 1305]},
+    {"t": "Total", "l": [100, 2076, 160, 2110]},
+    {"t": "Taxes", "l": [170, 2076, 240, 2110]},
+    {"t": "on", "l": [250, 2076, 280, 2110]},
+    {"t": "Gas", "l": [290, 2076, 340, 2110]},
+    {"t": "Delivery", "l": [350, 2076, 520, 2110]},
+    {"t": "Charges", "l": [530, 2076, 620, 2110]},
+    {"t": "Gas", "l": [100, 2200, 150, 2230]},
+    {"t": "Charges", "l": [160, 2200, 250, 2230]},
+    {"t": "GAS", "l": [300, 2200, 360, 2230]},
+    {"t": "CHARGES", "l": [370, 2200, 480, 2230]},
+]
+
+
+def _verify_label(workspace: Workspace, text: str, box: list[int]) -> tuple[Any, list[Any]]:
+    from dgml_core.matching import verify_boxes
+
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=_LABEL_PAGE)
+    values: dict[str, Any] = {
+        "V": {"text": text, "locations": [{"page_number": 1, "bounding_box": box}]}
+    }
+    check = verify_boxes(workspace, "f1aaaaaaaaaa", values)
+    return check, values["V"]["locations"]
+
+
+def test_capitalised_label_boxed_on_a_sentence_snaps_to_its_heading(
+    workspace: Workspace,
+) -> None:
+    """The box over the totals line holds "Gas Delivery Charges" only
+    in lower case: not the label. The page prints the label once, so the box
+    moves there."""
+    check, locs = _verify_label(workspace, "GAS DELIVERY CHARGES", [100, 2076, 620, 2110])
+    assert (check.snapped, check.rejected) == (1, 0)
+    assert locs == [{"page_number": 1, "bounding_box": [100, 1272, 500, 1305]}]
+
+
+def test_loose_box_shrinks_to_the_run_with_matching_capitals(workspace: Workspace) -> None:
+    check, locs = _verify_label(workspace, "GAS CHARGES", [100, 2200, 480, 2230])
+    assert check.snapped == 1
+    assert locs == [{"page_number": 1, "bounding_box": [300, 2200, 480, 2230]}]
+    check, locs = _verify_label(workspace, "Gas Charges", [100, 2200, 480, 2230])
+    assert locs == [{"page_number": 1, "bounding_box": [100, 2200, 250, 2230]}]
+
+
+def test_box_that_is_exactly_the_value_keeps_any_capitals(workspace: Workspace) -> None:
+    """A box holding nothing but the value isn't choosing among copies: a
+    capitalisation difference (the model's, or OCR's) doesn't reject it."""
+    check, locs = _verify_label(workspace, "Gas Delivery Charges", [100, 1272, 500, 1305])
+    assert (check.snapped, check.rejected) == (0, 0)
+    assert locs == [{"page_number": 1, "bounding_box": [100, 1272, 500, 1305]}]
+
+
+def test_lowercase_value_does_not_take_a_capitalised_run(workspace: Workspace) -> None:
+    check, locs = _verify_label(workspace, "gas charges", [100, 2200, 480, 2230])
+    # Neither run reads "gas charges" with its case, and the page doesn't
+    # print it that way: the box can't be placed.
+    assert check.rejected == 1 and locs == [{"page_number": 1}]

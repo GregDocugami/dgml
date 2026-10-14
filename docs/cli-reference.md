@@ -1414,7 +1414,12 @@ that also takes in the label, and OCR noise all pass). A box that also takes in
 other words (a label, or the whole row) shrinks to the words that spell the
 value. A value printed in several places at once (a line-item name made of a
 section heading and a tier column header) is kept when its boxes, read in
-order, spell it through a run of words each, and each box shrinks to its run. A box drawn on the wrong span, such as a total boxed on a neighbouring
+order, spell it through a run of words each, and each box shrinks to its run. Choosing words within a box, or snapping it,
+respects capitalization when the value has letters: a box over "Gas
+Delivery Charges" in a sentence doesn't locate the "GAS DELIVERY
+CHARGES" heading. When nothing on the box's own line matches, it moves to the
+value's one exact occurrence on the page, if the page prints it once. A box
+holding nothing but the value is kept whatever its capitalization. A box drawn on the wrong span, such as a total boxed on a neighbouring
 number, moves to the nearest span on
 its own line (or lines) whose words match the value exactly
 (`matching.snapped_boxes`). When there is no such span, or two are equally
