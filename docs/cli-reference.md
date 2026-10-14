@@ -1236,6 +1236,15 @@ etc.). There is no grounded-field JSON Schema intermediate; datatypes are native
 to the generated schema, and downstream extraction normalizes each typed value
 to a `dg:value`/`xsi:type`. The output shape is unchanged.
 
+All samples go in one request. If the provider refuses it as too large
+(Anthropic's `request_too_large`, an HTTP 413, Gemini's "payload size
+exceeds"), every sample stays in the request but the largest are cut to their
+leading pages, sharing half the bytes of the refused request fairly, and the
+model is told which samples are partial. This repeats until the request is
+accepted. A sample whose first page alone does not fit its share is left out,
+and each cut or left-out sample is logged as a warning. `from_file_ids` still
+lists every requested file.
+
 ```json
 {
   "docset_id": "o8vr8rs488vg",
@@ -1452,6 +1461,16 @@ not checked here.
 phase 1 cited that the file does not have (outside `1..page_count`, with no
 page image): their items make no phase-3 call and stay unmatched, like any
 other leaf phase 3 could not resolve, and the run still writes the tree.
+
+Phase 1 sends the whole PDF in one request. If the provider refuses that
+request as too large (Anthropic's `request_too_large`, an HTTP 413, Gemini's
+"payload size exceeds"), the PDF is sliced in half with the workspace's PDF
+engine and each half is sent on its own, halving again until every part is
+accepted. The parts' values are merged in page order: arrays concatenate,
+page numbers refer to the full document, and a field found in more than one
+part keeps the first non-empty value. `phases.phase1.pdf_parts` lists the
+`[first_page, last_page]` of each part, and appears only when a split happened.
+A single page the provider still refuses fails the file.
 
 **Schema-declared invariants.** A field may carry a `## Invariant:` annotation
 naming a checkable relation against the rest of the submission — the
