@@ -444,7 +444,7 @@ Walk the workspace and report inconsistencies. Issue kinds emitted today:
 | `text_extraction_failed` | file | pdfminer.six failed to extract any words (records a permanent error so future checks skip retry) |
 | `text_extraction_failed_permanent` | file | A previous extraction recorded a permanent failure; not retried without `--retry-errors` |
 | `dangling_file_reference` | docset | DocSet references a File ID that doesn't exist |
-| `value_unsupported` | docset | A 0.7 `dg:origin="computed"` element in a file's DGML XML has no `dg:href` sources, so it claims a derivation and names nothing a verifier can check. This replaces `computed_field_unattributed`. A 0.71 value with no `dg:origin`, `dg:inputs` or `dg:method` isn't flagged here; extraction counts the claims it demoted as `unsupported_values` in `extraction_stats.json` |
+| `value_unsupported` | docset | A 0.7 `dg:origin="computed"` element in a file's DGML XML has no `dg:href` sources, so it claims a derivation and names nothing a verifier can check. This replaces `computed_field_unattributed`. A 0.71 value with no `dg:origin`, `dg:inputs` or `dg:method` isn't flagged here; extraction doesn't write one (it drops it and counts it as `unsupported_values` in `extraction_stats.json`) |
 | `method_misplaced` | docset | A `dg:method` that contradicts the element: on an element with `dg:origin`, an unknown method, `defaulted` with `dg:inputs`, or `calculated`/`inferred` without them |
 | `inputs_dangling` | docset | A `dg:inputs` target (`#id`) names an `xml:id` no element in the file carries. Cross-file (`fileid#id`) inputs are not checked |
 | `inputs_cycle` | docset | An element is its own input, directly or through other inputs |
@@ -1406,7 +1406,7 @@ That gives four cases:
 | | No inputs | Has inputs |
 | --- | --- | --- |
 | **Has `locations`** | Read from its printed text ("$4,200.00" → `4200.00`) | Printed in part, completed from the inputs ("3/1" + the commencement year) |
-| **No `locations`** | `method: "defaulted"`: the field's stated default. Without a method: unsupported (extraction counts it in `matching.unsupported_values` when the model claimed a method or 0.7 `computed` and named nothing) | `method: "calculated"` (recomputable) or `"inferred"` (a judgment). Without a method: read as `inferred` |
+| **No `locations`** | `method: "defaulted"`: the field's stated default. Without a method: unsupported, and extraction doesn't write it (`matching.unsupported_values`) | `method: "calculated"` (recomputable) or `"inferred"` (a judgment). Without a method: read as `inferred` |
 
 Where the page has a text layer, every box is checked against it: the words
 inside a box must read as its value (a piece of a wrapped value, a loose box
@@ -1416,12 +1416,20 @@ its own line (or lines) whose words match the value exactly
 (`matching.snapped_boxes`). When there is no such span, or two are equally
 near, the box is stripped (`matching.rejected_boxes`).
 
-A printed value (in full or in part) left with no bounding box is
-**dropped**, not written: without `dg:origin` it would read as
-unsupported, or, if it named inputs, as an inferred judgment. Inputs that named
-a dropped value are dropped too, and array indices after it are renumbered.
-Dropped values are counted in `matching.dropped_unboxed_values` and listed
-as `"path=text"` in `matching.dropped_unboxed`.
+Every value extraction writes can be verified, so two kinds are **dropped**,
+not written:
+
+- a printed value (in full or in part) left with no bounding box: without
+  `dg:origin` it would read as unsupported, or, if it named inputs, as an
+  inferred judgment (`matching.dropped_unboxed_values`);
+- a value with no box, no default and nothing it used: the model returned it
+  bare, or claimed a calculation or inference and named nothing that
+  resolves (`matching.unsupported_values`).
+
+Inputs that named a dropped value are dropped too, and array indices after it
+are renumbered; a value left with nothing it used is dropped in turn. Each
+dropped value is listed as `"path=text"` in `matching.dropped_unboxed`
+(unsupported ones marked `(unsupported)`).
 
 A value printed in part keeps its boxes **and** names its inputs, so one
 element holds the whole fact:
@@ -1493,8 +1501,7 @@ recorded as `evidence` text. An `inputs` entry that doesn't resolve is
 dropped from `dg:inputs`, and so is `evidence` that phases 2/3 couldn't box.
 Both are counted in `extraction_stats.json` under `matching.dropped_inputs`
 (written under `--debug`). A calculated or inferred value left with nothing
-loses its method, since both require inputs, and is counted under
-`matching.unsupported_values`.
+it used is dropped, and counted under `matching.unsupported_values`.
 
 Extraction asks each model for its own maximum output (128K on current
 frontier Claude/Gemini, 64K on Haiku 4.5 — read from the provider's model
@@ -1608,10 +1615,11 @@ the sum, the count, nor any single input within $0.05; `inferred` values and
 values calculated from `evidence` text are not recomputed). It also counts
 `unprinted_fields` (values with no `locations`), `partly_printed_fields`
 (`locations` plus `inputs`), `dropped_inputs` and `unsupported_values`
-(calculated or inferred values that named nothing they used), and
+(values with no box, no default and nothing they used, which are not
+written), and
 `repaired_inputs` (inputs re-pointed to where their cited text matched), and
 `dropped_unboxed_values` (printed values no box was found for, which are not
-written), `snapped_boxes` and `rejected_boxes` (boxes whose words on the text
+written; `dropped_unboxed` lists each as `"path=text"`), `snapped_boxes` and `rejected_boxes` (boxes whose words on the text
 layer didn't read as their value: moved to the exact match on their line, or
 stripped). The first four replace 0.7's
 `computed_fields` and `dropped_refs`. The top-level

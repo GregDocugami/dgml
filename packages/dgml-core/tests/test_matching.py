@@ -1642,7 +1642,7 @@ def test_box_holding_one_line_of_a_wrapped_value_is_kept(workspace: Workspace) -
     _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=_METER_ROW)
     values: dict[str, Any] = {
         "V": {
-            "text": "Total Therms 48216 due",
+            "text": "Total Therms 48216",
             "locations": [
                 {"page_number": 1, "bounding_box": [1400, 100, 1500, 130]},
                 {"page_number": 1, "bounding_box": [1507, 100, 1600, 130]},
@@ -1744,5 +1744,44 @@ def test_snapped_line_does_not_duplicate_the_values_other_box(workspace: Workspa
         }
     }
     check = verify_boxes(workspace, "f1aaaaaaaaaa", values)
-    assert check.snapped == 1
+    # The boxes don't spell the value together, so neither may hold a piece:
+    # both snap, to the same span, which is kept once.
+    assert check.snapped == 2
     assert values["V"]["locations"] == [{"page_number": 1, "bounding_box": [1455, 100, 1600, 130]}]
+
+
+def test_repeated_copies_must_each_hold_the_whole_value(workspace: Workspace) -> None:
+    """A value printed twice has two boxes, but they aren't the lines of one
+    wrapped value: a box landing on part of it ("47" of "48216") disagrees."""
+    from dgml_core.matching import verify_boxes
+
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=_METER_ROW)
+    values: dict[str, Any] = {
+        "V": {
+            "text": "48216",
+            "locations": [
+                {"page_number": 1, "bounding_box": [1507, 100, 1600, 130]},
+                {"page_number": 1, "bounding_box": [1003, 100, 1040, 130]},  # "47"
+            ],
+        }
+    }
+    check = verify_boxes(workspace, "f1aaaaaaaaaa", values)
+    assert check.snapped + check.rejected == 1
+    assert values["V"]["locations"][0] == {"page_number": 1, "bounding_box": [1507, 100, 1600, 130]}
+
+
+@pytest.mark.parametrize(
+    ("word", "value", "agrees"),
+    [
+        ("Total:$318.40", "$318.40", True),
+        ("Invoice#INV-12345", "INV-12345", True),
+        ("Unpaid", "Paid", False),
+        ("1318.40", "318.40", False),
+    ],
+)
+def test_value_glued_to_a_label_in_one_word(word: str, value: str, agrees: bool) -> None:
+    from dgml_core.matching import _box_agrees, _box_key
+    from dgml_core.textmatch import Word
+
+    w = Word(idx=0, text=word, text_norm=word, left=0, top=0, right=10, bottom=10)
+    assert _box_agrees([w], _box_key(value)) is agrees

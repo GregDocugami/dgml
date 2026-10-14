@@ -321,31 +321,81 @@ def _box_agrees(words: list[_Word], key: str, *, one_of_several: bool = False) -
     """True when the words inside a box read as the value whose *key* it
     claims to locate: a run of its words spells it (a loose box that also
     takes in a label counts), the two are close enough to be OCR noise, or —
-    only when the value has several boxes (*one_of_several*) — the box holds a
-    piece of it, one line of a wrapped value. A lone box holding a piece is
-    clipped: it disagrees, and snaps to the full span."""
+    only when the value wraps across several boxes that together spell it
+    (*one_of_several*) — the box holds a piece of it. A lone box holding a
+    piece is clipped: it disagrees, and snaps to the full span."""
     keys = [_box_key(w.text) for w in words]
     joined = "".join(keys)
     if not joined:
         return True
     if joined == key or (one_of_several and joined in key):
         return True
-    if len(keys) == 1 and key in joined:
-        # One OCR word with the value glued to a label ("Total:$318.40",
-        # "Invoice#INV-12345"): the box is right if the rest of the word is
-        # label, not more digits (a neighbouring "1318.40" holds "318.40").
-        rest = joined.replace(key, "", 1)
-        if not any(c.isdigit() for c in rest):
-            return True
-    for i in range(len(keys)):
+    if _run_spells(keys, key):
+        return True
+    if len(words) == 1 and _run_spells(_BOX_PART_RE.split(words[0].text.lower()), key):
+        # One OCR word with the value glued to a label by punctuation
+        # ("Total:$318.40", "Invoice#INV-12345"): whole parts of the word must
+        # spell the value — "Paid" isn't in "Unpaid", "318.40" isn't in
+        # "1318.40".
+        return True
+    return _reads_as(joined, key)
+
+
+def _reads_as(joined: str, key: str) -> bool:
+    """True when *joined* is *key* up to OCR noise: equal, or a close match of
+    nearly the same length that changes no digit. Extra letters are not noise
+    ("unpaid" is not "paid"), and a changed digit is a different number."""
+    if joined == key:
+        return True
+    if abs(len(joined) - len(key)) > max(1, len(key) // 10):
+        return False
+    matcher = difflib.SequenceMatcher(None, joined, key)
+    return matcher.ratio() >= _BOX_FUZZY_RATIO and not _digits_differ(matcher, joined, key)
+
+
+_BOX_PART_RE = re.compile(r"[^0-9a-z]+")
+
+
+def _run_spells(parts: list[str], key: str) -> bool:
+    """True when a contiguous run of *parts* (already lowercase; punctuation
+    is dropped) joins to exactly *key*."""
+    parts = [_box_key(p) for p in parts]
+    for i in range(len(parts)):
         run = ""
-        for k in keys[i:]:
-            run += k
+        for part in parts[i:]:
+            run += part
             if run == key:
                 return True
             if len(run) >= len(key):
                 break
-    return difflib.SequenceMatcher(None, joined, key).ratio() >= _BOX_FUZZY_RATIO
+    return False
+
+
+# Letters OCR commonly reads in place of a digit ("1O0" for "100").
+_OCR_DIGIT_LOOKALIKES = str.maketrans("oilszb", "011528")
+
+
+def _digits_differ(matcher: difflib.SequenceMatcher[str], a: str, b: str) -> bool:
+    """True when the two strings disagree on a digit: one digit replaced by
+    another, or a digit added or removed — a different number (the
+    neighbouring "$318.41" for "$318.40"), not OCR noise. A disagreement
+    explained by a letter OCR mistook for a digit ("1O0" for "100") is noise."""
+    edits_digit = False
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        a_digits = any(c.isdigit() for c in a[i1:i2])
+        b_digits = any(c.isdigit() for c in b[j1:j2])
+        if (a_digits and b_digits) or (tag != "replace" and (a_digits or b_digits)):
+            edits_digit = True
+            break
+    if not edits_digit:
+        return False
+
+    def digits(s: str) -> str:
+        return "".join(c for c in s.translate(_OCR_DIGIT_LOOKALIKES) if c.isdigit())
+
+    return digits(a) != digits(b)
 
 
 class BoxCheck(NamedTuple):
@@ -427,22 +477,13 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
         locations = leaf.get("locations")
         if not key or not isinstance(locations, list):
             continue
-        boxed = sum(
-            1 for loc in locations if isinstance(loc, dict) and loc.get("bounding_box") is not None
-        )
-        checked: list[Any] = []
-        snapped_locs: list[dict[str, Any]] = []
-        for loc in locations:
-            box = loc.get("bounding_box") if isinstance(loc, dict) else None
-            page = loc.get("page_number") if isinstance(loc, dict) else None
-            if not isinstance(box, list) or len(box) != 4 or not isinstance(page, int):
-                checked.append(loc)
-                continue
-            left, top, right, bottom = box
+
+        def words_in(page: int, box: list[int]) -> list[_Word]:
             # Reading order: visual lines top to bottom, words left to right
             # within each line (words on one line differ in height, so the
             # line comes from y-centre proximity, not a per-word bucket).
-            inside = [
+            left, top, right, bottom = box
+            return [
                 w
                 for line in _line_groups(
                     [
@@ -454,7 +495,31 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
                 )
                 for w in sorted(line, key=lambda w: w.left)
             ]
-            if _box_agrees(inside, key, one_of_several=boxed > 1):
+
+        boxes = [
+            (loc, words_in(loc["page_number"], loc["bounding_box"]))
+            if isinstance(loc, dict)
+            and isinstance(loc.get("bounding_box"), list)
+            and len(loc["bounding_box"]) == 4
+            and isinstance(loc.get("page_number"), int)
+            else (loc, None)
+            for loc in locations
+        ]
+        # A value wrapped across several boxes: only then may one box hold a
+        # piece of it — when the boxes, read in order, spell the whole value.
+        # Repeated copies (or boxes on other pages) are each checked whole.
+        boxed_words = [ws for _, ws in boxes if ws is not None]
+        wrapped = len(boxed_words) > 1 and _reads_as(
+            "".join(_box_key(w.text) for ws in boxed_words for w in ws), key
+        )
+        checked: list[Any] = []
+        snapped_locs: list[dict[str, Any]] = []
+        for loc, inside in boxes:
+            if inside is None:
+                checked.append(loc)
+                continue
+            box, page = loc["bounding_box"], loc["page_number"]
+            if _box_agrees(inside, key, one_of_several=wrapped):
                 checked.append(loc)
             elif (moved := _snap_to_line(page_words(page), text, box, page)) is not None:
                 checked.extend(moved)

@@ -19,7 +19,6 @@ from dgml_core.extraction_schema import Tag, Vocabulary, json_schema_to_rnc, par
 from dgml_core.extraction_xml import (
     carry_extraction_over,
     count_dropped_inputs,
-    count_unsupported_claims,
     dgml_xml_to_values,
     drop_unboxed_values,
     embed_extraction_into,
@@ -519,36 +518,20 @@ def test_inputs_into_a_leafs_own_keys_are_dropped() -> None:
     assert provenance_issues(xml) == []
 
 
-def test_unsupported_claims_are_counted_not_flagged_in_xml() -> None:
-    """A calculated value whose inputs all dangle is written bare (no
-    dg:method — calculated requires inputs). In the XML that looks the same as
-    a printed value grounding couldn't box, so provenance_issues leaves it
-    alone and extraction counts it instead."""
+def test_bare_value_is_not_flagged_by_the_xml_check() -> None:
+    """A calculated value whose inputs all dangle is written bare by the
+    serializer (no dg:method — calculated requires inputs). In the XML that
+    looks the same as any other bare value, so provenance_issues leaves it
+    alone; extraction drops such values before writing (drop_unboxed_values)."""
     vocab = parse_rnc(_INVOICE_RNC)
     values = _invoice_values()
-    assert count_unsupported_claims(values) == 0
     invoice = values["Invoice"]
     assert isinstance(invoice, dict)
     invoice["InvoiceTotal"]["inputs"] = ["Invoice.Bogus"]  # all inputs dangle
-    assert count_unsupported_claims(values) == 1
     xml = standalone_extraction_doc(values, vocab=vocab)
     assert provenance_issues(xml) == []
-
-
-def test_boxing_miss_is_not_an_issue() -> None:
-    """A printed value phases 2/3 couldn't box keeps its dg:value with no
-    dg:origin. That is a grounding miss, not an unsupported claim."""
-    vocab = Vocabulary(
-        namespace_uri="http://www.dgml.io/acme/leases#",
-        roots=[Tag(name="StartDate", kind="field", value_type="date")],
-    )
-    values = {
-        "StartDate": {"text": "3/1/2026", "value": "2026-03-01", "locations": [{"page_number": 1}]}
-    }
-    xml = standalone_extraction_doc(values, vocab=vocab)
-    assert 'dg:value="2026-03-01"' in xml and "dg:origin" not in xml
-    assert provenance_issues(xml) == []
-    assert count_unsupported_claims(values) == 0
+    result = drop_unboxed_values(values)
+    assert result.unsupported == 1 and "InvoiceTotal" not in invoice
 
 
 def _ext(body: str) -> str:
@@ -891,18 +874,33 @@ def test_unprinted_and_partly_boxed_values_are_kept() -> None:
         "Grace": {"text": "0", "method": "defaulted"},
     }
     before = {k: dict(v) for k, v in values.items()}
-    assert drop_unboxed_values(values) == (0, 0, [])
+    assert drop_unboxed_values(values) == (0, 0, [], 0)
     assert values == before
 
 
-def test_value_whose_inputs_were_all_dropped_becomes_unsupported() -> None:
+def test_value_whose_inputs_were_all_dropped_is_dropped_too() -> None:
+    """Dropping Hq leaves Region inferred from nothing, so it goes as well."""
     values: dict[str, Any] = {
         "Hq": {"text": "Berlin", "locations": _NO_BOX},
         "Region": {"text": "EMEA", "method": "inferred", "inputs": ["Hq"]},
     }
-    assert drop_unboxed_values(values) == (1, 1, ["Hq=Berlin"])
-    assert values == {"Region": {"text": "EMEA", "method": "inferred"}}
-    assert count_unsupported_claims(values) == 1
+    result = drop_unboxed_values(values)
+    assert (result.values, result.unsupported, result.inputs) == (1, 1, 1)
+    assert result.paths == ["Hq=Berlin", "Region=EMEA (unsupported)"]
+    assert values == {}
+
+
+def test_value_with_no_box_and_no_method_is_dropped() -> None:
+    """The model returned it bare, or claimed a calculation naming nothing."""
+    values: dict[str, Any] = {
+        "Name": {"text": "Acme", "locations": _BOX},
+        "Bare": {"text": "ACME"},
+        "Months": {"text": "12", "method": "calculated", "inputs": ["Nowhere"]},
+        "Grace": {"text": "0", "method": "defaulted"},
+    }
+    result = drop_unboxed_values(values)
+    assert (result.values, result.unsupported) == (0, 2)
+    assert set(values) == {"Name", "Grace"}
 
 
 def _end_date_vocab() -> Vocabulary:

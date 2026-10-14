@@ -228,27 +228,6 @@ def count_dropped_inputs(values: dict[str, Any], *, evidence: bool = True) -> in
     return dropped
 
 
-def count_unsupported_claims(values: dict[str, Any]) -> int:
-    """Number of calculated/inferred leaves that will be written with nothing
-    they used: every ``inputs`` path dangles and no ``evidence`` item has a
-    box. The serializer drops their ``dg:method`` (both require inputs), which
-    leaves a bare value the XML alone can't tell from a grounding miss — so
-    extraction, which can tell, counts them."""
-    count = 0
-    for _path, leaf in walk_all_leaves(values):
-        if "locations" in leaf or leaf.get("method") not in (METHOD_CALCULATED, METHOD_INFERRED):
-            continue
-        refs = leaf.get("inputs")
-        resolvable = isinstance(refs, list) and any(
-            _resolvable_input(values, raw) is not None for raw in refs
-        )
-        items = leaf.get("evidence")
-        boxed = isinstance(items, list) and any(_evidence_boxed(item) for item in items)
-        if not resolvable and not boxed:
-            count += 1
-    return count
-
-
 # ── input citations: verify, repair or drop positional input paths ───────────
 
 _CITE_SEP = "="
@@ -408,7 +387,12 @@ def verify_input_citations(values: dict[str, Any]) -> CitationResult:
             path_text = path_text.strip()
             path = parse_path(path_text)
             if path is None:
-                kept.append(path_text)
+                if path_text:
+                    kept.append(path_text)  # malformed; counted downstream
+                else:
+                    # No path at all ("=58.20"): nothing downstream would
+                    # see it to count, so count the drop here.
+                    dropped += 1
                 continue
             cited = cited_text if sep else None
             target, moved = _resolve_input(values, leaf_path, path, cited)
@@ -437,42 +421,99 @@ def verify_input_citations(values: dict[str, Any]) -> CitationResult:
 
 class UnboxedResult(NamedTuple):
     """What :func:`drop_unboxed_values` removed: printed values with no box
-    (``paths`` names each as ``"path=text"``), and inputs that named one of
-    them."""
+    (``values``), unprinted values with nothing to verify them by
+    (``unsupported``), inputs that named a removed value (``inputs``), and
+    each removed value as ``"path=text"`` (``paths``)."""
 
     values: int
     inputs: int
     paths: list[str]
+    unsupported: int = 0
+
+
+def _unverifiable(leaf: dict[str, Any], values: dict[str, Any]) -> str | None:
+    """Why *leaf* can't be written, or ``None`` when it can: ``"unboxed"``
+    for a printed value no box was found for, ``"unsupported"`` for a value
+    with no box, no default, and nothing it used (no resolvable input and no
+    boxed evidence) — the model returned it bare, or claimed a calculation
+    or inference and named nothing."""
+    if "locations" in leaf:
+        return "unboxed" if _origin_from_locations(leaf["locations"]) is None else None
+    method = leaf.get("method")
+    if method == METHOD_DEFAULTED:
+        return None
+    if method in (METHOD_CALCULATED, METHOD_INFERRED):
+        refs = leaf.get("inputs")
+        items = leaf.get("evidence")
+        if (
+            isinstance(refs, list) and any(_resolvable_input(values, r) is not None for r in refs)
+        ) or (isinstance(items, list) and any(_evidence_boxed(i) for i in items)):
+            return None
+    return "unsupported"
 
 
 def drop_unboxed_values(values: dict[str, Any]) -> UnboxedResult:
-    """Remove every printed value that grounding couldn't box, in place.
+    """Remove every value that can't be verified, in place.
 
-    A leaf with ``locations`` says the page prints it (in full, or in part).
-    If phases 2/3 found no bounding box for any of them, the value can't be
-    tied to the page: writing it without ``dg:origin`` would read as
-    unsupported (or, with ``inputs``, as an inferred judgment), so it is not
-    written at all. A row or section emptied by the removals goes too.
+    Every value written must be checkable: a printed value (one with
+    ``locations``) by its box, an unprinted one by its ``method`` and what it
+    used. So two kinds are not written (see :func:`_unverifiable`):
 
-    Removing a list entry shifts the ones after it, so every remaining
-    ``inputs`` path is re-indexed to match; an input naming a removed value is
-    dropped. Unprinted values (no ``locations``) are untouched — they have no
-    boxes by design."""
+    * a printed value grounding found no box for — written without
+      ``dg:origin`` it would read as unsupported, or, with ``inputs``, as an
+      inferred judgment;
+    * a value with no box, no default and nothing it used.
+
+    A row or section emptied by the removals goes too. Removing a list entry
+    shifts the ones after it, so every remaining ``inputs`` path is
+    re-indexed; an input naming a removed value is dropped. That can leave
+    another value with nothing it used, so this repeats until nothing more is
+    removed."""
+    unboxed = unsupported = dropped_inputs = 0
+    dropped_paths: list[str] = []
+    while True:
+        marks = {
+            path: reason
+            for path, leaf in walk_all_leaves(values)
+            if (reason := _unverifiable(leaf, values)) is not None
+        }
+        if not marks:
+            break
+        pruned = _prune_marked(values, marks)
+        for path_text, reason in pruned.dropped:
+            if reason == "unboxed":
+                unboxed += 1
+                dropped_paths.append(path_text)
+            else:
+                unsupported += 1
+                dropped_paths.append(f"{path_text} (unsupported)")
+        dropped_inputs += _remap_inputs(values, pruned.removed, pruned.removed_index)
+    return UnboxedResult(unboxed, dropped_inputs, dropped_paths, unsupported)
+
+
+class _Pruned(NamedTuple):
+    removed: set[LeafPath]
+    removed_index: dict[LeafPath, list[int]]
+    dropped: list[tuple[str, str]]  # ("path=text", reason) per removed leaf
+
+
+def _prune_marked(values: dict[str, Any], marks: dict[LeafPath, str]) -> _Pruned:
+    """Remove the leaves at the *marks* paths, and any row or section that
+    leaves empty, in place. Returns what was removed (in pre-removal paths),
+    the removed indices of each list, and each removed leaf with its reason."""
     removed: set[LeafPath] = set()
     removed_index: dict[LeafPath, list[int]] = {}
-    count = 0
-    dropped_paths: list[str] = []
+    dropped: list[tuple[str, str]] = []
 
     def prune(node: Any, path: LeafPath) -> bool:
-        nonlocal count
         if isinstance(node, dict):
             if _is_leaf(node):
-                if "locations" in node and _origin_from_locations(node["locations"]) is None:
-                    count += 1
-                    dropped_paths.append(f"{path_to_str(path)}={node.get('text')}")
-                    removed.add(path)
-                    return True
-                return False
+                reason = marks.get(path)
+                if reason is None:
+                    return False
+                dropped.append((f"{path_to_str(path)}={node.get('text')}", reason))
+                removed.add(path)
+                return True
             had = bool(node)
             for key in list(node):
                 if prune(node[key], path + (key,)):
@@ -496,8 +537,14 @@ def drop_unboxed_values(values: dict[str, Any]) -> UnboxedResult:
         return False
 
     prune(values, ())
-    if not removed:
-        return UnboxedResult(0, 0, [])
+    return _Pruned(removed, removed_index, dropped)
+
+
+def _remap_inputs(
+    values: dict[str, Any], removed: set[LeafPath], removed_index: dict[LeafPath, list[int]]
+) -> int:
+    """Re-index every ``inputs`` path past removed list entries, in place;
+    drop (and count) inputs that named a removed value."""
 
     def remap(path: LeafPath) -> LeafPath | None:
         if any(path[:k] in removed for k in range(1, len(path) + 1)):
@@ -509,7 +556,7 @@ def drop_unboxed_values(values: dict[str, Any]) -> UnboxedResult:
             out.append(seg)
         return tuple(out)
 
-    dropped_inputs = 0
+    dropped = 0
     for _path, leaf in walk_all_leaves(values):
         refs = leaf.get("inputs")
         if not isinstance(refs, list):
@@ -522,14 +569,14 @@ def drop_unboxed_values(values: dict[str, Any]) -> UnboxedResult:
                 continue
             moved = remap(parsed)
             if moved is None:
-                dropped_inputs += 1
+                dropped += 1
             else:
                 kept_refs.append(path_to_str(moved))
         if kept_refs:
             leaf["inputs"] = kept_refs
         else:
             del leaf["inputs"]
-    return UnboxedResult(count, dropped_inputs, dropped_paths)
+    return dropped
 
 
 _DERIVATION_TOLERANCE = Decimal("0.05")
@@ -888,10 +935,9 @@ def _set_unprinted_attrs(
     ``dg:origin`` — there is nothing printed to box.
 
     ``calculated``/``inferred`` require inputs: when none resolve, the method
-    is dropped rather than letting the claim stand. The bare value left
-    behind looks, in the XML, like one grounding couldn't box, so the
-    consistency check can't flag it; extraction counts it instead
-    (:func:`count_unsupported_claims`). ``defaulted`` never carries inputs."""
+    is dropped rather than letting the claim stand. (Extraction drops such a
+    value before it gets here — see :func:`drop_unboxed_values` — so this only
+    guards direct callers.) ``defaulted`` never carries inputs."""
 
     text_str = el.text or ""
     raw_value = value.get("value")

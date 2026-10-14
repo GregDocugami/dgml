@@ -37,7 +37,7 @@ from typing import Any
 from lxml import etree  # type: ignore[import-untyped]
 
 from dgml_core import llm
-from dgml_core.dg_refs import parse_ref, split_refs
+from dgml_core.dg_refs import is_legacy_computed, parse_ref, split_refs
 from dgml_core.errors import LinkPlanFailed
 from dgml_core.generation.prompts import get as prompt
 from dgml_core.generation.transcribe import loads_tolerant, strip_fences
@@ -358,7 +358,9 @@ def audit_links(xml: str | bytes) -> LinkAudit:
     dangling_hrefs: list[str] = []
     for subject_idx, subject in enumerate(elements):
         href = subject.get(f"{{{_DG}}}href")
-        if not href:
+        if not href or is_legacy_computed(subject):
+            # A 0.7 dg:origin="computed" element's dg:href names its inputs
+            # (see dgml_core.dg_refs), not a semantic link.
             continue
         links += 1
         for token in split_refs(href):

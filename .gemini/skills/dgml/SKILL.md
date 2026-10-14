@@ -711,8 +711,9 @@ mentions an extracted field of its own. The model cites the text it read with
 each input, and extraction re-points a miscounted array index at the matching
 entry (`matching.repaired_inputs`). Unresolvable or unmatched inputs, and
 evidence that couldn't be boxed, are counted as `matching.dropped_inputs` in
-`extraction_stats.json`, and calculated or inferred values that named nothing
-as `matching.unsupported_values`. `dgml check` reports `method_misplaced`,
+`extraction_stats.json`. Values with nothing to verify them by (no box, no
+default, nothing they used) are not written, counted as
+`matching.unsupported_values`. `dgml check` reports `method_misplaced`,
 `inputs_dangling` and `inputs_cycle`, and `value_unsupported` for a 0.7
 computed element with no `dg:href`. 0.7 files (`dg:origin="computed"` +
 `dg:href`) still read, with the href targets as inputs. Errors are the

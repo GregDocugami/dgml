@@ -90,7 +90,6 @@ from .extraction_xml import (
     check_invariants,
     count_dropped_inputs,
     count_unnormalized_enum_values,
-    count_unsupported_claims,
     drop_unboxed_values,
     embed_extraction_into,
     has_document_tree,
@@ -1161,6 +1160,9 @@ def extract_values(
         citations = verify_input_citations(phase1_values)
         repaired_inputs = citations.repaired
         demoted_claims += _normalize_leaf_provenance(phase1_values)
+        # Provisional: if a later phase fails, the stats still show the
+        # claims phase 1 made with nothing behind them. Replaced below by the
+        # count of values dropped as unsupported.
         unsupported_values = demoted_claims
         # Unprinted leaves (calculated, inferred, defaulted) carry no
         # locations — phases 2 and 3 never see them; counted here so the
@@ -1239,7 +1241,7 @@ def extract_values(
         dropped_unboxed_values = unboxed.values
         dropped_unboxed_paths = unboxed.paths
         dropped_inputs = citations.dropped + unboxed.inputs + count_dropped_inputs(final_values)
-        unsupported_values = demoted_claims + count_unsupported_claims(final_values)
+        unsupported_values = unboxed.unsupported
 
         # Extracted values live as a dg:extraction element in the file's core
         # <stem>.dgml.xml (spec §13): added as a sibling of an existing document
@@ -3089,8 +3091,7 @@ def _normalize_leaf_provenance(values: Any) -> int:
       ``defaulted`` one loses its ``inputs`` and ``evidence``; one with
       either and no method is ``inferred`` (the safe reading);
       ``calculated``/``inferred`` with neither lose the method, leaving an
-      unsupported value (counted in the return value, and so in
-      ``extraction_stats.json``'s ``unsupported_values``);
+      unsupported value (counted in the return value), which is not written;
     * an empty-string ``value`` is removed.
     """
     if isinstance(values, list):
