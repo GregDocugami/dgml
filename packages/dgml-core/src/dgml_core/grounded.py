@@ -115,6 +115,7 @@ from .matching import (
     path_to_str,
     run_phase2_matching,
     verify_boxes,
+    walk_all_leaves,
     walk_input_leaves,
     walk_unprinted_leaves,
 )
@@ -2366,16 +2367,29 @@ def _merge_parts(parts: list[tuple[_PdfPart, _Phase1Run]]) -> _Phase1Run:
 
 def _offset_page_numbers(values: Any, offset: int) -> None:
     """Shift every location's ``page_number`` by *offset*, in place: a part's
-    values number its own PDF's pages from 1."""
+    values number its own PDF's pages from 1. A leaf's ``evidence`` items
+    (a flat ``page_number``, or ``locations``) shift with it."""
     if not offset:
         return
+
+    def shift(holder: Any) -> None:
+        if not isinstance(holder, dict):
+            return
+        page = holder.get("page_number")
+        if isinstance(page, int) and not isinstance(page, bool):
+            holder["page_number"] = page + offset
+
     if isinstance(values, dict):
-        locations = values.get("locations")
-        if "text" in values and isinstance(locations, list):
-            for loc in locations:
-                page = loc.get("page_number") if isinstance(loc, dict) else None
-                if isinstance(page, int) and not isinstance(page, bool):
-                    loc["page_number"] = page + offset
+        if "text" in values:
+            locations = values.get("locations")
+            for loc in locations if isinstance(locations, list) else []:
+                shift(loc)
+            evidence = values.get("evidence")
+            for item in evidence if isinstance(evidence, list) else []:
+                shift(item)
+                item_locations = item.get("locations") if isinstance(item, dict) else None
+                for loc in item_locations if isinstance(item_locations, list) else []:
+                    shift(loc)
             return
         for value in values.values():
             _offset_page_numbers(value, offset)
@@ -2406,8 +2420,16 @@ def _is_empty_leaf(value: Any) -> bool:
     return False
 
 
+def _rebase_input(raw: str, base: dict[str, Any]) -> str:
+    """:func:`_rebase_ref` for an ``inputs`` entry, which may carry the text
+    it cites after ``=`` (``"LineItems[0].Amount=$12.75"``)."""
+    path_text, sep, cited = raw.partition("=")
+    rebased = _rebase_ref(path_text.strip(), base)
+    return f"{rebased}{sep}{cited}" if sep else rebased
+
+
 def _rebase_ref(ref: str, base: dict[str, Any]) -> str:
-    """Rewrite a later part's ``derived_from`` path for the merged tree: an
+    """Rewrite a later part's input path for the merged tree: an
     index into an array the merge appends to *base*'s copy of it moves past
     *base*'s entries."""
     path = parse_path(ref)
@@ -2445,12 +2467,14 @@ def _merge_part_values(base: dict[str, Any], extra: dict[str, Any]) -> dict[str,
     """Merge one part's values into those of the parts before it, in place on
     *base*: arrays concatenate (each part submits only its own pages' entries,
     in document order), objects merge recursively, and a leaf keeps the
-    earliest part's value unless that one is empty. *extra*'s ``derived_from``
-    paths are first rebased onto the concatenated arrays. Returns *base*."""
-    for _path, leaf in walk_computed_leaves(extra):
-        refs = leaf.get("derived_from")
-        if isinstance(refs, list):
-            leaf["derived_from"] = [_rebase_ref(r, base) if isinstance(r, str) else r for r in refs]
+    earliest part's value unless that one is empty. *extra*'s ``inputs`` paths
+    (and 0.7 ``derived_from``) are first rebased onto the concatenated arrays,
+    keeping any ``=cited text``. Returns *base*."""
+    for _path, leaf in walk_all_leaves(extra):
+        for key in ("inputs", "derived_from"):
+            refs = leaf.get(key)
+            if isinstance(refs, list):
+                leaf[key] = [_rebase_input(r, base) if isinstance(r, str) else r for r in refs]
     _merge_tree(base, extra)
     return base
 
