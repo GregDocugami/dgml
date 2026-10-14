@@ -100,7 +100,7 @@ def test_no_schema_is_refused_first(workspace: Workspace, monkeypatch: pytest.Mo
         extract_file(workspace, ds_id, "fileaaaaaaaa")
 
 
-def test_uses_workspace_config_and_defaults_stats_on_usage_off(
+def test_uses_workspace_config_and_defaults_stats_and_usage_off(
     workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ds_id = _docset(workspace)
