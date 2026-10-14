@@ -1512,3 +1512,34 @@ def test_invariant_under_a_single_root_is_checked_unqualified() -> None:
     assert violations == [
         "DocumentTotal: expected sum(LineItems[].LineAmount) = 349.85, got 500.00"
     ]
+
+
+def test_input_that_resolves_to_the_citing_value_is_dropped() -> None:
+    """A relative path anchored back onto the citing value would make it its
+    own input — a dg:inputs cycle."""
+    values: dict[str, Any] = {
+        "Rows": [{"Start": {"text": "3/1", "locations": [], "inputs": ["Start=3/1"]}}]
+    }
+    assert verify_input_citations(values).dropped == 1
+    assert "inputs" not in values["Rows"][0]["Start"]
+
+
+def test_citation_numbers_are_plain_decimals() -> None:
+    """An exponent or NaN spelling is text, not a number: "1e3" doesn't cite
+    "1000", and a signalling NaN doesn't raise."""
+    values: dict[str, Any] = {
+        "A": {"text": "1000"},
+        "B": {"text": "sNaN"},
+        "T": {"text": "x", "method": "inferred", "inputs": ["A=1e3", "B=snan"]},
+    }
+    assert verify_input_citations(values).dropped == 1
+    assert values["T"]["inputs"] == ["B"]
+
+
+def test_legacy_computed_without_sources_reads_as_a_bare_value() -> None:
+    """A 0.7 computed element with no dg:href has no boxes: it reads with no
+    locations, not as a printed value with an empty box list."""
+    back = dgml_xml_to_values(
+        _ext('<docset:Total dg:origin="computed" dg:value="10">10</docset:Total>')
+    )
+    assert back["Total"] == {"text": "10", "value": "10"}

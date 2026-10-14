@@ -270,7 +270,14 @@ def _cite_norm(text: Any) -> str:
     return _CITE_NORM_RE.sub("", str(text).lower())
 
 
+# A plain decimal: no exponent ("1e3"), NaN or Infinity, which Decimal would
+# also parse (and a signalling NaN raises when compared).
+_CITE_NUMBER_RE = re.compile(r"-?(?:\d+\.?\d*|\.\d+)")
+
+
 def _cite_number(norm: str) -> Decimal | None:
+    if not _CITE_NUMBER_RE.fullmatch(norm):
+        return None
     try:
         return Decimal(norm)
     except InvalidOperation:
@@ -405,6 +412,11 @@ def verify_input_citations(values: dict[str, Any]) -> CitationResult:
                 continue
             cited = cited_text if sep else None
             target, moved = _resolve_input(values, leaf_path, path, cited)
+            if target == leaf_path:
+                # A value can't be its own input (a relative path anchored
+                # back onto the citing value): that is a dg:inputs cycle.
+                dropped += 1
+                continue
             if target is None:
                 if cited is None:
                     kept.append(path_text)  # dangles; counted downstream
@@ -1244,7 +1256,9 @@ def _leaf_value(
     origin = effective_origin(el)
     inputs = effective_inputs(el)
     method = effective_method(el)
-    if origin is not None or method is None:
+    # A 0.7 computed element with no sources has no boxes either: it reads
+    # as a bare value (no locations), not as a printed one.
+    if origin is not None or (method is None and not is_legacy_computed(el)):
         leaf["locations"] = _locations_from_origin(origin)
     if inputs:
         leaf["inputs"] = inputs

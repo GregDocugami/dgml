@@ -1692,3 +1692,57 @@ def test_box_straddling_two_rows_snaps_to_the_nearer_match(workspace: Workspace)
     assert values["V"]["locations"] == [
         {"page_number": 1, "bounding_box": [1507, 1192, 1560, 1225]}
     ]
+
+
+def test_words_of_different_heights_on_one_line_read_in_order(workspace: Workspace) -> None:
+    """Low on a page, two words of one line whose heights differ by a pixel
+    must still read left to right, or an OCR-noisy value reads scrambled and
+    its correct box is stripped."""
+    from dgml_core.matching import verify_boxes
+
+    words = [
+        {"t": "Acrne", "l": [100, 2990, 160, 3010]},
+        {"t": "Corporation", "l": [170, 2989, 300, 3011]},
+    ]
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=words)
+    values: dict[str, Any] = {
+        "V": {
+            "text": "Acme Corporation",
+            "locations": [{"page_number": 1, "bounding_box": [100, 2989, 300, 3011]}],
+        }
+    }
+    assert verify_boxes(workspace, "f1aaaaaaaaaa", values) == (0, 0)
+
+
+def test_value_glued_to_its_label_in_one_word_is_kept(workspace: Workspace) -> None:
+    words = [{"t": "Total:$318.40", "l": [100, 100, 300, 130]}]
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=words)
+    from dgml_core.matching import verify_boxes
+
+    values: dict[str, Any] = {
+        "V": {
+            "text": "$318.40",
+            "locations": [{"page_number": 1, "bounding_box": [100, 100, 300, 130]}],
+        }
+    }
+    assert verify_boxes(workspace, "f1aaaaaaaaaa", values) == (0, 0)
+
+
+def test_snapped_line_does_not_duplicate_the_values_other_box(workspace: Workspace) -> None:
+    """One line of a two-box value snaps to the whole span; the value's other
+    box, already covered by the snap, is not kept as a second copy."""
+    from dgml_core.matching import verify_boxes
+
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=_METER_ROW)
+    values: dict[str, Any] = {
+        "V": {
+            "text": "Therms 48216",
+            "locations": [
+                {"page_number": 1, "bounding_box": [671, 100, 782, 130]},
+                {"page_number": 1, "bounding_box": [1507, 100, 1600, 130]},
+            ],
+        }
+    }
+    check = verify_boxes(workspace, "f1aaaaaaaaaa", values)
+    assert check.snapped == 1
+    assert values["V"]["locations"] == [{"page_number": 1, "bounding_box": [1455, 100, 1600, 130]}]

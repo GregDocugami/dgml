@@ -330,6 +330,13 @@ def _box_agrees(words: list[_Word], key: str, *, one_of_several: bool = False) -
         return True
     if joined == key or (one_of_several and joined in key):
         return True
+    if len(keys) == 1 and key in joined:
+        # One OCR word with the value glued to a label ("Total:$318.40",
+        # "Invoice#INV-12345"): the box is right if the rest of the word is
+        # label, not more digits (a neighbouring "1318.40" holds "318.40").
+        rest = joined.replace(key, "", 1)
+        if not any(c.isdigit() for c in rest):
+            return True
     for i in range(len(keys)):
         run = ""
         for k in keys[i:]:
@@ -375,6 +382,20 @@ def _snap_to_line(
     return _span_to_locations(scored[0][1], words, _PageDims(1, 1), page)
 
 
+def _overlaps_any(loc: Any, others: list[dict[str, Any]]) -> bool:
+    """True when *loc*'s box intersects a box of *others* on the same page."""
+    box = loc.get("bounding_box") if isinstance(loc, dict) else None
+    if not isinstance(box, list) or len(box) != 4:
+        return False
+    for other in others:
+        if other.get("page_number") != loc.get("page_number"):
+            continue
+        o = other["bounding_box"]
+        if box[0] < o[2] and o[0] < box[2] and box[1] < o[3] and o[1] < box[3]:
+            return True
+    return False
+
+
 def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
     """Check every bounding box against the page's text layer, in place.
 
@@ -410,6 +431,7 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
             1 for loc in locations if isinstance(loc, dict) and loc.get("bounding_box") is not None
         )
         checked: list[Any] = []
+        snapped_locs: list[dict[str, Any]] = []
         for loc in locations:
             box = loc.get("bounding_box") if isinstance(loc, dict) else None
             page = loc.get("page_number") if isinstance(loc, dict) else None
@@ -417,23 +439,42 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
                 checked.append(loc)
                 continue
             left, top, right, bottom = box
-            inside = sorted(
-                (
-                    w
-                    for w in page_words(page)
-                    if left - _BOX_SLACK_PX <= (w.left + w.right) / 2 <= right + _BOX_SLACK_PX
-                    and top - _BOX_SLACK_PX <= w.y_center <= bottom + _BOX_SLACK_PX
-                ),
-                key=lambda w: (round(w.y_center / max(w.height, 1)), w.left),
-            )
+            # Reading order: visual lines top to bottom, words left to right
+            # within each line (words on one line differ in height, so the
+            # line comes from y-centre proximity, not a per-word bucket).
+            inside = [
+                w
+                for line in _line_groups(
+                    [
+                        w
+                        for w in page_words(page)
+                        if left - _BOX_SLACK_PX <= (w.left + w.right) / 2 <= right + _BOX_SLACK_PX
+                        and top - _BOX_SLACK_PX <= w.y_center <= bottom + _BOX_SLACK_PX
+                    ]
+                )
+                for w in sorted(line, key=lambda w: w.left)
+            ]
             if _box_agrees(inside, key, one_of_several=boxed > 1):
                 checked.append(loc)
             elif (moved := _snap_to_line(page_words(page), text, box, page)) is not None:
                 checked.extend(moved)
+                snapped_locs.extend(moved)
                 snapped += 1
             else:
                 checked.append({"page_number": page})
                 rejected += 1
+        if snapped_locs:
+            # A snap locates the whole value, so the value's other boxes it
+            # overlaps (the other line of a wrapped value, or a second box that
+            # snapped to the same span) would draw it twice.
+            deduped: list[Any] = []
+            for loc in checked:
+                if loc in deduped:
+                    continue
+                if loc not in snapped_locs and _overlaps_any(loc, snapped_locs):
+                    continue
+                deduped.append(loc)
+            checked = deduped
         leaf["locations"] = checked
     return BoxCheck(snapped, rejected)
 
