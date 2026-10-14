@@ -51,7 +51,9 @@ What this does and does not do:
 - **`root` is optional when every store is remote.** The workspace gets an empty temp dir for
   its local-only paths, removed when the `Workspace` is garbage-collected. The bundled local
   store's data *is* the root, so `open` refuses to go without one for it (`INVALID_ARGUMENT`);
-  pass `root=`, or set `workspace_path` on the store.
+  pass `root=`, or set `workspace_path` on the store — which then *is* the root, not a temp
+  dir beside it. The check is on the resolved class, so an alias or subclass of the local
+  store is held to the same rule.
 - **`Identity.workspace_id` must be a valid workspace id** (3–40 chars of `[a-z0-9_-]`, starting
   with a letter or digit), the same rule `create_workspace` applies: it becomes a directory
   name, an S3 key prefix and a Mongo collection prefix. Normalize your own ids at the edge.

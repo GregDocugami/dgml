@@ -267,26 +267,44 @@ class Workspace:
         warning, exactly as ``create`` does, and a changed ``name`` is just updated."""
         from .errors import ConflictError, InvalidArgument
         from .migrations import stamp_schema_version
-        from .storage_resolve import DEFAULT_STORAGE_PROVIDER
 
         configuration.identity.require_complete()
         ident = configuration.identity
         assert ident.workspace_id and ident.name and ident.organization  # require_complete
         if root is None:
-            # The local store's data *is* the root; a scratch dir would vanish with
-            # this object. A store told where to live (`workspace_path`) is fine.
+            # The local store's data *is* the root, so a scratch dir would vanish with
+            # this object. Decided on the resolved class, not the provider string — an
+            # alias or a subclass is still the local store. One told where to live
+            # (`workspace_path`) makes that the root, so everything that reads `ws.root`
+            # directly sees the tree the store actually writes.
+            from .storage_local import LocalStore
+            from .storage_resolve import _import_store_class
+            from .storage_service import BlobStore, DocStore
+
             storage = configuration.storage
-            if any(
-                spec.provider == DEFAULT_STORAGE_PROVIDER and "workspace_path" not in spec.options
-                for spec in (storage.blobs, storage.docs)
-            ):
+            local_roots: set[Path] = set()
+            for spec, base in ((storage.blobs, BlobStore), (storage.docs, DocStore)):
+                if not issubclass(_import_store_class(spec.provider, base), LocalStore):
+                    continue
+                declared = spec.options.get("workspace_path")
+                if not isinstance(declared, str) or not declared:
+                    raise InvalidArgument(
+                        "the local store's data is the workspace root: pass root= to "
+                        "Workspace.open(configuration=…), or set 'workspace_path' on the store"
+                    )
+                local_roots.add(Path(declared).expanduser().resolve())
+            if len(local_roots) > 1:
                 raise InvalidArgument(
-                    "the local store's data is the workspace root: pass root= to "
-                    "Workspace.open(configuration=…), or set 'workspace_path' on the store"
+                    "blobs and docs name different 'workspace_path' values; a workspace has "
+                    "one root"
                 )
-            ws = cls(root=cls.scratch_root(), configuration=configuration)
-            # Ours, not the caller's: removed with the workspace, not left per open.
-            weakref.finalize(ws, shutil.rmtree, ws.root, ignore_errors=True)
+            if local_roots:
+                # The caller's directory: it is the root, and it is not ours to remove.
+                ws = cls(root=local_roots.pop(), configuration=configuration)
+            else:
+                ws = cls(root=cls.scratch_root(), configuration=configuration)
+                # Ours, not the caller's: removed with the workspace, not left per open.
+                weakref.finalize(ws, shutil.rmtree, ws.root, ignore_errors=True)
         else:
             ws = cls(root=root, configuration=configuration)
         meta = ws.read_meta()
