@@ -995,6 +995,7 @@ def extract_values(
     # store, so the two views never disagree (``duration_s`` is a clock read).
     stats_doc: dict[str, Any] | None = None
     usage_doc: dict[str, Any] | None = None
+    failure: ValuesExtractionFailed | None = None
 
     def _usage_summary() -> dict[str, Any]:
         return {
@@ -1284,19 +1285,22 @@ def extract_values(
             doc = standalone_extraction_doc(final_values, vocab=vocab)
         workspace.blobs.put_blob(xml_key, doc.encode("utf-8"))
         outcome = OUTCOME_OK
-        stats_doc = _stats_summary()
-        usage_doc = _usage_summary()
+        # The values are already stored: telemetry failing to build must not
+        # turn this into a failed extraction.
+        stats_doc = _safe_summary(_stats_summary, "stats")
+        usage_doc = _safe_summary(_usage_summary, "usage")
         return ExtractionResult(
             values=final_values,
             tool_calls=tool_calls_total,
             xml_key=xml_key,
             mode=mode,
             model=config.values_model,
-            usage=usage_doc,
-            stats=stats_doc,
+            usage=usage_doc or {},
+            stats=stats_doc or {},
         )
     except ValuesExtractionFailed as exc:
         error_msg = str(exc)
+        failure = exc
         raise
     except Exception as exc:
         # Non-ValuesExtractionFailed errors (programmer bug) — still
@@ -1304,45 +1308,69 @@ def extract_values(
         error_msg = f"{type(exc).__name__}: {exc}"
         raise
     finally:
+        # Everything below is telemetry and must never break the caller or
+        # mask the error in flight: each step is guarded on its own. On the
+        # failure paths the docs are built here, from whatever the phases got
+        # done, and ride out on a ValuesExtractionFailed so a caller that
+        # persists nothing can still account for what the run spent.
+        if usage_doc is None:
+            usage_doc = _safe_summary(_usage_summary, "usage")
+        if stats_doc is None:
+            stats_doc = _safe_summary(_stats_summary, "stats")
+        if failure is not None:
+            failure.usage = usage_doc
+            failure.stats = stats_doc
         # Usage recording is gated on ``record_usage`` (like every other LLM
         # path), not on debug artifacts. This aggregates phase 1 + 3 into one
         # row; the internal per-call configs carry no workspace, so they
         # don't each auto-record.
-        if record_usage:
-            if usage_doc is None:
-                usage_doc = _usage_summary()
-            _append_usage_event(
-                workspace,
-                UsageEvent(
-                    at=now_iso(),
-                    operation=OPERATION_EXTRACT_VALUES,
-                    model=config.values_model,
-                    cost_usd=usage_doc["cost_usd"],
-                    prompt_tokens=usage_doc["prompt_tokens"],
-                    completion_tokens=usage_doc["completion_tokens"],
-                    total_tokens=usage_doc["total_tokens"],
-                    cache_read_tokens=usage_doc["cache_read_tokens"],
-                    cache_creation_tokens=usage_doc["cache_creation_tokens"],
-                    duration_s=usage_doc["duration_s"],
-                    outcome=outcome,
-                    context={
-                        "file_id": file_id,
-                        "docset_id": docset_id,
-                        "tool_calls": tool_calls_total,
-                    },
-                    error=error_msg,
-                ),
-            )
-        # Even on failure, partial numbers help diagnose where we
-        # stalled. Wrapped in try/except so telemetry can never break
-        # the caller. Suppressed when the caller opted out.
-        try:
-            if write_stats:
-                if stats_doc is None:
-                    stats_doc = _stats_summary()
+        if record_usage and usage_doc is not None:
+            try:
+                _append_usage_event(
+                    workspace,
+                    UsageEvent(
+                        at=now_iso(),
+                        operation=OPERATION_EXTRACT_VALUES,
+                        model=config.values_model,
+                        cost_usd=usage_doc["cost_usd"],
+                        prompt_tokens=usage_doc["prompt_tokens"],
+                        completion_tokens=usage_doc["completion_tokens"],
+                        total_tokens=usage_doc["total_tokens"],
+                        cache_read_tokens=usage_doc["cache_read_tokens"],
+                        cache_creation_tokens=usage_doc["cache_creation_tokens"],
+                        duration_s=usage_doc["duration_s"],
+                        outcome=outcome,
+                        context={
+                            "file_id": file_id,
+                            "docset_id": docset_id,
+                            "tool_calls": tool_calls_total,
+                        },
+                        error=error_msg,
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "could not record extract_values usage for file %s", file_id, exc_info=True
+                )
+        # Even on failure, partial numbers help diagnose where we stalled.
+        # Suppressed when the caller opted out.
+        if write_stats and stats_doc is not None:
+            try:
                 _write_extraction_stats(workspace, docset_id, file_id, stats_doc)
-        except Exception:
-            pass
+            except Exception:
+                logger.warning(
+                    "could not write extraction stats for file %s", file_id, exc_info=True
+                )
+
+
+def _safe_summary(build: Callable[[], dict[str, Any]], what: str) -> dict[str, Any] | None:
+    """Build a telemetry doc, or log and return ``None`` — telemetry never
+    breaks an extraction nor masks the error a failed one is raising."""
+    try:
+        return build()
+    except Exception:
+        logger.warning("could not build extraction %s", what, exc_info=True)
+        return None
 
 
 def _empty_totals() -> dict[str, Any]:

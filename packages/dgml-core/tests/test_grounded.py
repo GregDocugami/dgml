@@ -2199,6 +2199,92 @@ def test_extract_values_records_error_event_when_max_iters_exceeded(
     assert "max_tool_iters" in (e["error"] or "")
 
 
+def test_extract_values_failure_carries_usage_and_stats_on_the_error(
+    workspace: Workspace,
+) -> None:
+    """A failed run hands its partial accounting to the caller on the
+    exception, so a host that persists no telemetry still sees what it spent."""
+    from dgml_core.usage import read_events
+
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    r = _tool_call_response("get_page_words", {"page": 1}, call_id="cX")
+    r._hidden_params = {"response_cost": 0.001}
+    r.usage = SimpleNamespace(prompt_tokens=100, completion_tokens=5, total_tokens=105)
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model=DEFAULT_VALUES_MODEL,
+        max_tool_iters=3,
+    )
+    with patch("litellm.completion", side_effect=[r, r, r]):
+        with pytest.raises(ValuesExtractionFailed, match="max_tool_iters") as excinfo:
+            extract_values(workspace, ds_id, fid, config=config)
+    assert excinfo.value.usage is not None
+    assert excinfo.value.usage["cost_usd"] == 0.003
+    assert excinfo.value.usage["prompt_tokens"] == 300
+    assert excinfo.value.stats is not None and excinfo.value.stats["outcome"] == "error"
+    # Nothing persisted: both switches were off.
+    assert read_events(workspace) == []
+    assert workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
+
+
+def test_extract_values_usage_write_failure_does_not_mask_the_extraction_error(
+    workspace: Workspace,
+) -> None:
+    """A storage failure appending the usage row is logged, not raised: the
+    caller still sees the real extraction error, and the stats doc is still
+    written."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    r = _tool_call_response("get_page_words", {"page": 1}, call_id="cX")
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model=DEFAULT_VALUES_MODEL,
+        max_tool_iters=3,
+    )
+    with (
+        patch("litellm.completion", side_effect=[r, r, r]),
+        patch("dgml_core.grounded._append_usage_event", side_effect=OSError("disk full")),
+    ):
+        with pytest.raises(ValuesExtractionFailed, match="max_tool_iters"):
+            extract_values(
+                workspace, ds_id, fid, config=config, record_usage=True, write_stats=True
+            )
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None and stats["outcome"] == "error"
+
+
+def test_extract_values_succeeds_when_building_stats_fails(workspace: Workspace) -> None:
+    """The values are stored before telemetry is built, so a telemetry bug
+    must not turn a finished extraction into a failed one."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    _seed_page_image(workspace, fid, 1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Goodnight", "locations": [{"page_number": 1}]}}
+    p1 = _tool_call_response("submit_values", {"values": phase1_values}, call_id="p1")
+    p3 = _tool_call_response(
+        "submit_locations",
+        {"locations": [{"id": "a", "bounding_boxes": [[1, 2, 3, 4]]}]},
+        call_id="p3",
+    )
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with (
+        patch("litellm.completion", side_effect=[p1, p3]),
+        patch("dgml_core.grounded._build_extraction_stats", side_effect=TypeError("boom")),
+    ):
+        result = extract_values(workspace, ds_id, fid, config=config, write_stats=True)
+    assert result.stats == {}
+    assert result.usage["duration_s"] >= 0
+    assert workspace.blobs.blob_exists(result.xml_key)
+    assert workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
+
+
 def test_expand_refs_inlines_definitions(workspace: Workspace) -> None:
     """A schema with `$ref` pointers gets flattened so the resulting
     spec is self-contained — what we hand to a tool-call validator

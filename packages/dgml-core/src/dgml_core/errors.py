@@ -384,7 +384,18 @@ class GenerationFailed(DgmlError):
 
 
 class ValuesExtractionFailed(DgmlError):
+    """Value extraction could not finish.
+
+    When raised out of :func:`dgml_core.grounded.extract_values`, ``usage`` and
+    ``stats`` carry what the run got done before failing — the same shapes
+    ``ExtractionResult.usage`` / ``.stats`` have on success — so a caller that
+    persists no telemetry can still account for what a failed run spent. Both
+    are ``None`` when raised from anywhere else, or when they could not be built.
+    """
+
     code = "VALUES_EXTRACTION_FAILED"
+    usage: dict[str, Any] | None = None
+    stats: dict[str, Any] | None = None
 
 
 class GroundingFailed(DgmlError):
