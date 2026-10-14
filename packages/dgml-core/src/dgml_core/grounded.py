@@ -125,7 +125,7 @@ from .prompts import PromptKey
 from .prompts import get as prompt
 from .storage import Workspace
 from .textmatch import Word as TextWord
-from .textmatch import line_groups
+from .textmatch import fuzzy_norm, line_boxes
 from .toon import encode_phase3_words
 from .usage import (
     OPERATION_EXTRACT_VALUES,
@@ -1242,6 +1242,12 @@ def extract_values(
         dropped_unboxed_paths = unboxed.paths
         dropped_inputs = citations.dropped + unboxed.inputs + count_dropped_inputs(final_values)
         unsupported_values = unboxed.unsupported
+        # Count what is written, not what phase 1 returned: the drop above can
+        # remove unprinted values (unsupported) and partly printed ones (unboxed).
+        unprinted_fields = sum(1 for _ in walk_unprinted_leaves(final_values))
+        partly_printed_fields = sum(
+            1 for _, leaf in walk_input_leaves(final_values) if "locations" in leaf
+        )
 
         # Extracted values live as a dg:extraction element in the file's core
         # <stem>.dgml.xml (spec §13): added as a sibling of an existing document
@@ -1884,12 +1890,12 @@ def _boxes_from_word_ranges(
             if word is None:
                 return None
             picked[idx] = word
-    lines = line_groups(
+    return line_boxes(
         [
             TextWord(
                 idx=idx,
                 text=str(w.get("text", "")),
-                text_norm=str(w.get("text", "")),
+                text_norm=fuzzy_norm(str(w.get("text", ""))),
                 left=int(w["location"]["bounding_box"][0]),
                 top=int(w["location"]["bounding_box"][1]),
                 right=int(w["location"]["bounding_box"][2]),
@@ -1898,15 +1904,6 @@ def _boxes_from_word_ranges(
             for idx, w in picked.items()
         ]
     )
-    return [
-        [
-            min(w.left for w in line),
-            min(w.top for w in line),
-            max(w.right for w in line),
-            max(w.bottom for w in line),
-        ]
-        for line in lines
-    ]
 
 
 def _parse_submit_locations(

@@ -394,7 +394,9 @@ def verify_input_citations(values: dict[str, Any]) -> CitationResult:
                     # see it to count, so count the drop here.
                     dropped += 1
                 continue
-            cited = cited_text if sep else None
+            # An empty citation ("Total=") checks nothing: treat it as uncited
+            # rather than dropping a path that may well be right.
+            cited = cited_text if sep and cited_text.strip() else None
             target, moved = _resolve_input(values, leaf_path, path, cited)
             if target == leaf_path:
                 # A value can't be its own input (a relative path anchored

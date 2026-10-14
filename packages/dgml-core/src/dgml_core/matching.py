@@ -91,6 +91,9 @@ from .textmatch import (
     find_spans as _find_spans,
 )
 from .textmatch import (
+    line_boxes as _line_boxes,
+)
+from .textmatch import (
     line_groups as _line_groups,
 )
 from .textmatch import (
@@ -168,20 +171,10 @@ def _span_to_locations(
     boxes stay in pixel space."""
     del dims  # boxes are emitted in pixels; no normalization needed
     start, end = span
-    span_words = page_words[start:end]
-    locs: list[dict[str, Any]] = []
-    for line in _line_groups(span_words):
-        left = min(w.left for w in line)
-        top = min(w.top for w in line)
-        right = max(w.right for w in line)
-        bottom = max(w.bottom for w in line)
-        locs.append(
-            {
-                "page_number": page_number,
-                "bounding_box": [left, top, right, bottom],
-            }
-        )
-    return locs
+    return [
+        {"page_number": page_number, "bounding_box": box}
+        for box in _line_boxes(page_words[start:end])
+    ]
 
 
 def _bbox_norm(loc: dict[str, Any], dims: _PageDims) -> tuple[float, float, float, float]:
@@ -332,7 +325,7 @@ def _box_agrees(words: list[_Word], key: str, *, one_of_several: bool = False) -
         return True
     if _run_spells(keys, key):
         return True
-    if len(words) == 1 and _run_spells(_BOX_PART_RE.split(words[0].text.lower()), key):
+    if len(words) == 1 and _run_spells(_BOX_KEY_RE.split(words[0].text.lower()), key):
         # One OCR word with the value glued to a label by punctuation
         # ("Total:$318.40", "Invoice#INV-12345"): whole parts of the word must
         # spell the value — "Paid" isn't in "Unpaid", "318.40" isn't in
@@ -353,13 +346,9 @@ def _reads_as(joined: str, key: str) -> bool:
     return matcher.ratio() >= _BOX_FUZZY_RATIO and not _digits_differ(matcher, joined, key)
 
 
-_BOX_PART_RE = re.compile(r"[^0-9a-z]+")
-
-
 def _run_spells(parts: list[str], key: str) -> bool:
-    """True when a contiguous run of *parts* (already lowercase; punctuation
-    is dropped) joins to exactly *key*."""
-    parts = [_box_key(p) for p in parts]
+    """True when a contiguous run of *parts* (already box keys: lowercase
+    letters and digits) joins to exactly *key*."""
     for i in range(len(parts)):
         run = ""
         for part in parts[i:]:
@@ -470,6 +459,24 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
                 cache[page] = []
         return cache[page]
 
+    def words_in(page: int, box: list[int]) -> list[_Word]:
+        # Reading order: visual lines top to bottom, words left to right
+        # within each line (words on one line differ in height, so the
+        # line comes from y-centre proximity, not a per-word bucket).
+        left, top, right, bottom = box
+        return [
+            w
+            for line in _line_groups(
+                [
+                    w
+                    for w in page_words(page)
+                    if left - _BOX_SLACK_PX <= (w.left + w.right) / 2 <= right + _BOX_SLACK_PX
+                    and top - _BOX_SLACK_PX <= w.y_center <= bottom + _BOX_SLACK_PX
+                ]
+            )
+            for w in sorted(line, key=lambda w: w.left)
+        ]
+
     snapped = rejected = 0
     for _path, leaf in _walk_leaves(values):
         text = str(leaf.get("text") or "")
@@ -477,24 +484,6 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
         locations = leaf.get("locations")
         if not key or not isinstance(locations, list):
             continue
-
-        def words_in(page: int, box: list[int]) -> list[_Word]:
-            # Reading order: visual lines top to bottom, words left to right
-            # within each line (words on one line differ in height, so the
-            # line comes from y-centre proximity, not a per-word bucket).
-            left, top, right, bottom = box
-            return [
-                w
-                for line in _line_groups(
-                    [
-                        w
-                        for w in page_words(page)
-                        if left - _BOX_SLACK_PX <= (w.left + w.right) / 2 <= right + _BOX_SLACK_PX
-                        and top - _BOX_SLACK_PX <= w.y_center <= bottom + _BOX_SLACK_PX
-                    ]
-                )
-                for w in sorted(line, key=lambda w: w.left)
-            ]
 
         boxes = [
             (loc, words_in(loc["page_number"], loc["bounding_box"]))
@@ -793,6 +782,11 @@ def run_phase2_matching(
 # tolerance.
 
 
+def _is_evidence_path(path: LeafPath) -> bool:
+    """True for an ``evidence`` item's path (``(*leaf_path, "evidence", i)``)."""
+    return len(path) >= 2 and path[-2] == _EVIDENCE_KEY and isinstance(path[-1], int)
+
+
 def _row_path(path: LeafPath) -> LeafPath | None:
     """Path identifying the 'row' a leaf belongs to: the path up to and
     including the rightmost array index. ``('transactions', 5, 'post_date')``
@@ -811,7 +805,7 @@ def _row_path(path: LeafPath) -> LeafPath | None:
     it is no array row's cell either: it gets ``None`` too. Otherwise its
     own index would make it a one-item pseudo-row, whose band would veto
     top-level scalars on its line and its own repeat occurrences."""
-    if len(path) >= 2 and path[-2] == _EVIDENCE_KEY and isinstance(path[-1], int):
+    if _is_evidence_path(path):
         return None
     for i in range(len(path) - 1, -1, -1):
         if isinstance(path[i], int):
@@ -1285,6 +1279,10 @@ def _assign_row_by_columns(
         if len(s.path) < len(row_path):
             continue
         if s.path[: len(row_path)] != row_path:
+            continue
+        if _is_evidence_path(s.path):
+            # Evidence is printed elsewhere (not a cell of this row); its box
+            # would skew the row's y anchor and claim another column's x range.
             continue
         for loc in s.matched_locations:
             ymin, xmin, ymax, xmax = _bbox_norm(loc, dims)
