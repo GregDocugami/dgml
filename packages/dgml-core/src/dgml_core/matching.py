@@ -667,6 +667,50 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
     return BoxCheck(snapped, rejected)
 
 
+def locate_pageless_values(
+    workspace: Workspace, file_id: str, values: Any, page_count: int | None
+) -> int:
+    """Give each value phase 1 returned bare — text with no ``locations``,
+    ``inputs``, ``evidence`` or ``method`` — the first page that prints its
+    exact text, in place; return how many were placed.
+
+    A model sometimes reads a value off the page and leaves out where. Bare,
+    the value would be dropped as unverifiable (it has no box and nothing it
+    used); with a page, phase 2 grounds it like any other. The search is
+    :func:`textmatch.find_spans` — the case-sensitive span match phase 2
+    uses — so a value whose text the page doesn't print stays bare. The
+    first page is enough: any printed copy reads as the value, and naming
+    every page would send the repeats to phase 3."""
+    pages = list(range(1, page_count + 1)) if page_count else []
+    cache: dict[int, list[_Word]] = {}
+
+    def words_on(page: int) -> list[_Word]:
+        # Best effort: a page whose text can't be read (missing, or a
+        # payload without its size) is simply not searched.
+        if page not in cache:
+            try:
+                cache[page] = _load_page_words(workspace, file_id, page)[0]
+            except (FileNotFound, KeyError, TypeError, ValueError):
+                cache[page] = []
+        return cache[page]
+
+    placed = 0
+    for _path, leaf in walk_all_leaves(values):
+        text = leaf.get("text")
+        if (
+            not isinstance(text, str)
+            or not text.strip()
+            or any(k in leaf for k in ("locations", "inputs", "evidence", "method"))
+        ):
+            continue
+        for page in pages:
+            if _find_spans(text, words_on(page)):
+                leaf["locations"] = [{"page_number": page}]
+                placed += 1
+                break
+    return placed
+
+
 def _get_at_path(values: dict[str, Any], path: LeafPath) -> Any:
     cur: Any = values
     for seg in path:

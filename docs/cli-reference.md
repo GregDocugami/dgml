@@ -1427,6 +1427,11 @@ whose words match the value exactly, preferring its own line (or lines)
 (`matching.snapped_boxes`). When the page prints no such span, or two are
 equally near, the box is stripped (`matching.rejected_boxes`).
 
+A value phase 1 returns as bare text, with no locations (a model sometimes
+reads a value off the page and leaves out where), is first placed on the first
+page that prints its exact text, so phase 2 can ground it
+(`matching.located_pageless`).
+
 Every value extraction writes can be verified, so two kinds are **dropped**,
 not written:
 

@@ -130,7 +130,9 @@ extraction_values_phase1_system: |-
   Each leaf value you return is an object with a ``text`` field (the
   value verbatim as printed), an optional normalized ``value``, and a
   ``locations`` array. Each location identifies the ``page_number``
-  (1-indexed integer) where that value appears. This phase deliberately
+  (1-indexed integer) where that value appears. Every value you read off
+  the page carries its ``locations`` — never return printed text without
+  them. This phase deliberately
   omits bounding boxes — a later phase will add them.
 
   NORMALIZED ``value`` — alongside the verbatim ``text``, return the

@@ -111,6 +111,7 @@ from .llm import (
 from .matching import (
     UnmatchedItem,
     get_at_path,
+    locate_pageless_values,
     parse_path,
     path_to_str,
     run_phase2_matching,
@@ -974,6 +975,7 @@ def extract_values(
     dropped_inputs = 0
     unsupported_values = 0
     repaired_inputs = 0
+    located_pageless = 0
     dropped_unboxed_values = 0
     dropped_unboxed_paths: list[str] = []
     rejected_boxes = 0
@@ -1161,6 +1163,12 @@ def extract_values(
         citations = verify_input_citations(phase1_values)
         repaired_inputs = citations.repaired
         demoted_claims += _normalize_leaf_provenance(phase1_values)
+        # A value read off the page but returned without locations would be
+        # dropped as unverifiable; place it on the first page that prints its
+        # exact text so phase 2 can ground it.
+        located_pageless = locate_pageless_values(
+            workspace, file_id, phase1_values, FileStore(workspace).get(file_id).page_count
+        )
         # Provisional: if a later phase fails, the stats still show the
         # claims phase 1 made with nothing behind them. Replaced below by the
         # count of values dropped as unsupported.
@@ -1354,6 +1362,7 @@ def extract_values(
                     dropped_inputs=dropped_inputs,
                     unsupported_values=unsupported_values,
                     repaired_inputs=repaired_inputs,
+                    located_pageless=located_pageless,
                     dropped_unboxed_values=dropped_unboxed_values,
                     dropped_unboxed_paths=dropped_unboxed_paths,
                     rejected_boxes=rejected_boxes,
@@ -1431,6 +1440,7 @@ def _write_extraction_stats(
     dropped_inputs: int,
     unsupported_values: int,
     repaired_inputs: int,
+    located_pageless: int,
     dropped_unboxed_values: int,
     dropped_unboxed_paths: list[str],
     rejected_boxes: int,
@@ -1513,6 +1523,9 @@ def _write_extraction_stats(
             # Inputs whose cited text matched a different entry of the same
             # array than the index the model gave: re-pointed there.
             "repaired_inputs": repaired_inputs,
+            # Values phase 1 returned without locations, placed on the first
+            # page printing their exact text.
+            "located_pageless": located_pageless,
             # Printed values phases 2/3 found no box for: not written.
             "dropped_unboxed_values": dropped_unboxed_values,
             # Which ones ("path=text"), so a drop is diagnosable without

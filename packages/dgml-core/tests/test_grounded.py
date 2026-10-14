@@ -1387,6 +1387,35 @@ def test_extract_values_phase3_locates_by_word_ranges(workspace: Workspace) -> N
     ]
 
 
+def test_extract_values_grounds_a_value_phase1_left_without_locations(
+    workspace: Workspace,
+) -> None:
+    """Phase 1 reads "Hello world" but leaves out where. Bare, it would be
+    dropped as unverifiable; placed on the page that prints it, phase 2
+    grounds it."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)  # "Hello", "world"
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    phase1_values = {"title": {"text": "Hello world"}}
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch(
+        "litellm.completion",
+        return_value=_tool_call_response("submit_values", {"values": phase1_values}),
+    ) as mock_completion:
+        result = extract_values(workspace, ds_id, fid, config=config)
+
+    assert mock_completion.call_count == 1  # phase 2 grounded it; no phase 3
+    assert result.values["title"]["locations"] == [
+        {"page_number": 1, "bounding_box": [100, 210, 290, 242]}
+    ]
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
+    assert stats["matching"]["located_pageless"] == 1
+    assert stats["matching"]["unsupported_values"] == 0
+
+
 def test_extract_values_phase3_states_the_image_size(workspace: Workspace) -> None:
     """With words on the page the pixel contract stays, and the prompt says how
     big the image is, so pixel coordinates have a known frame."""
@@ -1654,6 +1683,7 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
         "dropped_inputs": 0,
         "unsupported_values": 0,
         "repaired_inputs": 0,
+        "located_pageless": 0,
         "dropped_unboxed_values": 0,
         "dropped_unboxed": [],
         "rejected_boxes": 0,
@@ -2584,6 +2614,7 @@ def test_extract_values_calculated_field_end_to_end(workspace: Workspace) -> Non
         "dropped_inputs": 0,
         "unsupported_values": 0,
         "repaired_inputs": 0,
+        "located_pageless": 0,
         "dropped_unboxed_values": 0,
         "dropped_unboxed": [],
         "rejected_boxes": 0,

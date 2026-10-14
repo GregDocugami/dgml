@@ -1963,3 +1963,36 @@ def test_snap_refuses_two_equally_near_copies(workspace: Workspace) -> None:
     ]
     check, locs = _verify_on(workspace, words, "Northwind", [44, 1000, 240, 1030])
     assert check.rejected == 1 and locs == [{"page_number": 1}]
+
+
+def test_pageless_values_are_placed_where_their_text_is_printed(workspace: Workspace) -> None:
+    from dgml_core.matching import locate_pageless_values
+
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=_METER_ROW)
+    values: dict[str, Any] = {
+        "Usage": {"text": "48216"},  # printed: placed
+        "Units": {"text": "Therms"},  # printed: placed
+        "Missing": {"text": "99999"},  # not printed: stays bare
+        "Region": {"text": "EMEA", "method": "inferred", "inputs": ["Units"]},  # unprinted
+        "Boxed": {"text": "1.025", "locations": [{"page_number": 1}]},  # already placed
+    }
+    assert locate_pageless_values(workspace, "f1aaaaaaaaaa", values, page_count=1) == 2
+    assert values["Usage"]["locations"] == [{"page_number": 1}]
+    assert values["Units"]["locations"] == [{"page_number": 1}]
+    assert "locations" not in values["Missing"]
+    assert "locations" not in values["Region"]
+
+
+def test_pageless_search_skips_a_page_it_cannot_read(workspace: Workspace) -> None:
+    """A page_text payload without its size can't be loaded; the search
+    leaves the value bare rather than failing the extraction."""
+    from dgml_core.matching import locate_pageless_values
+
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=_METER_ROW)
+    workspace.blobs.put_blob(
+        layout.file_page_text_key("f1aaaaaaaaaa", 1),
+        json.dumps({"page": 1, "words": [{"t": "48216", "l": [1, 2, 3, 4]}]}).encode(),
+    )
+    values: dict[str, Any] = {"Usage": {"text": "48216"}}
+    assert locate_pageless_values(workspace, "f1aaaaaaaaaa", values, page_count=1) == 0
+    assert values == {"Usage": {"text": "48216"}}
