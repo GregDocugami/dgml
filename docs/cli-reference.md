@@ -1412,7 +1412,9 @@ Where the page has a text layer, every box is checked against it: the words
 inside a box must read as its value (a piece of a wrapped value, a loose box
 that also takes in the label, and OCR noise all pass). A box that also takes in
 other words (a label, or the whole row) shrinks to the words that spell the
-value. A box drawn on the wrong span, such as a total boxed on a neighbouring
+value. A value printed in several places at once (a line-item name made of a
+section heading and a tier column header) is kept when its boxes, read in
+order, spell it through a run of words each, and each box shrinks to its run. A box drawn on the wrong span, such as a total boxed on a neighbouring
 number, moves to the nearest span on
 its own line (or lines) whose words match the value exactly
 (`matching.snapped_boxes`). When there is no such span, or two are equally

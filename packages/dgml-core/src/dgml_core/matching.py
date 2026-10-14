@@ -377,6 +377,35 @@ def _spelling_run(words: list[_Word], key: str) -> list[_Word] | None:
     return None
 
 
+def _wrapped_runs(boxes: list[list[_Word]], key: str) -> list[list[_Word]] | None:
+    """For a value located by several boxes: one contiguous run of words per
+    box, in box order, that together spell *key* exactly — or ``None`` when
+    no choice of runs does. Each box must contribute; a box may hold more than
+    its run (a loose box over the label, or the rest of a header row), and
+    the run is what it locates. This is how a name composed of a section
+    heading and a column header ("Gas Delivery" + "Tier 1") is boxed in
+    two places."""
+    keys = [[_box_key(w.text) for w in ws] for ws in boxes]
+
+    def solve(b: int, pos: int) -> list[list[_Word]] | None:
+        if b == len(boxes):
+            return [] if pos == len(key) else None
+        ks = keys[b]
+        for i in range(len(ks)):
+            if not ks[i]:
+                continue  # a run starts on a word with letters or digits
+            run = ""
+            for j in range(i, len(ks)):
+                run += ks[j]
+                if not key.startswith(run, pos):
+                    break
+                if ks[j] and (rest := solve(b + 1, pos + len(run))) is not None:
+                    return [boxes[b][i : j + 1], *rest]
+        return None
+
+    return solve(0, 0)
+
+
 # Letters OCR commonly reads in place of a digit ("1O0" for "100").
 _OCR_DIGIT_LOOKALIKES = str.maketrans("oilszb", "011528")
 
@@ -512,12 +541,17 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
             for loc in locations
         ]
         # A value wrapped across several boxes: only then may one box hold a
-        # piece of it — when the boxes, read in order, spell the whole value.
-        # Repeated copies (or boxes on other pages) are each checked whole.
+        # piece of it — when the boxes, read in order, spell the whole value
+        # (each box through a run of its words, so a loose box still counts),
+        # or do so up to OCR noise. Repeated copies (or boxes on other pages)
+        # are each checked whole.
         boxed_words = [ws for _, ws in boxes if ws is not None]
-        wrapped = len(boxed_words) > 1 and _reads_as(
-            "".join(_box_key(w.text) for ws in boxed_words for w in ws), key
+        runs = _wrapped_runs(boxed_words, key) if len(boxed_words) > 1 else None
+        wrapped = runs is not None or (
+            len(boxed_words) > 1
+            and _reads_as("".join(_box_key(w.text) for ws in boxed_words for w in ws), key)
         )
+        run_of = iter(runs or [])
         checked: list[Any] = []
         snapped_locs: list[dict[str, Any]] = []
         for loc, inside in boxes:
@@ -525,6 +559,17 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
                 checked.append(loc)
                 continue
             box, page = loc["bounding_box"], loc["page_number"]
+            if runs is not None:
+                part = next(run_of)
+                if len(part) < len(inside):
+                    # This box's share of the value is a run of its words:
+                    # box that run (counted as snapped).
+                    tight = [{"page_number": page, "bounding_box": b} for b in _line_boxes(part)]
+                    checked.extend(tight)
+                    snapped += 1
+                else:
+                    checked.append(loc)
+                continue
             run = None if wrapped else _spelling_run(inside, key)
             if run is not None:
                 # A loose box (the whole row, or the label too): the run of

@@ -1797,3 +1797,65 @@ def test_value_glued_to_a_label_in_one_word(word: str, value: str, agrees: bool)
 
     w = Word(idx=0, text=word, text_norm=word, left=0, top=0, right=10, bottom=10)
     assert _box_agrees([w], _box_key(value)) is agrees
+
+
+# A bill: "Gas Delivery (Details below)" heads a section; the tier
+# table's header row prints "Tier 1 Tier 2 Tier 3". A line item named
+# "Gas Delivery Tier 2" is printed in those two places.
+_TIER_PAGE = [
+    {"t": "Gas", "l": [100, 1404, 150, 1440]},
+    {"t": "Delivery", "l": [160, 1404, 330, 1440]},
+    {"t": "(", "l": [340, 1404, 348, 1440]},
+    {"t": "Details", "l": [350, 1404, 430, 1440]},
+    {"t": "below", "l": [440, 1404, 510, 1440]},
+    {"t": ")", "l": [512, 1404, 520, 1440]},
+    {"t": "Tier", "l": [600, 1476, 650, 1510]},
+    {"t": "1", "l": [655, 1476, 670, 1510]},
+    {"t": "Tier", "l": [800, 1476, 850, 1510]},
+    {"t": "2", "l": [855, 1476, 870, 1510]},
+    {"t": "Tier", "l": [1000, 1476, 1050, 1510]},
+    {"t": "3", "l": [1055, 1476, 1070, 1510]},
+]
+
+
+def test_value_spelled_by_loose_boxes_in_two_places_is_kept_and_tightened(
+    workspace: Workspace,
+) -> None:
+    from dgml_core.matching import verify_boxes
+
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=_TIER_PAGE)
+    values: dict[str, Any] = {
+        "Name": {
+            "text": "Gas Delivery Tier 2",
+            "locations": [
+                {"page_number": 1, "bounding_box": [100, 1404, 520, 1440]},  # whole heading
+                {"page_number": 1, "bounding_box": [600, 1476, 1070, 1510]},  # whole tier row
+            ],
+        }
+    }
+    check = verify_boxes(workspace, "f1aaaaaaaaaa", values)
+    assert (check.snapped, check.rejected) == (2, 0)
+    assert values["Name"]["locations"] == [
+        {"page_number": 1, "bounding_box": [100, 1404, 330, 1440]},  # "Gas Delivery"
+        {"page_number": 1, "bounding_box": [800, 1476, 870, 1510]},  # "Tier 2"
+    ]
+
+
+def test_boxes_that_cannot_spell_the_value_together_are_judged_alone(
+    workspace: Workspace,
+) -> None:
+    from dgml_core.matching import verify_boxes
+
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=_TIER_PAGE)
+    values: dict[str, Any] = {
+        "Name": {
+            "text": "Gas Delivery Tier 4",
+            "locations": [
+                {"page_number": 1, "bounding_box": [100, 1404, 520, 1440]},
+                {"page_number": 1, "bounding_box": [600, 1476, 1070, 1510]},
+            ],
+        }
+    }
+    check = verify_boxes(workspace, "f1aaaaaaaaaa", values)
+    assert check.rejected == 2
+    assert values["Name"]["locations"] == [{"page_number": 1}, {"page_number": 1}]
