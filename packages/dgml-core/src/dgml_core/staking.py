@@ -61,7 +61,7 @@ from .errors import (
 from .file_attestation import attest_file, export_attestation
 from .merkle import proof_from_json, proof_to_json
 from .node_attestation import export_node, prove_node
-from .storage import Workspace, read_json
+from .storage import Workspace, read_json, user_config_path
 
 # Receipt polling: how long to wait for inclusion before giving up.
 _POLL_TIMEOUT_S = 120
@@ -72,12 +72,17 @@ _POLL_INTERVAL_S = 2.0
 
 
 def resolve_chain_config_path(ws: Workspace, explicit: Path | None) -> Path:
-    """Resolve where custom chains live: flag → ``$DGML_CHAINS`` → workspace."""
+    """Resolve where custom chains live: flag → ``$DGML_CHAINS`` → workspace.
+
+    A scratch root is removed with the workspace, so custom chains then live beside
+    the user config instead."""
     if explicit is not None:
         return explicit
     env = os.environ.get("DGML_CHAINS")
     if env:
         return Path(env)
+    if ws.scratch:
+        return user_config_path().parent / "chains.json"
     return ws.root / "chains.json"
 
 
@@ -382,6 +387,11 @@ def _default_bundle_dir(ws: Workspace, file_id: str, docset_id: str | None) -> P
     # (`file add --id`), so concatenating makes ("report-v2", "alpha") and
     # ("report", "v2-alpha") collide on one directory. Each id is already a
     # safe single path segment, so a segment apiece is unambiguous.
+    if ws.scratch:
+        # The bundle is reported output; a root removed with the workspace cannot hold it.
+        raise InvalidArgument(
+            "the workspace has no local directory to hold the bundle: pass output_dir"
+        )
     base = ws.root / "dgmlx-bundles" / file_id
     return base / docset_id if docset_id else base
 

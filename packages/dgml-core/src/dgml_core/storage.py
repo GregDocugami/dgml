@@ -76,6 +76,10 @@ class Workspace:
     root, so ``open`` refuses to go without one for it). Excluded from ``__eq__`` for the
     same reason the store is: a workspace's identity is where it is, not who opened it.
 
+    ``scratch`` marks that generated root: it is removed with this object, so nothing
+    lasting may be written under it. Anything that would — a staking bundle, custom
+    chains, the embedding cache — checks the flag and goes elsewhere or refuses.
+
     Whichever way it was configured, :attr:`config` is the one
     :class:`~dgml_core.configuration.Configuration` every reader consults.
     """
@@ -84,17 +88,20 @@ class Workspace:
     config_override: Path | None = None
     workspaces_id: str | None = None
     configuration: Configuration | None = field(default=None, compare=False, repr=False)
+    scratch: bool = field(default=False, compare=False)
 
     def __post_init__(self) -> None:
+        from .errors import InvalidArgument
+
         if self.configuration is not None and (
             self.workspaces_id is not None or self.config_override is not None
         ):
-            from .errors import InvalidArgument
-
             raise InvalidArgument(
                 "a workspace configured in memory takes no workspaces_id or "
                 "config_override: the Configuration is its only config source"
             )
+        if self.scratch and self.configuration is None:
+            raise InvalidArgument("only a workspace configured in memory has a scratch root")
 
     @staticmethod
     def scratch_root() -> Path:
@@ -302,7 +309,7 @@ class Workspace:
                 # The caller's directory: it is the root, and it is not ours to remove.
                 ws = cls(root=local_roots.pop(), configuration=configuration)
             else:
-                ws = cls(root=cls.scratch_root(), configuration=configuration)
+                ws = cls(root=cls.scratch_root(), configuration=configuration, scratch=True)
                 # Ours, not the caller's: removed with the workspace, not left per open.
                 weakref.finalize(ws, shutil.rmtree, ws.root, ignore_errors=True)
         else:
@@ -419,10 +426,12 @@ class Workspace:
         return self.root / layout.FILES_DIR
 
     @property
-    def embedding_cache_dir(self) -> Path:
+    def embedding_cache_dir(self) -> Path | None:
         """Where clustering encoders cache content-hashed embeddings so
         re-embedding unchanged files across runs is cheap. Per-workspace and
-        safe to delete."""
+        safe to delete. ``None`` on a scratch root: nothing is cached there."""
+        if self.scratch:
+            return None
         return self.root / layout.CACHE_DIR / layout.EMBEDDINGS_DIR
 
     # Naming workspace artifacts is :mod:`dgml_core.layout`'s job, not this

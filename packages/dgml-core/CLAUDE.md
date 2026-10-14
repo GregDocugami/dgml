@@ -67,7 +67,8 @@ loader (`load_grounded_config`, `load_ocr_config`, …) reads its sections throu
   `Workspace.open(configuration=cfg)`. No `config.toml`, no user config, no
   `DGML_*` environment, no store of workspaces, nothing written back; the first
   open writes the workspace's meta document to the docstore and later opens check
-  it names the same workspace. `root` is optional when every store is remote (an empty temp dir stands in); the
+  it names the same workspace. `root` is optional when every store is remote (an empty temp dir stands in,
+  flagged `ws.scratch`, which nothing lasting may be written under); the
   local store, whose data it is, cannot be opened without one.
 - **From TOML**, for a workspace addressed by path or id: derived on access from
   the usual merge (user config → workspace config → environment) plus the

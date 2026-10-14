@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 from dgml_chain import ChainConfig
-from dgml_core.errors import ChainTxReverted, RecordNotFound
+from dgml_core.errors import ChainTxReverted, InvalidArgument, RecordNotFound
 from dgml_core.staking import (
     _default_bundle_dir,
     _fetch_record,
@@ -27,8 +27,11 @@ from dgml_core.staking import (
     _finish_stake,
     _wait_for_receipt,
     _wei_to_eth,
+    resolve_chain_config_path,
 )
-from dgml_core.storage import Workspace
+from dgml_core.storage import Workspace, user_config_path
+
+from .conftest import scratch_configuration
 
 
 @pytest.mark.parametrize(
@@ -164,3 +167,21 @@ def test_default_bundle_dir_does_not_collide(tmp_path: Path) -> None:
     assert a != b
     # Without a docset the path stays a single segment under the bundles dir.
     assert _default_bundle_dir(ws, "report-v2", None) == ws.root / "dgmlx-bundles" / "report-v2"
+
+
+def test_scratch_workspace_writes_nothing_lasting_under_its_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scratch root is removed with the workspace: the bundle (reported output)
+    needs an explicit dir, and custom chains live beside the user config."""
+    ws = Workspace.open(configuration=scratch_configuration(monkeypatch))
+    with pytest.raises(InvalidArgument, match="pass output_dir"):
+        _default_bundle_dir(ws, "report", None)
+    monkeypatch.delenv("DGML_CHAINS", raising=False)
+    chains = resolve_chain_config_path(ws, None)
+    assert chains == user_config_path().parent / "chains.json"
+    assert not chains.is_relative_to(ws.root)
+    # Explicit locations still win, as they do everywhere.
+    assert resolve_chain_config_path(ws, tmp_path / "c.json") == tmp_path / "c.json"
+    monkeypatch.setenv("DGML_CHAINS", str(tmp_path / "env.json"))
+    assert resolve_chain_config_path(ws, None) == tmp_path / "env.json"

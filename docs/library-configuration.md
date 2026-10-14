@@ -53,7 +53,9 @@ What this does and does not do:
   store's data *is* the root, so `open` refuses to go without one for it (`INVALID_ARGUMENT`);
   pass `root=`, or set `workspace_path` on the store — which then *is* the root, not a temp
   dir beside it. The check is on the resolved class, so an alias or subclass of the local
-  store is held to the same rule.
+  store is held to the same rule. The temp dir is `ws.scratch`, and nothing lasting goes
+  into it: staking needs an explicit `output_dir` (`INVALID_ARGUMENT` otherwise), custom
+  chains live beside the user config, and clustering runs with no embedding cache.
 - **`Identity.workspace_id` must be a valid workspace id** (3–40 chars of `[a-z0-9_-]`, starting
   with a letter or digit), the same rule `create_workspace` applies: it becomes a directory
   name, an S3 key prefix and a Mongo collection prefix. Normalize your own ids at the edge.
