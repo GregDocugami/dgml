@@ -126,9 +126,13 @@ from .usage import (
     OPERATION_SCHEMA_GENERATE,
     OUTCOME_ERROR,
     OUTCOME_OK,
+    TIERS_KEY,
     UsageEvent,
     add_partial,
+    public_totals,
     record_usage,
+    scope_events,
+    with_tier,
 )
 
 logger = logging.getLogger(__name__)
@@ -1367,28 +1371,29 @@ class _FileExtraction:
         # configs carry no workspace, so they don't each auto-record.
         if self.debug:
             merged_totals = _merge_totals(self.phase1_totals, self.phase3_totals)
-            record_usage(
-                self.workspace,
-                UsageEvent(
-                    at=now_iso(),
-                    operation=OPERATION_EXTRACT_VALUES,
-                    model=self.config.values_model,
-                    cost_usd=merged_totals["cost_usd"],
-                    prompt_tokens=merged_totals["prompt_tokens"],
-                    completion_tokens=merged_totals["completion_tokens"],
-                    total_tokens=merged_totals["total_tokens"],
-                    cache_read_tokens=merged_totals["cache_read_tokens"],
-                    cache_creation_tokens=merged_totals["cache_creation_tokens"],
-                    duration_s=round(time.monotonic() - self.started, 3),
-                    outcome=self.outcome,
-                    context={
-                        "file_id": self.file_id,
-                        "docset_id": self.docset_id,
-                        "tool_calls": self.tool_calls_total,
-                    },
-                    error=self.error_msg,
-                ),
+            event = UsageEvent(
+                at=now_iso(),
+                operation=OPERATION_EXTRACT_VALUES,
+                model=self.config.values_model,
+                cost_usd=merged_totals["cost_usd"],
+                prompt_tokens=merged_totals["prompt_tokens"],
+                completion_tokens=merged_totals["completion_tokens"],
+                total_tokens=merged_totals["total_tokens"],
+                cache_read_tokens=merged_totals["cache_read_tokens"],
+                cache_creation_tokens=merged_totals["cache_creation_tokens"],
+                duration_s=round(time.monotonic() - self.started, 3),
+                outcome=self.outcome,
+                context={
+                    "file_id": self.file_id,
+                    "docset_id": self.docset_id,
+                    "tool_calls": self.tool_calls_total,
+                },
+                error=self.error_msg,
             )
+            # One row, or one per tier when phase 1 and phase 3 responses
+            # were served by different tiers.
+            for part in scope_events(event, merged_totals):
+                record_usage(self.workspace, part)
         # Even on failure, partial numbers help diagnose where we
         # stalled. Wrapped in try/except so telemetry can never break
         # the caller. Suppressed entirely unless the caller opted in
@@ -1485,6 +1490,13 @@ def _merge_totals(*partials: dict[str, Any]) -> dict[str, Any]:
         observations = [p[key] for p in partials if p[key] is not None]
         if observations:
             merged[key] = sum(observations)
+    # The per-tier breakdowns merge alongside (``add_partial`` carries them),
+    # without touching the aggregate sums above.
+    tiers: dict[str, Any] = {}
+    for p in partials:
+        add_partial(tiers, {TIERS_KEY: p.get(TIERS_KEY) or {}})
+    if TIERS_KEY in tiers:
+        merged[TIERS_KEY] = tiers[TIERS_KEY]
     return merged
 
 
@@ -1556,7 +1568,7 @@ def _write_extraction_stats(
                 # reminder (never forced; reachable only where phase 1 runs on
                 # auto tool choice: Anthropic, or a fallback from "required").
                 "no_tool_call_retries": phase1_no_tool_call_retries,
-                **phase1_totals,
+                **public_totals(phase1_totals),
             },
             "phase2": {"duration_s": phase2_duration},
             "phase3": {
@@ -1571,7 +1583,7 @@ def _write_extraction_stats(
                 # 1..page_count, no page image); their items stay unmatched
                 # and no call is made for them.
                 "pages_out_of_range": phase3_pages_out_of_range,
-                **phase3_totals,
+                **public_totals(phase3_totals),
             },
         },
         "matching": {
@@ -1884,7 +1896,7 @@ def phase3_page_steps(
             tool_choice=forced_tool_choice,
         )
         if totals is not None:
-            add_partial(totals, result.usage)
+            add_partial(totals, with_tier(result.usage, result.response, None))
 
         if not result.tool_calls:
             raise ValuesExtractionFailed(f"phase 3 page {page_number}: model returned no tool call")
@@ -2999,7 +3011,7 @@ def _phase1_attempt_steps(
                 f"{_PHASE1_CALL_FAILED}: {type(exc).__name__}: {exc}"
             ) from exc
 
-        add_partial(totals, result.usage)
+        add_partial(totals, with_tier(result.usage, result.response, None))
 
         if result.finish_reason == "length":
             # Without this check a clipped submit_values surfaces as an
