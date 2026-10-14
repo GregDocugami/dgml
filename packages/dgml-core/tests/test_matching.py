@@ -1632,8 +1632,20 @@ def test_box_on_the_value_is_kept(workspace: Workspace) -> None:
     assert _verify(workspace, "47,750", [1003, 100, 1105, 130])[0] == 0
 
 
-def test_loose_box_that_takes_in_the_label_is_kept(workspace: Workspace) -> None:
-    assert _verify(workspace, "48216", [1400, 100, 1600, 130])[0] == 0
+def test_loose_box_that_takes_in_the_label_is_tightened(workspace: Workspace) -> None:
+    """A box over "Total Therms 48216" for the value 48216 is right about the
+    place but too wide: it shrinks to the words that spell the value."""
+    assert _verify(workspace, "48216", [1400, 100, 1600, 130]) == (
+        1,
+        [{"page_number": 1, "bounding_box": [1507, 100, 1600, 130]}],
+    )
+
+
+def test_box_over_the_whole_row_is_tightened_to_the_cell(workspace: Workspace) -> None:
+    assert _verify(workspace, "1.025", [671, 100, 1600, 130]) == (
+        1,
+        [{"page_number": 1, "bounding_box": [1300, 100, 1380, 130]}],
+    )
 
 
 def test_box_holding_one_line_of_a_wrapped_value_is_kept(workspace: Workspace) -> None:

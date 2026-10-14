@@ -360,6 +360,23 @@ def _run_spells(parts: list[str], key: str) -> bool:
     return False
 
 
+def _spelling_run(words: list[_Word], key: str) -> list[_Word] | None:
+    """The words of the first contiguous run of *words* that spells *key*,
+    when that run leaves other words in the box out — a box over a whole row,
+    or over a label and its value. ``None`` when every word is part of the
+    value, or no run spells it."""
+    keys = [_box_key(w.text) for w in words]
+    for i in range(len(keys)):
+        run = ""
+        for j in range(i, len(keys)):
+            run += keys[j]
+            if run == key:
+                return words[i : j + 1] if j - i + 1 < len(words) else None
+            if len(run) >= len(key):
+                break
+    return None
+
+
 # Letters OCR commonly reads in place of a digit ("1O0" for "100").
 _OCR_DIGIT_LOOKALIKES = str.maketrans("oilszb", "011528")
 
@@ -508,7 +525,15 @@ def verify_boxes(workspace: Workspace, file_id: str, values: Any) -> BoxCheck:
                 checked.append(loc)
                 continue
             box, page = loc["bounding_box"], loc["page_number"]
-            if _box_agrees(inside, key, one_of_several=wrapped):
+            run = None if wrapped else _spelling_run(inside, key)
+            if run is not None:
+                # A loose box (the whole row, or the label too): the run of
+                # its words that spells the value is the value — box that.
+                tight = [{"page_number": page, "bounding_box": b} for b in _line_boxes(run)]
+                checked.extend(tight)
+                snapped_locs.extend(tight)
+                snapped += 1
+            elif _box_agrees(inside, key, one_of_several=wrapped):
                 checked.append(loc)
             elif (moved := _snap_to_line(page_words(page), text, box, page)) is not None:
                 checked.extend(moved)
