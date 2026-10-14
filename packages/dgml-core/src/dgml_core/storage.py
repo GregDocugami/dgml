@@ -278,42 +278,52 @@ class Workspace:
         configuration.identity.require_complete()
         ident = configuration.identity
         assert ident.workspace_id and ident.name and ident.organization  # require_complete
-        if root is None:
-            # The local store's data *is* the root, so a scratch dir would vanish with
-            # this object. Decided on the resolved class, not the provider string — an
-            # alias or a subclass is still the local store. One told where to live
-            # (`workspace_path`) makes that the root, so everything that reads `ws.root`
-            # directly sees the tree the store actually writes.
-            from .storage_local import LocalStore
-            from .storage_resolve import _import_store_class
-            from .storage_service import BlobStore, DocStore
+        # The local store's data *is* the root, so everything that reads `ws.root`
+        # directly must see the tree the store actually writes:
+        #   1. For each local store, record its `workspace_path`, or refuse right there
+        #      if it has none and no `root=` was given.
+        #   2. Refuse if blobs and docs declared different paths.
+        #   3. If no `root=`, take the declared one (or none); if there is a `root=`,
+        #      refuse when it disagrees with the declared one.
+        #   4. A root is the caller's directory, not ours to remove; none means scratch.
+        # "Local store" is decided on the resolved class, not the provider string — an
+        # alias or a subclass is still the local store. A value the store itself would
+        # reject (blank, relative) is left to it: it fails on first use.
+        from .storage_local import LocalStore
+        from .storage_resolve import _import_store_class
+        from .storage_service import BlobStore, DocStore
 
-            storage = configuration.storage
-            local_roots: set[Path] = set()
-            for spec, base in ((storage.blobs, BlobStore), (storage.docs, DocStore)):
-                if not issubclass(_import_store_class(spec.provider, base), LocalStore):
-                    continue
-                declared = spec.options.get("workspace_path")
-                if not isinstance(declared, str) or not declared:
-                    raise InvalidArgument(
-                        "the local store's data is the workspace root: pass root= to "
-                        "Workspace.open(configuration=…), or set 'workspace_path' on the store"
-                    )
-                local_roots.add(Path(declared).expanduser().resolve())
-            if len(local_roots) > 1:
+        storage = configuration.storage
+        declared_roots: set[Path] = set()
+        for spec, base in ((storage.blobs, BlobStore), (storage.docs, DocStore)):
+            if not issubclass(_import_store_class(spec.provider, base), LocalStore):
+                continue
+            declared = spec.options.get("workspace_path")
+            if isinstance(declared, str) and declared:
+                declared_roots.add(Path(declared).expanduser().resolve())
+            elif root is None:
                 raise InvalidArgument(
-                    "blobs and docs name different 'workspace_path' values; a workspace has "
-                    "one root"
+                    "the local store's data is the workspace root: pass root= to "
+                    "Workspace.open(configuration=…), or set 'workspace_path' on the store"
                 )
-            if local_roots:
-                # The caller's directory: it is the root, and it is not ours to remove.
-                ws = cls(root=local_roots.pop(), configuration=configuration)
-            else:
-                ws = cls(root=cls.scratch_root(), configuration=configuration, scratch=True)
-                # Ours, not the caller's: removed with the workspace, not left per open.
-                weakref.finalize(ws, shutil.rmtree, ws.root, ignore_errors=True)
-        else:
+        if len(declared_roots) > 1:
+            raise InvalidArgument(
+                "blobs and docs name different 'workspace_path' values; a workspace has one root"
+            )
+        if root is None:
+            root = next(iter(declared_roots), None)
+        elif declared_roots and root.resolve() not in declared_roots:
+            raise InvalidArgument(
+                f"root= ({root}) and the local store's 'workspace_path' "
+                f"({next(iter(declared_roots))}) disagree; a workspace has one root"
+            )
+        if root is not None:
+            # The caller's directory: it is the root, and it is not ours to remove.
             ws = cls(root=root, configuration=configuration)
+        else:
+            ws = cls(root=cls.scratch_root(), configuration=configuration, scratch=True)
+            # Ours, not the caller's: removed with the workspace, not left per open.
+            weakref.finalize(ws, shutil.rmtree, ws.root, ignore_errors=True)
         meta = ws.read_meta()
         if not meta:
             ws.write_meta(

@@ -191,6 +191,20 @@ def test_local_store_alias_without_a_root_is_refused() -> None:
         Workspace.open(configuration=alias)
 
 
+def test_root_must_agree_with_workspace_path(tmp_path: Path) -> None:
+    """An explicit `root=` beside a `workspace_path` is fine when they are the same
+    directory (however spelled) and refused when they are not: `ws.root` must be the
+    tree the store writes, or every direct reader of it looks at the wrong place."""
+    cfg = _pinned(tmp_path / "ws")
+    ws = Workspace.open(configuration=cfg, root=tmp_path / "ws")
+    assert ws.root == (tmp_path / "ws").resolve()
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "ws")
+    Workspace.open(configuration=cfg, root=link)  # another spelling of the same place
+    with pytest.raises(InvalidArgument, match="disagree"):
+        Workspace.open(configuration=cfg, root=tmp_path / "elsewhere")
+
+
 def test_blobs_and_docs_with_different_workspace_paths_are_refused(tmp_path: Path) -> None:
     split = Configuration.build(
         identity=Identity(workspace_id="tenant-1", name="Tenant", organization="TenantOrg"),

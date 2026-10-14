@@ -61,7 +61,7 @@ from .errors import (
 from .file_attestation import attest_file, export_attestation
 from .merkle import proof_from_json, proof_to_json
 from .node_attestation import export_node, prove_node
-from .storage import Workspace, read_json, user_config_path
+from .storage import Workspace, read_json
 
 # Receipt polling: how long to wait for inclusion before giving up.
 _POLL_TIMEOUT_S = 120
@@ -71,19 +71,17 @@ _POLL_INTERVAL_S = 2.0
 # --- configuration -----------------------------------------------------------
 
 
-def resolve_chain_config_path(ws: Workspace, explicit: Path | None) -> Path:
+def resolve_chain_config_path(ws: Workspace, explicit: Path | None) -> Path | None:
     """Resolve where custom chains live: flag → ``$DGML_CHAINS`` → workspace.
 
-    A scratch root is removed with the workspace, so custom chains then live beside
-    the user config instead."""
+    ``None`` on a scratch root: it is removed with the workspace, so it keeps no
+    custom chains — built-ins only, unless the caller names a path."""
     if explicit is not None:
         return explicit
     env = os.environ.get("DGML_CHAINS")
     if env:
         return Path(env)
-    if ws.scratch:
-        return user_config_path().parent / "chains.json"
-    return ws.root / "chains.json"
+    return None if ws.scratch else ws.root / "chains.json"
 
 
 def _chain_store(ws: Workspace, config_path: Path | None) -> ChainStore:
@@ -412,11 +410,13 @@ def stake_file(
     service: str = DEFAULT_SERVICE,
     account: str = DEFAULT_ACCOUNT,
 ) -> dict[str, Any]:
+    # Resolved first: on a scratch root it is the one argument that can be missing,
+    # so it fails before the chain config is read or the keychain is touched.
+    out_dir = output_dir or _default_bundle_dir(ws, file_id, docset_id)
     chain = get_chain(ws, chain_name, config_path)
     sender = _resolve_from(from_address, service, account)
     rpc, anchor = _clients(chain)
 
-    out_dir = output_dir or _default_bundle_dir(ws, file_id, docset_id)
     # Default writes only the portable <stem>.dgmlx archive into out_dir;
     # --unpacked materializes the loose bundle tree there instead. Exactly one of
     # attestation_path (loose META-INF/dgml-attestation.xml) / archive_path is set,
@@ -470,6 +470,9 @@ def stake_node(
     service: str = DEFAULT_SERVICE,
     account: str = DEFAULT_ACCOUNT,
 ) -> dict[str, Any]:
+    # A dry run writes nothing, so it needs no bundle dir; a broadcast does, and must
+    # know it before anything is anchored, not after.
+    save_dir = output_dir or (None if dry_run else _default_bundle_dir(ws, file_id, docset_id))
     chain = get_chain(ws, chain_name, config_path)
     sender = _resolve_from(from_address, service, account)
     rpc, anchor = _clients(chain)
@@ -493,7 +496,7 @@ def stake_node(
             "xpath": att.xpath,
             "root_hash": att.root_hash,
         },
-        save_dir=output_dir or _default_bundle_dir(ws, file_id, docset_id),
+        save_dir=save_dir,
         record_name=f"record-node-{att.leaf_index}.json",
         dry_run=dry_run,
         legacy=legacy,
@@ -513,7 +516,7 @@ def _anchor_record(
     checksum: str,
     metadata: str,
     extra: dict[str, Any],
-    save_dir: Path,
+    save_dir: Path | None,
     record_name: str,
     dry_run: bool,
     legacy: bool,
@@ -524,7 +527,8 @@ def _anchor_record(
     the unsigned+signed tx (dry run) or broadcast and persist the record.
 
     ``extra`` carries the granularity-specific fields (bundle vs node); the
-    chain/registry/uri/checksum/tx fields are common to both."""
+    chain/registry/uri/checksum/tx fields are common to both. ``save_dir`` may be
+    ``None`` only on a dry run, which persists nothing."""
     registry_id = _resolve_registry_id(anchor, registry)
     data = encode_add_record(
         registry_id=registry_id,
@@ -552,6 +556,7 @@ def _anchor_record(
         out["unsigned_tx"] = unsigned
         out["signed_tx"] = signed["signed_tx"]
         return out
+    assert save_dir is not None  # callers resolve it before a broadcast
     return _finish_stake(
         rpc, anchor, chain, signed, out, registry_id, checksum, uri, save_dir, record_name
     )

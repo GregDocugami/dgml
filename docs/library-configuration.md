@@ -52,10 +52,12 @@ What this does and does not do:
   its local-only paths, removed when the `Workspace` is garbage-collected. The bundled local
   store's data *is* the root, so `open` refuses to go without one for it (`INVALID_ARGUMENT`);
   pass `root=`, or set `workspace_path` on the store — which then *is* the root, not a temp
-  dir beside it. The check is on the resolved class, so an alias or subclass of the local
-  store is held to the same rule. The temp dir is `ws.scratch`, and nothing lasting goes
-  into it: staking needs an explicit `output_dir` (`INVALID_ARGUMENT` otherwise), custom
-  chains live beside the user config, and clustering runs with no embedding cache.
+  dir beside it (a `root=` that names a different directory is refused). The check is on
+  the resolved class, so an alias or subclass of the local store is held to the same rule.
+  The temp dir is `ws.scratch`, and nothing lasting goes into it: staking a file, or
+  broadcasting a node stake, needs an explicit `output_dir` (`INVALID_ARGUMENT`
+  otherwise; a node dry run writes nothing and needs none), custom chains need an explicit
+  `config_path` (built-ins work without one), and clustering runs with no embedding cache.
 - **`Identity.workspace_id` must be a valid workspace id** (3–40 chars of `[a-z0-9_-]`, starting
   with a letter or digit), the same rule `create_workspace` applies: it becomes a directory
   name, an S3 key prefix and a Mongo collection prefix. Normalize your own ids at the edge.
