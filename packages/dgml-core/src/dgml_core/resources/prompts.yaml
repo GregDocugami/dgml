@@ -309,6 +309,25 @@ extraction_values_phase1_retry_chunked: |-
   the first ``submit_values`` call — their ``derived_from`` paths may
   reference entries appended afterwards.
 
+# Added to the phase-1 user prompt, ahead of the PDF, only when the provider
+# refused the whole document as too large and it is sent as page-range parts
+# (each extracted separately, then merged in code). .format()'d with
+# {first_page}, {last_page}, {total_pages}.
+extraction_values_phase1_part: |-
+  DOCUMENT PART. This {total_pages}-page document is too large for one
+  request, so it is sent in page-range parts that are extracted separately
+  and merged afterwards. The attached PDF holds only pages
+  {first_page}-{last_page} of the document.
+
+  - Extract the values that appear on these pages. Leave out any field
+    whose value is not on these pages (another part supplies it) instead
+    of guessing it or submitting it empty.
+  - For arrays, submit only the entries that appear on these pages, in
+    document order.
+  - Computed fields may derive only from values on these pages.
+  - Give every ``page_number`` relative to the attached PDF: its first
+    page is page 1 (page {first_page} of the full document).
+
 # Sent as a user turn when a phase-1 reply carries no tool call (plain text
 # instead of a submission), before the loop retries the model. Phase 1 offers
 # only submit_values (plus append_entries when chunked), so name no other tool.

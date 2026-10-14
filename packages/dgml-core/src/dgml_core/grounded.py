@@ -178,16 +178,30 @@ _DEFAULT_REASONING_EFFORT = "high"
 # ``tool_choice``, so the LLM wrapper drops ``reasoning_effort`` for
 # Anthropic-routed models and the value would be inert there on Claude — but it
 # is NOT dropped for other providers. Location grounding on pages with OCR words
-# keeps the default; see _PHASE3_GRID_REASONING_EFFORT for pages without them.
+# takes ``grounded.locations_reasoning_effort`` (_LOCATIONS_REASONING_EFFORT
+# unless the workspace sets it); see _PHASE3_GRID_REASONING_EFFORT for pages
+# without them.
 _VALUES_REASONING_EFFORT = "medium"
 
-# What ``grounded.values_reasoning_effort`` (and ``--values-effort``) accept: the
+# What ``grounded.values_reasoning_effort`` (``--values-effort``) and
+# ``grounded.locations_reasoning_effort`` (``--locations-effort``) accept: the
 # effort names litellm takes, sent as given, plus ``"default"``, which sends no
 # ``reasoning_effort`` at all and leaves the budget to the provider. ``"none"``
 # is litellm's own value and is sent (it asks the provider to turn thinking
-# off), which is why omitting the field needs a word of its own.
-VALUES_REASONING_EFFORT_CHOICES = ("none", "minimal", "low", "medium", "high", "xhigh")
-VALUES_REASONING_EFFORT_PROVIDER_DEFAULT = "default"
+# off), which is why omitting the field needs a word of its own. The names
+# are checked here, not against what the model supports: a budget the
+# provider refuses fails at the call that sends it.
+REASONING_EFFORT_CHOICES = ("none", "minimal", "low", "medium", "high", "xhigh")
+REASONING_EFFORT_PROVIDER_DEFAULT = "default"
+# The names these had when only the values effort was configurable.
+VALUES_REASONING_EFFORT_CHOICES = REASONING_EFFORT_CHOICES
+VALUES_REASONING_EFFORT_PROVIDER_DEFAULT = REASONING_EFFORT_PROVIDER_DEFAULT
+
+# Location grounding on a page with OCR words (phase 3) runs at the general
+# default unless ``grounded.locations_reasoning_effort`` says otherwise. This
+# is the one owner of that default: GroundedConfig carries it and the phase-3
+# functions take the configured value as a required argument.
+_LOCATIONS_REASONING_EFFORT = _DEFAULT_REASONING_EFFORT
 
 # Location grounding on a page with no OCR words (the 0-1000 grid path) runs at
 # "medium". There the model only reads a position off the image; at "high" it
@@ -195,7 +209,8 @@ VALUES_REASONING_EFFORT_PROVIDER_DEFAULT = "default"
 # on Gemini over 30 records-retrieval documents, most of them scans, 3 repeats:
 # "medium" placed as many boxes on scanned pages as "high", for about half the
 # grounding cost; "low" was cheaper again but started to miss boxes. Pages with
-# words keep the default, which that measurement did not cover.
+# words take ``grounded.locations_reasoning_effort`` (default
+# _LOCATIONS_REASONING_EFFORT), which that measurement did not cover.
 _PHASE3_GRID_REASONING_EFFORT = "medium"
 
 
@@ -277,25 +292,38 @@ class GroundedConfig:
     values_api_base: str | None = None
     max_tool_iters: int = DEFAULT_MAX_TOOL_ITERS
     # Reasoning budget of the value-extraction call (phase 1). ``None`` sends no
-    # ``reasoning_effort``; location grounding keeps its own constants.
+    # ``reasoning_effort``.
     values_reasoning_effort: str | None = _VALUES_REASONING_EFFORT
+    # Reasoning budget of location grounding (phase 3) on a page with OCR
+    # words. ``None`` sends no ``reasoning_effort``. Anthropic models drop it
+    # either way (the call forces its tool); every other provider sends it,
+    # and at the default it is the larger half of a Gemini values model's
+    # latency. A page on the no-words grid path keeps _PHASE3_GRID_REASONING_EFFORT.
+    # Checked by name only: a budget the model refuses fails in phase 3, after
+    # the values call has been paid for, on the first page that needs grounding.
+    locations_reasoning_effort: str | None = _LOCATIONS_REASONING_EFFORT
 
 
-def parse_values_reasoning_effort(raw: Any, *, source: str) -> str | None:
-    """Validate a values reasoning effort from the config file or the CLI.
+def parse_reasoning_effort(raw: Any, *, source: str) -> str | None:
+    """Validate a reasoning effort (values or locations) from the config file
+    or the CLI.
 
     Returns the effort to send, or ``None`` for ``"default"`` (send nothing).
-    ``source`` names where the value came from, for the error message.
+    ``source`` names where the value came from, for the error message. The
+    name is checked, not the model's support for it.
     """
-    if raw == VALUES_REASONING_EFFORT_PROVIDER_DEFAULT:
+    if raw == REASONING_EFFORT_PROVIDER_DEFAULT:
         return None
-    if isinstance(raw, str) and raw in VALUES_REASONING_EFFORT_CHOICES:
+    if isinstance(raw, str) and raw in REASONING_EFFORT_CHOICES:
         return raw
     accepted = ", ".join(
-        repr(v)
-        for v in (*VALUES_REASONING_EFFORT_CHOICES, VALUES_REASONING_EFFORT_PROVIDER_DEFAULT)
+        repr(v) for v in (*REASONING_EFFORT_CHOICES, REASONING_EFFORT_PROVIDER_DEFAULT)
     )
     raise GroundedConfigInvalid(f"{source} must be one of {accepted} if set (got {raw!r})")
+
+
+# The parser's name when only the values effort was configurable.
+parse_values_reasoning_effort = parse_reasoning_effort
 
 
 def load_grounded_config(
@@ -350,11 +378,18 @@ def load_grounded_config(
     ):
         raise GroundedConfigInvalid("'grounded.max_tool_iters' must be a positive integer if set")
     values_reasoning_effort = (
-        parse_values_reasoning_effort(
+        parse_reasoning_effort(
             sec["values_reasoning_effort"], source="'grounded.values_reasoning_effort'"
         )
         if "values_reasoning_effort" in sec
         else _VALUES_REASONING_EFFORT
+    )
+    locations_reasoning_effort = (
+        parse_reasoning_effort(
+            sec["locations_reasoning_effort"], source="'grounded.locations_reasoning_effort'"
+        )
+        if "locations_reasoning_effort" in sec
+        else _LOCATIONS_REASONING_EFFORT
     )
 
     return GroundedConfig(
@@ -368,6 +403,7 @@ def load_grounded_config(
         values_api_base=values.api_base,
         max_tool_iters=max_tool_iters_raw,
         values_reasoning_effort=values_reasoning_effort,
+        locations_reasoning_effort=locations_reasoning_effort,
     )
 
 
@@ -936,6 +972,7 @@ def extract_values(
     phase1_tool_schema_mode = "inlined"
     phase1_chunk_calls = 0
     phase1_truncated_retries = 0
+    phase1_pdf_parts: list[tuple[int, int]] = []
     phase1_counters = {"envelope_repairs": 0, "no_tool_call_retries": 0}
 
     try:
@@ -954,7 +991,9 @@ def extract_values(
         # after, so the cached prefix is unchanged between the two attempts.
         schema_text = _values_phase1_user_prompt(phase1_schema, guidance)
 
-        def _phase1_messages(*, chunked: bool) -> list[dict[str, Any]]:
+        def _phase1_messages(
+            *, chunked: bool, pdf: bytes, part: _PdfPart | None
+        ) -> list[dict[str, Any]]:
             # Rebuilt per attempt — _run_extract_loop mutates its message list.
             anthropic = is_anthropic_model(config.values_model)
             schema_block: dict[str, Any] = {"type": "text", "text": schema_text}
@@ -969,7 +1008,11 @@ def extract_values(
                 user_content.append(
                     {"type": "text", "text": prompt(PromptKey.VALUES_PHASE1_RETRY_CHUNKED)}
                 )
-            user_content.append(_pdf_content_block(pdf_bytes))
+            if part is not None:
+                # Only when the whole document was refused as too large. After
+                # the schema block, so its cache entry still serves every part.
+                user_content.append({"type": "text", "text": part.prompt_text()})
+            user_content.append(_pdf_content_block(pdf))
             if anthropic and chunked:
                 # The per-file PDF earns a breakpoint only here. Chunked mode
                 # is several turns over one unchanged prefix, so turns after
@@ -992,44 +1035,68 @@ def extract_values(
         # re-raises once its own latch is set, the loop runs at most three
         # attempts (initial + one per latch) before terminating.
         chunked = False
-        while True:
-            tool_schema = (
-                _PERMISSIVE_VALUES_PARAM
-                if phase1_tool_schema_mode == "permissive"
-                else phase1_tool_schema
-            )
-            try:
-                phase1_args, phase1_tool_calls, phase1_chunk_calls = _run_extract_loop(
-                    workspace=workspace,
-                    file_id=file_id,
-                    vocab=vocab,
-                    counters=phase1_counters,
-                    messages=_phase1_messages(chunked=chunked),
-                    tools=_phase1_tools(tool_schema, chunked=chunked),
-                    chunked=chunked,
-                    model=config.values_model,
-                    api_key=api_key,
-                    api_base=api_base,
-                    max_tool_iters=config.max_tool_iters,
-                    totals=phase1_totals,
-                    reasoning_effort=config.values_reasoning_effort,
+
+        def _phase1_run(pdf: bytes, part: _PdfPart | None) -> tuple[dict[str, Any], int, int]:
+            nonlocal chunked, phase1_tool_schema_mode, phase1_truncated_retries
+            while True:
+                tool_schema = (
+                    _PERMISSIVE_VALUES_PARAM
+                    if phase1_tool_schema_mode == "permissive"
+                    else phase1_tool_schema
                 )
-                break
-            except _OutputTruncated as exc:
-                if chunked:
-                    raise ValuesExtractionFailed(
-                        f"{exc} The chunked-submission retry was truncated too; "
-                        "consider a model with a higher output ceiling or "
-                        "splitting the document."
-                    ) from exc
-                chunked = True
-                phase1_truncated_retries += 1
-            except ValuesExtractionFailed as exc:
-                if phase1_tool_schema_mode == "permissive" or not _is_tool_schema_too_large(exc):
-                    raise
-                # Gemini's constrained decoder rejected the inlined schema;
-                # the model still sees the full schema in the user prompt.
-                phase1_tool_schema_mode = "permissive"
+                try:
+                    return _run_extract_loop(
+                        workspace=workspace,
+                        file_id=file_id,
+                        vocab=vocab,
+                        counters=phase1_counters,
+                        messages=_phase1_messages(chunked=chunked, pdf=pdf, part=part),
+                        tools=_phase1_tools(tool_schema, chunked=chunked),
+                        chunked=chunked,
+                        model=config.values_model,
+                        api_key=api_key,
+                        api_base=api_base,
+                        max_tool_iters=config.max_tool_iters,
+                        totals=phase1_totals,
+                        reasoning_effort=config.values_reasoning_effort,
+                        page_offset=part.first_page - 1 if part is not None else 0,
+                    )
+                except _OutputTruncated as exc:
+                    if chunked:
+                        raise ValuesExtractionFailed(
+                            f"{exc} The chunked-submission retry was truncated too; "
+                            "consider a model with a higher output ceiling or "
+                            "splitting the document."
+                        ) from exc
+                    chunked = True
+                    phase1_truncated_retries += 1
+                except ValuesExtractionFailed as exc:
+                    if phase1_tool_schema_mode == "permissive" or not _is_tool_schema_too_large(
+                        exc
+                    ):
+                        raise
+                    # Gemini's constrained decoder rejected the inlined schema;
+                    # the model still sees the full schema in the user prompt.
+                    phase1_tool_schema_mode = "permissive"
+
+        # The whole PDF goes in one request, as it always has. Only when the
+        # provider refuses that request as too large is the document split
+        # into page ranges, halving until each part is accepted.
+        try:
+            phase1_args, phase1_tool_calls, phase1_chunk_calls = _phase1_run(pdf_bytes, None)
+        except ValuesExtractionFailed as exc:
+            if not is_request_too_large(exc):
+                raise
+            parts = _phase1_in_parts(
+                workspace,
+                file_id,
+                pdf_bytes,
+                model=config.values_model,
+                run=_phase1_run,
+                refused=exc,
+            )
+            phase1_args, phase1_tool_calls, phase1_chunk_calls = _merge_parts(parts)
+            phase1_pdf_parts = [(p.first_page, p.last_page) for p, _ in parts]
         phase1_duration = round(time.monotonic() - phase1_started, 3)
         # Keys that name no schema root, and roots whose value has the wrong
         # shape, are dropped at serialization (the writer walks vocab.roots).
@@ -1121,6 +1188,7 @@ def extract_values(
                 api_base=api_base,
                 max_tool_iters=config.max_tool_iters,
                 totals=phase3_totals,
+                reasoning_effort=config.locations_reasoning_effort,
             )
         unmatched_count = phase2_result.stats.unmatched_locations - phase3_matched
         phase3_duration = round(time.monotonic() - phase3_started, 3)
@@ -1235,6 +1303,7 @@ def extract_values(
                     phase1_tool_schema=phase1_tool_schema_mode,
                     phase1_chunk_calls=phase1_chunk_calls,
                     phase1_truncated_retries=phase1_truncated_retries,
+                    phase1_pdf_parts=phase1_pdf_parts,
                     phase1_envelope_repairs=phase1_counters["envelope_repairs"],
                     phase1_no_tool_call_retries=phase1_counters["no_tool_call_retries"],
                 )
@@ -1306,6 +1375,7 @@ def _write_extraction_stats(
     phase1_truncated_retries: int,
     phase1_envelope_repairs: int,
     phase1_no_tool_call_retries: int,
+    phase1_pdf_parts: list[tuple[int, int]] | None = None,
 ) -> None:
     """Write ``extraction_stats.json`` into the file's marker directory.
 
@@ -1328,6 +1398,10 @@ def _write_extraction_stats(
                 # times phase 1 was restarted with the explicit chunking
                 # directive after a finish_reason='length' truncation.
                 "truncated_retries": phase1_truncated_retries,
+                # [first_page, last_page] of each page-range part, present only
+                # when the provider refused the whole document as too large and
+                # phase 1 ran once per part.
+                **({"pdf_parts": [list(p) for p in phase1_pdf_parts]} if phase1_pdf_parts else {}),
                 # submit_values calls whose envelope had to be repaired before
                 # the tree could be read (see _repair_submit_values_args).
                 "envelope_repairs": phase1_envelope_repairs,
@@ -1434,6 +1508,7 @@ def _run_phase3(
     api_base: str | None,
     max_tool_iters: int,
     totals: dict[str, Any],
+    reasoning_effort: str | None,
 ) -> tuple[dict[str, Any], int, int, int, int]:
     """Resolve ``unmatched`` items via one LLM call per page, run in
     parallel across pages.
@@ -1477,6 +1552,7 @@ def _run_phase3(
             api_base=api_base,
             max_tool_iters=max_tool_iters,
             totals=local_totals,
+            reasoning_effort=reasoning_effort,
         )
         return page, items, page_result, local_totals
 
@@ -1524,6 +1600,7 @@ def _phase3_call_for_page(
     api_base: str | None,
     max_tool_iters: int,
     totals: dict[str, Any],
+    reasoning_effort: str | None,
 ) -> _Phase3PageResult:
     """One litellm call: send the page + ids that need locating, return
     ``{id: [{page_number, bounding_box}, ...]}`` parsed from the model's
@@ -1581,7 +1658,12 @@ def _phase3_call_for_page(
 
     # reasoning_effort is set unconditionally — the wrapper drops it for
     # Anthropic-routed models because tool_choice forces a function call
-    # below, and Anthropic rejects extended thinking with forced tools.
+    # below, and Anthropic rejects extended thinking with forced tools. A
+    # page with OCR words takes the configured locations effort
+    # (``grounded.locations_reasoning_effort``, ``None`` = send none); the
+    # no-words grid path keeps its own constant. The effort was checked by name
+    # at load time, not against the model: one the provider refuses fails here,
+    # after phase 1 has been paid for.
     llm_config = LLMConfig(
         model=model,
         api_key=api_key,
@@ -1590,7 +1672,7 @@ def _phase3_call_for_page(
         max_completion_tokens=_DEFAULT_MAX_COMPLETION_TOKENS,
         temperature=_DEFAULT_VALUES_TEMPERATURE,
         timeout=_DEFAULT_TIMEOUT_SECONDS,
-        reasoning_effort=_PHASE3_GRID_REASONING_EFFORT if normalized else _DEFAULT_REASONING_EFFORT,
+        reasoning_effort=_PHASE3_GRID_REASONING_EFFORT if normalized else reasoning_effort,
     )
     forced_tool_choice = {
         "type": "function",
@@ -1948,6 +2030,215 @@ def _merge_values(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]
     return base
 
 
+# ---- Phase 1 over page-range parts (a document refused as too large) ------
+
+
+@dataclass(frozen=True)
+class _PdfPart:
+    """One page range of a document, sent to phase 1 as its own PDF."""
+
+    first_page: int
+    last_page: int
+    total_pages: int
+
+    def prompt_text(self) -> str:
+        return prompt(PromptKey.VALUES_PHASE1_PART).format(
+            first_page=self.first_page,
+            last_page=self.last_page,
+            total_pages=self.total_pages,
+        )
+
+
+_Phase1Run = tuple[dict[str, Any], int, int]
+
+
+def _phase1_in_parts(
+    workspace: Workspace,
+    file_id: str,
+    pdf_bytes: bytes,
+    *,
+    model: str,
+    run: Callable[[bytes, _PdfPart | None], _Phase1Run],
+    refused: ValuesExtractionFailed,
+) -> list[tuple[_PdfPart, _Phase1Run]]:
+    """Run phase 1 over page ranges of a document whose whole-PDF request the
+    provider refused as too large (*refused*).
+
+    The document is cut in half, and any half the provider refuses too is cut
+    again, until each part is accepted. Parts are sliced with the workspace's
+    PDF engine, the same one generation's windows use. Returns each part with
+    its phase-1 result, in document order. A single page that is still too
+    large fails the file.
+    """
+    record_count = FileStore(workspace).get(file_id).page_count
+    try:
+        page_count = (
+            record_count
+            if isinstance(record_count, int) and record_count > 0
+            else pdf_page_count_bytes(pdf_bytes)
+        )
+        pdf_config = load_pdf_config(workspace)
+    except Exception as exc:
+        raise ValuesExtractionFailed(
+            f"{refused} The document could not be split into page ranges: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if page_count <= 1:
+        raise ValuesExtractionFailed(
+            f"page 1 alone is too large for one extraction request to {model!r}: {refused}"
+        ) from refused
+    logger.info(
+        "extraction: %s refused file %s (%d pages, %d bytes) as too large for one "
+        "request; sending it in page ranges",
+        model,
+        file_id,
+        page_count,
+        len(pdf_bytes),
+    )
+
+    def attempt(first: int, last: int) -> list[tuple[_PdfPart, _Phase1Run]]:
+        try:
+            sliced = slice_pages(
+                pdf_bytes, range(first, last + 1), config=pdf_config, total_pages=page_count
+            )
+        except Exception as exc:
+            raise ValuesExtractionFailed(
+                f"{refused} Slicing pages {first}-{last} out of it failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        part = _PdfPart(first_page=first, last_page=last, total_pages=page_count)
+        try:
+            return [(part, run(sliced, part))]
+        except ValuesExtractionFailed as exc:
+            if not is_request_too_large(exc):
+                raise
+            if first == last:
+                raise ValuesExtractionFailed(
+                    f"page {first} alone is too large for one extraction request "
+                    f"to {model!r}: {exc}"
+                ) from exc
+            mid = (first + last) // 2
+            return attempt(first, mid) + attempt(mid + 1, last)
+
+    mid = (1 + page_count) // 2
+    return attempt(1, mid) + attempt(mid + 1, page_count)
+
+
+def _merge_parts(parts: list[tuple[_PdfPart, _Phase1Run]]) -> _Phase1Run:
+    """Combine the phase-1 results of a document's parts into one, as if the
+    whole document had been read at once: page numbers go back to the
+    document's, values merge in document order (see :func:`_merge_part_values`),
+    the first part to describe an array's layout wins, and the counts add up."""
+    values: dict[str, Any] = {}
+    merged_layout: dict[str, Any] = {}
+    tool_calls = chunk_calls = 0
+    for part, (args, part_tool_calls, part_chunk_calls) in parts:
+        part_values = args["values"]
+        _offset_page_numbers(part_values, part.first_page - 1)
+        _merge_part_values(values, part_values)
+        part_layout = args.get("layout")
+        if isinstance(part_layout, dict):
+            for key, value in part_layout.items():
+                merged_layout.setdefault(key, value)
+        tool_calls += part_tool_calls
+        chunk_calls += part_chunk_calls
+    merged: dict[str, Any] = {"values": values}
+    if merged_layout:
+        merged["layout"] = merged_layout
+    return merged, tool_calls, chunk_calls
+
+
+def _offset_page_numbers(values: Any, offset: int) -> None:
+    """Shift every location's ``page_number`` by *offset*, in place: a part's
+    values number its own PDF's pages from 1."""
+    if not offset:
+        return
+    if isinstance(values, dict):
+        locations = values.get("locations")
+        if "text" in values and isinstance(locations, list):
+            for loc in locations:
+                page = loc.get("page_number") if isinstance(loc, dict) else None
+                if isinstance(page, int) and not isinstance(page, bool):
+                    loc["page_number"] = page + offset
+            return
+        for value in values.values():
+            _offset_page_numbers(value, offset)
+    elif isinstance(values, list):
+        for value in values:
+            _offset_page_numbers(value, offset)
+
+
+def _renumber_page_words(result: dict[str, Any], page: int) -> None:
+    """Show a ``get_page_words`` result under the page number the model asked
+    for (its part's numbering), in place."""
+    result["page"] = page
+    for word in result.get("words", []):
+        location = word.get("location")
+        if isinstance(location, dict):
+            location["page_number"] = page
+
+
+def _is_empty_leaf(value: Any) -> bool:
+    """A leaf or scalar that carries no value."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, dict) and "text" in value:
+        text = value.get("text")
+        return text is None or (isinstance(text, str) and not text.strip())
+    return False
+
+
+def _rebase_ref(ref: str, base: dict[str, Any]) -> str:
+    """Rewrite a later part's ``derived_from`` path for the merged tree: an
+    index into an array the merge appends to *base*'s copy of it moves past
+    *base*'s entries."""
+    path = parse_path(ref)
+    if path is None:
+        return ref
+    cur: Any = base
+    for i, seg in enumerate(path):
+        if isinstance(seg, int):
+            if isinstance(cur, list):
+                return path_to_str((*path[:i], seg + len(cur), *path[i + 1 :]))
+            return ref
+        if not isinstance(cur, dict):
+            return ref
+        cur = cur.get(seg)
+    return ref
+
+
+def _merge_tree(base: dict[str, Any], extra: dict[str, Any]) -> None:
+    for key, value in extra.items():
+        current = base.get(key)
+        if isinstance(current, list) and isinstance(value, list):
+            current.extend(value)
+        elif (
+            isinstance(current, dict)
+            and isinstance(value, dict)
+            and "text" not in current
+            and "text" not in value
+        ):
+            _merge_tree(current, value)
+        elif key not in base or _is_empty_leaf(current):
+            base[key] = value
+
+
+def _merge_part_values(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Merge one part's values into those of the parts before it, in place on
+    *base*: arrays concatenate (each part submits only its own pages' entries,
+    in document order), objects merge recursively, and a leaf keeps the
+    earliest part's value unless that one is empty. *extra*'s ``derived_from``
+    paths are first rebased onto the concatenated arrays. Returns *base*."""
+    for _path, leaf in walk_computed_leaves(extra):
+        refs = leaf.get("derived_from")
+        if isinstance(refs, list):
+            leaf["derived_from"] = [_rebase_ref(r, base) if isinstance(r, str) else r for r in refs]
+    _merge_tree(base, extra)
+    return base
+
+
 def _apply_append_entries(acc_args: dict[str, Any] | None, args: dict[str, Any]) -> dict[str, Any]:
     """Apply one ``append_entries`` call to the accumulated values; the
     returned dict is the tool result (an ``error`` key means the call was
@@ -2196,6 +2487,7 @@ def _run_extract_loop(
     counters: dict[str, int],
     chunked: bool = False,
     reasoning_effort: str | None = _VALUES_REASONING_EFFORT,
+    page_offset: int = 0,
 ) -> tuple[dict[str, Any], int, int]:
     """Run a multi-turn extraction loop until the model finishes submitting.
 
@@ -2250,6 +2542,12 @@ def _run_extract_loop(
     thinking budget. A text-only turn that did not stop normally (a content
     filter, a refusal stop) fails at once. Every failure quotes the reply's
     ``finish_reason``, whether it was reasoning only, and its opening text.
+
+    *page_offset* is non-zero when the PDF sent is a page range of the file
+    that starts after page *page_offset*. The model numbers that PDF's pages
+    from 1, so a ``get_page_words`` lookup reads page ``page + page_offset``
+    and the result is shown under the model's own number. The values it
+    submits keep the PDF's numbering; the caller shifts them.
     """
     # Phase 1 leaves Anthropic on tool_choice="auto" (omitted on the wire)
     # because any forced choice, "required" included, makes the wrapper drop
@@ -2311,13 +2609,15 @@ def _run_extract_loop(
                 # thinking under a forced choice). Resend once on auto, which
                 # is what phase 1 sent before "required". Only a request
                 # rejection qualifies: a timeout or rate limit would only be
-                # repeated, and a schema overflow belongs to the caller's
-                # permissive-schema fallback. A failing resend raises its own
+                # repeated, a schema overflow belongs to the caller's
+                # permissive-schema fallback, and a body too large for the
+                # provider belongs to the page-range split. A failing resend raises its own
                 # error, the one the auto request alone would have produced.
                 if not (
                     tool_choice == "required"
                     and is_request_rejection(exc)
                     and not _is_tool_schema_too_large(exc)
+                    and not is_request_too_large(exc)
                 ):
                     raise
                 result = call_with_tools(llm_config, messages=messages, tools=tools, cache=True)
@@ -2460,10 +2760,12 @@ def _run_extract_loop(
                     tool_result: dict[str, Any] = get_page_words(
                         workspace,
                         file_id,
-                        page,
+                        page + page_offset if page >= 1 else page,
                         start_idx if isinstance(start_idx, int) else None,
                         end_idx if isinstance(end_idx, int) else None,
                     )
+                    if page_offset:
+                        _renumber_page_words(tool_result, page)
                 except Exception as exc:
                     # Bubble tool errors back to the model as a tool result;
                     # don't fail the whole extraction on a bad lookup.
@@ -2994,6 +3296,8 @@ def _resolve_api_key(literal: str | None, env_name: str | None) -> str | None:
 
 __all__ = [
     "DEFAULT_MAX_TOOL_ITERS",
+    "REASONING_EFFORT_CHOICES",
+    "REASONING_EFFORT_PROVIDER_DEFAULT",
     "VALUES_REASONING_EFFORT_CHOICES",
     "VALUES_REASONING_EFFORT_PROVIDER_DEFAULT",
     "ExtractionResult",

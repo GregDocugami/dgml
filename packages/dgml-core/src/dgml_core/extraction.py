@@ -121,6 +121,7 @@ def extract_file(
     *,
     values_model: str | None = None,
     values_effort: str | None = None,
+    locations_effort: str | None = None,
     write_stats: bool = False,
     debug: bool = False,
 ) -> ExtractionResult:
@@ -136,20 +137,28 @@ def extract_file(
     ``values_model`` and ``values_effort`` override the workspace's
     ``grounded.values_model`` / ``grounded.values_reasoning_effort`` for this call;
     ``values_effort`` takes the config's values (``"default"`` sends none).
+    ``locations_effort`` does the same for ``grounded.locations_reasoning_effort``,
+    the effort of the location-grounding call on pages with OCR words (the no-words
+    grid path keeps its own ``"medium"``).
     ``values_model`` resolves as if it were set in ``[grounded]``: the section's
     own ``values_api_key`` / ``values_api_key_env`` / ``values_api_base`` still
     apply, and a tier's credentials never carry over to the new model
     (see :func:`~dgml_core.grounded.load_grounded_config`).
     ``write_stats`` defaults to off, matching the CLI.
     """
-    from .grounded import extract_values, load_grounded_config, parse_values_reasoning_effort
+    from .grounded import extract_values, load_grounded_config, parse_reasoning_effort
 
     config = load_grounded_config(ws, values_model=values_model)
     if values_effort is not None:
         config = replace(
             config,
-            values_reasoning_effort=parse_values_reasoning_effort(
-                values_effort, source="values_effort"
+            values_reasoning_effort=parse_reasoning_effort(values_effort, source="values_effort"),
+        )
+    if locations_effort is not None:
+        config = replace(
+            config,
+            locations_reasoning_effort=parse_reasoning_effort(
+                locations_effort, source="locations_effort"
             ),
         )
     return extract_values(

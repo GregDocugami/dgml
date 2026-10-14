@@ -1219,8 +1219,8 @@ Two formats are involved:
 
 The LLM is configurable like every other model-using command — via the
 `grounded` section of the workspace `config.toml` (`schema_model`,
-`values_model`, `values_reasoning_effort`, API keys, `max_tool_iters`), with
-per-call overrides on the commands below.
+`values_model`, `values_reasoning_effort`, `locations_reasoning_effort`, API
+keys, `max_tool_iters`), with per-call overrides on the commands below.
 
 ### `dgml extraction generate-schema <docset_id> [--from-file ID ...] [--schema-model M]`
 
@@ -1311,7 +1311,7 @@ fields, prompts for where to find one value. Returns
 Return the DocSet's extraction guidance as `{docset_id, guidance}`. Errors
 `GUIDANCE_NOT_FOUND` if none is set.
 
-### `dgml extraction extract <docset_id> <file_id> [--values-model M] [--values-effort E]`
+### `dgml extraction extract <docset_id> <file_id> [--values-model M] [--values-effort E] [--locations-effort E]`
 
 Extract values from a file against the DocSet schema and write a `dg:extraction`
 element into the file's core `<stem>.dgml.xml`. Runs a three-phase pipeline
@@ -1333,7 +1333,15 @@ credentials as if the model were set in config: `grounded.values_api_key` /
 `--values-effort` overrides `grounded.values_reasoning_effort` for this call:
 `none`, `minimal`, `low`, `medium` (the default), `high`, `xhigh`, or `default`
 to send no reasoning effort and take the provider's own default. Any other value
-is refused before the model is called.
+is refused before the model is called. `--locations-effort` does the same for
+`grounded.locations_reasoning_effort`, the budget of the location-grounding call
+on pages with OCR words (default `high`; a page that goes through the no-words
+grid path keeps its own `medium`). Anthropic models never receive it, since that
+call forces its tool; every other provider does. Both efforts are checked by
+name, not against what the model supports: a values budget the provider
+refuses fails on the first call, but a locations budget it refuses fails in
+phase 3, after the values call has been paid for, on the first page that
+needs grounding.
 
 ```json
 {
@@ -1453,6 +1461,16 @@ not checked here.
 phase 1 cited that the file does not have (outside `1..page_count`, with no
 page image): their items make no phase-3 call and stay unmatched, like any
 other leaf phase 3 could not resolve, and the run still writes the tree.
+
+Phase 1 sends the whole PDF in one request. If the provider refuses that
+request as too large (Anthropic's `request_too_large`, an HTTP 413, Gemini's
+"payload size exceeds"), the PDF is sliced in half with the workspace's PDF
+engine and each half is sent on its own, halving again until every part is
+accepted. The parts' values are merged in page order: arrays concatenate,
+page numbers refer to the full document, and a field found in more than one
+part keeps the first non-empty value. `phases.phase1.pdf_parts` lists the
+`[first_page, last_page]` of each part, and appears only when a split happened.
+A single page the provider still refuses fails the file.
 
 **Schema-declared invariants.** A field may carry a `## Invariant:` annotation
 naming a checkable relation against the rest of the submission — the

@@ -2661,6 +2661,15 @@ def _add_extraction_subparsers(
             "low, medium, high, xhigh, or 'default' to send no reasoning effort."
         ),
     )
+    ex_extract.add_argument(
+        "--locations-effort",
+        default=None,
+        help=(
+            "Override grounded.locations_reasoning_effort (location grounding on pages "
+            "with OCR words) for this call: none, minimal, low, medium, high, xhigh, or "
+            "'default' to send no reasoning effort."
+        ),
+    )
 
     ex_get_values = extraction.add_parser(
         "get-values",
@@ -2711,7 +2720,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     from dgml_core.grounded import (
         generate_schema,
         load_grounded_config,
-        parse_values_reasoning_effort,
+        parse_reasoning_effort,
     )
 
     store = DocSetStore(ws)
@@ -2779,13 +2788,16 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     if sub == "extract":
         if args.values_effort is not None:
             # Validated here too so the error names the flag, not the library kwarg.
-            parse_values_reasoning_effort(args.values_effort, source="--values-effort")
+            parse_reasoning_effort(args.values_effort, source="--values-effort")
+        if args.locations_effort is not None:
+            parse_reasoning_effort(args.locations_effort, source="--locations-effort")
         result = extract_file(
             ws,
             args.docset_id,
             args.file_id,
             values_model=args.values_model,
             values_effort=args.values_effort,
+            locations_effort=args.locations_effort,
             write_stats=args.debug,
             debug=args.debug,
         )
