@@ -1418,12 +1418,14 @@ order, spell it through a run of words each, and each box shrinks to its run. Ch
 respects capitalization when the value has letters: a box over "Gas
 Delivery Charges" in a sentence doesn't locate the "GAS DELIVERY
 CHARGES" heading. When nothing on the box's own line matches, it moves to the
-value's one exact occurrence on the page, if the page prints it once. A box
+nearest exact copy of the value elsewhere on the page. The text of every box
+is checked against the page; when a value is printed several times, which
+copy it gets is not. A box
 holding nothing but the value is kept whatever its capitalization. A box drawn on the wrong span, such as a total boxed on a neighbouring
-number, moves to the nearest span on
-its own line (or lines) whose words match the value exactly
-(`matching.snapped_boxes`). When there is no such span, or two are equally
-near, the box is stripped (`matching.rejected_boxes`).
+number, moves to the nearest span
+whose words match the value exactly, preferring its own line (or lines)
+(`matching.snapped_boxes`). When the page prints no such span, or two are
+equally near, the box is stripped (`matching.rejected_boxes`).
 
 Every value extraction writes can be verified, so two kinds are **dropped**,
 not written:

@@ -1923,3 +1923,43 @@ def test_lowercase_value_does_not_take_a_capitalised_run(workspace: Workspace) -
     # Neither run reads "gas charges" with its case, and the page doesn't
     # print it that way: the box can't be placed.
     assert check.rejected == 1 and locs == [{"page_number": 1}]
+
+
+_PROVIDER_PAGE = [
+    {"t": "northwind", "l": [44, 359, 180, 397]},  # in the URL "northwind.com"
+    {"t": ".", "l": [180, 359, 186, 397]},
+    {"t": "com", "l": [186, 359, 240, 397]},
+    {"t": "Northwind", "l": [900, 1783, 1050, 1815]},
+    {"t": "Northwind", "l": [900, 2755, 1050, 2787]},
+]
+
+
+def _verify_on(workspace: Workspace, words: list[Any], text: str, box: list[int]) -> Any:
+    from dgml_core.matching import verify_boxes
+
+    _seed_file_and_text(workspace, "f1aaaaaaaaaa", page=1, words=words)
+    values: dict[str, Any] = {
+        "V": {"text": text, "locations": [{"page_number": 1, "bounding_box": box}]}
+    }
+    check = verify_boxes(workspace, "f1aaaaaaaaaa", values)
+    return check, values["V"]["locations"]
+
+
+def test_box_on_a_lowercase_url_snaps_to_the_nearest_printed_name(workspace: Workspace) -> None:
+    """The provider name boxed on "northwind.com": the page prints "Northwind"
+    twice elsewhere, and the nearer copy is taken."""
+    check, locs = _verify_on(workspace, _PROVIDER_PAGE, "Northwind", [44, 359, 240, 397])
+    assert (check.snapped, check.rejected) == (1, 0)
+    assert locs == [{"page_number": 1, "bounding_box": [900, 1783, 1050, 1815]}]
+
+
+def test_snap_refuses_two_equally_near_copies(workspace: Workspace) -> None:
+    words = [
+        {"t": "northwind", "l": [44, 1000, 180, 1030]},
+        {"t": ".", "l": [180, 1000, 186, 1030]},
+        {"t": "com", "l": [186, 1000, 240, 1030]},
+        {"t": "Northwind", "l": [72, 900, 212, 930]},
+        {"t": "Northwind", "l": [72, 1100, 212, 1130]},
+    ]
+    check, locs = _verify_on(workspace, words, "Northwind", [44, 1000, 240, 1030])
+    assert check.rejected == 1 and locs == [{"page_number": 1}]

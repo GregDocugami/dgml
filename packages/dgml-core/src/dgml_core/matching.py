@@ -497,33 +497,38 @@ class BoxCheck(NamedTuple):
 def _snap_to_line(
     words: list[_Word], text: str, box: list[int], page: int
 ) -> list[dict[str, Any]] | None:
-    """The locations of the span nearest *box*, among those on its line(s)
-    whose words match *text* exactly (with case) — or, when its lines hold
-    none, of the one span on the page that does. ``None`` when there is none,
-    two are equally near, or the page prints the value more than once. A
-    model that found the right row but drew the box over the wrong column (or
-    straddling two rows) is corrected, and so is one that found a lookalike
-    elsewhere ("Gas Delivery Charges" in a sentence, for the "GAS
-    DELIVERY CHARGES" heading); a tie is not guessed."""
+    """The locations of the span nearest *box* whose words match *text*
+    exactly (with case), preferring spans on the box's own line(s) — or
+    ``None`` when the page prints no such span, or the two nearest are equally
+    near (a tie is not guessed).
+
+    A model that found the right row but drew the box over the wrong column
+    (or straddling two rows) lands on the match in that row. One that boxed a
+    lookalike elsewhere ("Gas Delivery Charges" in a sentence, for the
+    "GAS DELIVERY CHARGES" heading, or the lowercase "northwind" of a URL
+    for "Northwind") moves to the nearest exact copy on the page. A value
+    printed several times then gets a copy that reads as it, which may not be
+    the one it was read from: the text is checked, the choice of copy is not.
+    """
     top, bottom = box[1], box[3]
     cx, cy = (box[0] + box[2]) / 2, (top + bottom) / 2
-    spans = _find_spans(text, words)
-    scored: list[tuple[float, tuple[int, int]]] = []
-    for start, end in spans:
+    on_line: list[tuple[float, tuple[int, int]]] = []
+    elsewhere: list[tuple[float, tuple[int, int]]] = []
+    for start, end in _find_spans(text, words):
         span = words[start:end]
-        if not any(w.top < bottom and w.bottom > top for w in span):
-            continue
         sx = (min(w.left for w in span) + max(w.right for w in span)) / 2
         sy = (min(w.top for w in span) + max(w.bottom for w in span)) / 2
-        scored.append((((sx - cx) ** 2 + (sy - cy) ** 2) ** 0.5, (start, end)))
-    if not scored:
-        if len(spans) == 1:
-            return _span_to_locations(spans[0], words, _PageDims(1, 1), page)
+        scored = (((sx - cx) ** 2 + (sy - cy) ** 2) ** 0.5, (start, end))
+        if any(w.top < bottom and w.bottom > top for w in span):
+            on_line.append(scored)
+        else:
+            elsewhere.append(scored)
+    candidates = sorted(on_line) or sorted(elsewhere)
+    if not candidates:
         return None
-    scored.sort()
-    if len(scored) > 1 and scored[1][0] - scored[0][0] < 1:
+    if len(candidates) > 1 and candidates[1][0] - candidates[0][0] < 1:
         return None
-    return _span_to_locations(scored[0][1], words, _PageDims(1, 1), page)
+    return _span_to_locations(candidates[0][1], words, _PageDims(1, 1), page)
 
 
 def _overlaps_any(loc: Any, others: list[dict[str, Any]]) -> bool:
