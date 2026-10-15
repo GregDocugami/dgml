@@ -1372,8 +1372,11 @@ needs grounding.
 
 Return previously extracted values from the file's core `<stem>.dgml.xml`.
 `--as values` (default) projects the `dg:extraction` element to values-shape
-JSON; `--as xml` returns the core DGML document. Errors `VALUES_NOT_FOUND` if the
-file has no `dg:extraction` element yet (extraction not run).
+JSON; `--as xml` returns the core DGML document. Errors: `DOCSET_NOT_FOUND` for
+an unknown DocSet, `FILE_NOT_FOUND` for an unknown file or one not assigned to
+the DocSet, and `VALUES_NOT_FOUND` if the file has no `dg:extraction` element yet
+(extraction not run). Library callers get the same reads from
+`dgml_core.get_extracted_values` and `dgml_core.read_dgml`.
 
 ```json
 {
@@ -2706,6 +2709,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `SCHEMA_INVALID` | hard | A schema passed to `extraction set-schema` is not valid RNC (within the supported subset) or not a JSON object. |
 | `NO_FILES` | hard | `extraction generate-schema` has no sample files (empty DocSet and no `--from-file`). |
 | `VALUES_NOT_FOUND` | hard | `extraction get-values` ran before `extraction extract` for that file. |
+| `DGML_NOT_FOUND` | hard | Library only (`dgml_core.read_dgml`): the file is assigned to the DocSet but has no `<stem>.dgml.xml` yet. `extraction get-values` reports `VALUES_NOT_FOUND` for this case. |
 | `GENERATION_CONFIG_MISSING` | hard | A generation model can't be resolved — neither the per-task field (`generation.model` / `generation.label_model`) nor its `[models]` tier (`standard` / `advanced`) is set in the merged config. |
 | `GENERATION_CONFIG_INVALID` | hard | The `generation` config section has a missing/invalid field. |
 | `GROUNDED_CONFIG_MISSING` | hard | An `extraction` command needs a `grounded` config section that is absent. |

@@ -25,6 +25,7 @@ from .conversion import (
     load_conversion_config,
     make_converter,
 )
+from .dgml_output import DgmlDocument, read_dgml
 from .docsets import DocSetStore
 
 # Exported in full, and pinned so by tests/test_error_codes.py.
@@ -45,6 +46,7 @@ from .errors import (
     ConversionFailed,
     CorruptMetadata,
     DgmlError,
+    DgmlNotFound,
     DocSetNotFound,
     EmptyModelResponse,
     EngineNotAvailable,
@@ -87,6 +89,7 @@ from .errors import (
     TextExtractionFailed,
     UnsupportedFileType,
     ValuesExtractionFailed,
+    ValuesNotFound,
     WalletKeyMissing,
     WorkspaceMigrationFailed,
     WorkspaceNotFound,
@@ -98,7 +101,7 @@ from .errors import (
 
 # Eager: ``.extraction`` imports only docsets/errors/storage at module scope and
 # reaches ``.grounded`` → ``.llm`` inside the function, so it costs nothing here.
-from .extraction import add_file_and_extract, extract_file
+from .extraction import add_file_and_extract, extract_file, get_extracted_values
 from .file_attestation import (
     ArtifactKind,
     ArtifactRef,
@@ -270,7 +273,9 @@ __all__ = [
     "ConverterConfig",
     "CorruptMetadata",
     "CreateWorkspaceResult",
+    "DgmlDocument",
     "DgmlError",
+    "DgmlNotFound",
     "DocConverter",
     "DocSet",
     "DocSetAssignment",
@@ -339,6 +344,7 @@ __all__ = [
     "TextMode",
     "UnsupportedFileType",
     "ValuesExtractionFailed",
+    "ValuesNotFound",
     "VerifyResult",
     "WalletKeyMissing",
     "Workspace",
@@ -367,6 +373,7 @@ __all__ = [
     "export_attestation",
     "extract_file",
     "generate_unique_workspace_id",
+    "get_extracted_values",
     "is_record_id",
     "is_workspace_id",
     "layout",
@@ -385,6 +392,7 @@ __all__ = [
     "new_workspace_id",
     "pending_migrations",
     "read_attestation",
+    "read_dgml",
     "resolve_store_configs",
     "slice_pages",
     "stamp_schema_version",

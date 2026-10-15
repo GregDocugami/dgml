@@ -24,9 +24,8 @@ dead:
   results payload. Callers read ``TheClass.code``.
 - *CLI-layer codes* have no class at all. ``INTERNAL_ERROR`` is permanently one
   (it exists for exceptions that are *not* a :class:`DgmlError`).
-  ``EMPTY_DOCSET``, ``NO_FILES`` and ``VALUES_NOT_FOUND`` are domain
-  preconditions that become classes when their operations move out of
-  ``cli.py``.
+  ``EMPTY_DOCSET`` and ``NO_FILES`` are domain preconditions that become
+  classes when their operations move out of ``cli.py``.
 """
 
 from __future__ import annotations
@@ -378,6 +377,20 @@ class GuidanceNotFound(NotFoundError):
     """The docset has no extraction guidance (``extraction-guidance.md``)."""
 
     code = "GUIDANCE_NOT_FOUND"
+
+
+class DgmlNotFound(NotFoundError):
+    """The file is assigned to the docset, but its ``<stem>.dgml.xml`` has not
+    been written yet (neither ``docset generate`` nor ``extraction extract`` ran)."""
+
+    code = "DGML_NOT_FOUND"
+
+
+class ValuesNotFound(NotFoundError):
+    """The pair has no extracted values (no ``dg:extraction`` element in its
+    ``<stem>.dgml.xml``) — ``extraction extract`` has not run for it."""
+
+    code = "VALUES_NOT_FOUND"
 
 
 class SchemaInvalid(DgmlError):

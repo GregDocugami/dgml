@@ -22,6 +22,9 @@ file already assigned to the DocSet. The *auto-extract-on-assignment* path
 extraction schema set, fires value extraction. Soft-fail semantics: an
 extraction failure surfaces in the returned block's ``error`` field; the
 assignment itself still succeeds. No schema → plain assignment, no block.
+
+:func:`get_extracted_values` is the read side: the extracted values of one pair as
+values-shape JSON, as ``dgml extraction get-values`` prints them.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from .dgml_output import read_dgml
 from .docsets import DocSetStore
 from .errors import DgmlError
 from .storage import Workspace
@@ -164,3 +168,21 @@ def extract_file(
     return extract_values(
         ws, docset_id, file_id, config=config, write_stats=write_stats, debug=debug
     )
+
+
+def get_extracted_values(workspace: Workspace, docset_id: str, file_id: str) -> dict[str, Any]:
+    """Return the pair's extracted values as ``{tag: {text, value?, locations}}``.
+
+    Projects the ``dg:extraction`` element of the core DGML file, classifying
+    each element by the docset's extraction schema when one is set (so a
+    single-item collection stays a list), else inferring structure from the XML.
+
+    Raises what :func:`read_dgml` raises with ``require_extraction=True``.
+    """
+    from .extraction_schema import parse_rnc
+    from .extraction_xml import dgml_xml_to_values
+
+    doc = read_dgml(workspace, docset_id, file_id, require_extraction=True)
+    store = DocSetStore(workspace)
+    vocab = parse_rnc(store.get_schema(docset_id)) if store.has_schema(docset_id) else None
+    return dgml_xml_to_values(doc.xml.decode("utf-8"), vocab=vocab)
