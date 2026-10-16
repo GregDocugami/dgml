@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from .dgml_output import read_dgml
 from .docsets import DocSetStore
-from .errors import DgmlError
+from .errors import DgmlError, ValuesNotFound
 from .storage import Workspace
 
 if TYPE_CHECKING:
@@ -177,12 +177,18 @@ def get_extracted_values(workspace: Workspace, docset_id: str, file_id: str) -> 
     each element by the docset's extraction schema when one is set (so a
     single-item collection stays a list), else inferring structure from the XML.
 
-    Raises what :func:`read_dgml` raises with ``require_extraction=True``.
+    Raises what :func:`read_dgml` raises, plus :class:`ValuesNotFound` when the
+    DGML has no ``dg:extraction`` element (a generated tree only).
     """
     from .extraction_schema import parse_rnc
-    from .extraction_xml import dgml_xml_to_values
+    from .extraction_xml import dgml_xml_to_values, has_extraction
 
-    doc = read_dgml(workspace, docset_id, file_id, require_extraction=True)
+    doc = read_dgml(workspace, docset_id, file_id)
+    if not has_extraction(doc.xml):
+        raise ValuesNotFound(
+            f"no extracted values for file '{file_id}' in docset '{docset_id}'; "
+            "run 'dgml extraction extract' first"
+        )
     store = DocSetStore(workspace)
     vocab = parse_rnc(store.get_schema(docset_id)) if store.has_schema(docset_id) else None
-    return dgml_xml_to_values(doc.xml.decode("utf-8"), vocab=vocab)
+    return dgml_xml_to_values(doc.xml, vocab=vocab)

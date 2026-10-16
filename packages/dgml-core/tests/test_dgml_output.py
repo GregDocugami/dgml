@@ -101,16 +101,13 @@ def test_read_dgml_returns_stored_bytes_and_canonical_key(workspace: Workspace) 
     doc = read_dgml(workspace, "ds01", "f001")
     assert doc.key == "docsets/ds01/files/f001/msa.dgml.xml"
     assert doc.xml == xml
-    assert read_dgml(workspace, "ds01", "f001", require_extraction=True) == doc
 
 
 def test_read_dgml_returns_a_tree_without_extraction(workspace: Workspace) -> None:
     """The default read is the full DGML — a generated tree needs no extraction."""
     _seed(workspace, xml=_TREE_ONLY)
     assert read_dgml(workspace, "ds01", "f001").xml == _TREE_ONLY
-    with pytest.raises(ValuesNotFound):
-        read_dgml(workspace, "ds01", "f001", require_extraction=True)
-    with pytest.raises(ValuesNotFound):
+    with pytest.raises(ValuesNotFound, match="run 'dgml extraction extract' first"):
         get_extracted_values(workspace, "ds01", "f001")
 
 
@@ -153,16 +150,17 @@ def test_unassigned_file(workspace: Workspace) -> None:
 
 
 def test_assigned_without_dgml(workspace: Workspace) -> None:
+    """No DGML at all is DgmlNotFound from both reads; VALUES_NOT_FOUND is only
+    for a DGML that exists without a dg:extraction element."""
     _seed(workspace)
     with pytest.raises(DgmlNotFound):
         read_dgml(workspace, "ds01", "f001")
-    with pytest.raises(ValuesNotFound):
-        read_dgml(workspace, "ds01", "f001", require_extraction=True)
-    with pytest.raises(ValuesNotFound, match="run 'dgml extraction extract' first"):
+    with pytest.raises(DgmlNotFound):
         get_extracted_values(workspace, "ds01", "f001")
 
 
 @pytest.mark.parametrize(("docset_id", "file_id"), [("", "f001"), ("ds01", " ")])
 def test_empty_ids(workspace: Workspace, docset_id: str, file_id: str) -> None:
+    _seed(workspace)  # the docset exists, so a blank file id reaches its own check
     with pytest.raises(InvalidArgument):
         read_dgml(workspace, docset_id, file_id)

@@ -52,6 +52,7 @@ from dgml_core.errors import (
     MissingExtra,
     NoExistingDocSets,
     StorageBackendMismatch,
+    ValuesNotFound,
     WorkspaceNotInitialized,
     short_error_message,
 )
@@ -2819,10 +2820,18 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         from dgml_core.extraction import get_extracted_values
 
         # Extracted values live as a dg:extraction element inside the pair's
-        # core <stem>.dgml.xml; the library raises FILE_NOT_FOUND (unassigned)
-        # and VALUES_NOT_FOUND (not extracted) through the usual envelope.
+        # core <stem>.dgml.xml; the library raises FILE_NOT_FOUND (unassigned),
+        # DGML_NOT_FOUND (nothing generated or extracted yet) and VALUES_NOT_FOUND
+        # (a tree with no extraction) through the usual envelope.
         if args.as_form == "xml":
-            doc = read_dgml(ws, args.docset_id, args.file_id, require_extraction=True)
+            from dgml_core.extraction_xml import has_extraction
+
+            doc = read_dgml(ws, args.docset_id, args.file_id)
+            if not has_extraction(doc.xml):
+                raise ValuesNotFound(
+                    f"no extracted values for file '{args.file_id}' in docset "
+                    f"'{args.docset_id}'; run 'dgml extraction extract' first"
+                )
             _emit(
                 {
                     "docset_id": args.docset_id,

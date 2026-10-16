@@ -5593,12 +5593,22 @@ def test_extraction_get_values_json_and_xml(
 def test_extraction_get_values_not_found(
     tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str], as_form: str
 ) -> None:
-    """Assigned but never extracted → VALUES_NOT_FOUND, in both output forms."""
+    """Assigned with nothing generated or extracted → DGML_NOT_FOUND; a generated
+    tree with no dg:extraction → VALUES_NOT_FOUND. Same in both output forms."""
     ws = tmp_path / "ws"
     _init_ws(ws)
     capsys.readouterr()
     ds_id = _new_docset(ws, capsys)
     fid = _assigned_file(ws, ds_id, sample_pdf, capsys)
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid, "--as", as_form])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "DGML_NOT_FOUND"
+
+    Workspace(root=ws).blobs.put_blob(
+        layout.dgml_xml_key(ds_id, fid, sample_pdf.stem),
+        b'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#" xmlns:docset="http://dgml.io/ns/dgml/t">'
+        b"<docset:Header>tree only</docset:Header></dg:chunk>",
+    )
     rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid, "--as", as_form])
     assert rc == 1
     assert _read_stderr(capsys)["error"]["code"] == "VALUES_NOT_FOUND"
