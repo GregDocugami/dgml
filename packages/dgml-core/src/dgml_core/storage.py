@@ -296,6 +296,10 @@ class Workspace:
         from .storage_resolve import _import_store_class
         from .storage_service import BlobStore, DocStore
 
+        if root is not None:
+            # Resolved as the TOML path resolves its root: a relative one would move
+            # with the working directory, away from where the store wrote.
+            root = root.expanduser().resolve()
         storage = configuration.storage
         declared_roots: set[Path] = set()
         for spec, base in ((storage.blobs, BlobStore), (storage.docs, DocStore)):
@@ -315,7 +319,7 @@ class Workspace:
             )
         if root is None:
             root = next(iter(declared_roots), None)
-        elif declared_roots and root.resolve() not in declared_roots:
+        elif declared_roots and root not in declared_roots:
             # Exact after resolving: a case-folded compare would accept two different
             # directories on a case-sensitive filesystem, and probing the disk is not
             # reliable everywhere. A caller passing both simply spells them the same.

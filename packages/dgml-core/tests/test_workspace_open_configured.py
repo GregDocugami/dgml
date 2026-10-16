@@ -191,6 +191,18 @@ def test_local_store_alias_without_a_root_is_refused() -> None:
         Workspace.open(configuration=alias)
 
 
+def test_a_relative_root_is_resolved_at_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ws.root` must not move with the working directory: the store wrote where the
+    caller's path pointed at open time, and every direct reader must keep seeing it."""
+    monkeypatch.chdir(tmp_path)
+    ws = Workspace.open(configuration=_cfg(), root=Path("ws"))
+    assert ws.root == (tmp_path / "ws").resolve()
+    monkeypatch.chdir(tmp_path.parent)
+    assert ws.files_dir == (tmp_path / "ws").resolve() / "files"
+
+
 def test_root_must_agree_with_workspace_path(tmp_path: Path) -> None:
     """An explicit `root=` beside a `workspace_path` is fine when they are the same
     directory (however spelled) and refused when they are not: `ws.root` must be the
