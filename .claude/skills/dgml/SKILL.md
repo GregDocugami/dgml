@@ -519,14 +519,39 @@ skips the debug-only cache artifacts (raw LLM responses,
 `usage.jsonl` cost/token rows. Pass the global `--debug` flag
 (`uv run dgml --debug docset generate "$ds"`) to retain those artifacts and to
 record per-operation cost telemetry to `<workspace>/usage.jsonl` (this gating
-applies to every LLM command — classify, cluster, generate). Coverage summaries
-still print on stderr under `--verbose` regardless.
+applies to every LLM command — classify, cluster, generate, extraction
+extract). `--debug` also writes a value extraction's per-file
+`extraction_stats.json` (phase timings, cost, match counts) from `docset
+add-file`, auto-classifying `file add`, `cluster`, and `extraction extract`.
+Coverage summaries still print on stderr under `--verbose` regardless.
 
 **Parallelism.** `--max-parallel-calls` transcribes that many documents
 concurrently (windows *within* a document stay serial, since each window
 sees the previous window's tail). The calls are network-bound, so threads
 overlap the latency. Raise it on high-RPM paid tiers; set `1` to serialize
 if you hit 429s.
+
+**Batch mode (half price, slow).** For offline or bulk runs where nobody is
+waiting on the result, add `--batch`. It sends transcription, roster
+planning, concept descriptions, OCR image style (when `[style]` is enabled)
+and the semantic-link pass through the provider's batch API at half the token
+price; results can take up to 24 hours per wave, and a long document needs
+one wave per window. Labeling batches too under a closed `--schema-path`
+vocabulary (every document at once); under an open or `--extend-schema`
+vocabulary it stays synchronous, because each document is labeled against
+the tags the documents before it coined. The output is the same as a
+synchronous run. Only `anthropic/` models have a batch backend; any other
+model fails fast with `BATCH_UNAVAILABLE`, naming the stage, before spending
+anything. The payload's `batch.stages` block reports what each stage did,
+including `cost_usd`, `standard_cost_usd` and `saved_usd`, so you can report
+the saving without `--debug`.
+
+```bash
+uv run dgml docset generate "$ds" --batch --schema-path ./po-tags.json | jq .batch
+```
+
+Never use `--batch` on an interactive request: use it for nightly or bulk
+ingestion.
 
 **Grounding is built in.** As the last step, generation grounds each
 `<stem>.dgml.xml` *in place* against the file's `page_text/` OCR — adding
@@ -673,9 +698,12 @@ uv run dgml extraction get-guidance "$ds" | jq -r .guidance
 #    builds the tree and carries the dg:extraction over (full-extraction).
 #    NOTE: once the schema is set, assigning a file (docset add-file /
 #    --auto-classify / cluster into an existing docset) auto-extracts it —
-#    check the payload's `extraction` block; run `extract` manually only for
+#    check the payload's `extraction` block (`error` on a soft failure;
+#    `usage.cost_usd` is the run's cost, reported even without --debug and
+#    even when the extraction failed); run `extract` manually only for
 #    files assigned before the schema existed or to re-extract. The file must
 #    already be assigned to the docset (FILE_NOT_FOUND otherwise).
+uv run dgml docset add-file "$fid" --docset "$ds" | jq '.extraction | {error, cost: .usage.cost_usd}'
 uv run dgml extraction extract "$ds" "$fid" | jq '{mode, tool_calls, field_count, xml_key}'
 
 # 3) Read them back. Default is values-shape JSON (projected from dg:extraction);

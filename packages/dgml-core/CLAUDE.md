@@ -51,9 +51,9 @@ workspace root, or nothing (a bool) when the condition is process-global. Tests
 reset that state in an autouse fixture.
 
 Structured events a caller may act on belong in return values or a typed
-callback (`on_migration`), not in log text. `debug=` controls telemetry and
-intermediate files, never log output. Tests assert with pytest's `caplog`, not
-`capsys`.
+callback (`on_migration`), not in log text. `record_usage=` controls telemetry
+(`usage.jsonl` rows) and `debug=` controls intermediate files; neither controls
+log output. Tests assert with pytest's `caplog`, not `capsys`.
 
 ## Configuration
 

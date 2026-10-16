@@ -434,7 +434,8 @@ def plan_links(xml: str, config: llm.LLMConfig, *, verify: bool = True) -> list[
     read an answer out of raises :class:`LinkPlanFailed` rather than returning
     one, so a caller that caches the result never stores a failure as a fact.
     """
-    # Propose + verify fold into one usage row (gated on --debug via the config).
+    # Propose + verify fold into one usage row (gated on ``record_usage`` via
+    # the config).
     with llm.record_usage_for(config):
         return llm.drive(plan_links_steps(xml, config, verify=verify), config)
 
@@ -447,7 +448,9 @@ def plan_links_steps(
     Yields the propose request (and its continuation rounds, if truncated),
     then — only when *verify* is set and the proposal named any candidate —
     the verify request, and returns the plan :func:`plan_links` returns. Pure:
-    no usage is recorded here; the driver owns accounting.
+    no usage is recorded here; the driver owns accounting. A batch driver runs
+    the propose step of many documents as one wave and their verify steps as
+    the next.
     """
     root = etree.fromstring(xml.encode())
     elements = _elements(root)

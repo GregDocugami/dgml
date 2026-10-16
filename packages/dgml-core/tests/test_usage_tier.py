@@ -81,7 +81,7 @@ def _event(**overrides: Any) -> UsageEvent:
 
 def _cfg(ws: Workspace, **kw: Any) -> llm.LLMConfig:
     kw.setdefault("operation", "transcribe")
-    return llm.LLMConfig(model=MODEL, workspace=ws, debug=True, **kw)
+    return llm.LLMConfig(model=MODEL, workspace=ws, record_usage=True, **kw)
 
 
 def _marked(text: str, tier: str, cost: float) -> FakeLLMResponse:

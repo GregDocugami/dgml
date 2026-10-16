@@ -333,12 +333,15 @@ def _reset_warning_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
     the Logging section of ../CLAUDE.md) so tests stay order-independent —
     any test may trigger these paths, not only the modules that assert on them."""
     from dgml_core import grounded, models_config, ocr, rotation
+    from dgml_core.generation import pipeline
 
     models_config._WARNED_TIER_FALLBACKS.clear()
     models_config._WARNED_DISABLED.clear()
     ocr._WARNED_NO_OCR_PROVIDER.clear()
     grounded._REQUIRED_TOOL_CHOICE_REJECTED.clear()
+    grounded._WARNED_TELEMETRY.clear()
     monkeypatch.setattr(rotation, "_WARNED_PILLOW_MISSING", False)
+    monkeypatch.setattr(pipeline, "_WARNED_DEBUG_WITHOUT_USAGE", False)
 
 
 @pytest.fixture

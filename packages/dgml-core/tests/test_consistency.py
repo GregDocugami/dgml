@@ -344,11 +344,11 @@ def test_semantic_link_defects_flagged(workspace: Workspace, text_pdf: Path) -> 
     assert "semlink_nested" not in local and "semlink_dangling_href" not in local
 
 
-@pytest.mark.parametrize("debug", [True, False])
-def test_reextract_hybrid_threads_debug(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch, debug: bool
+@pytest.mark.parametrize("record_usage", [True, False])
+def test_reextract_hybrid_threads_record_usage(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch, record_usage: bool
 ) -> None:
-    """The hybrid re-extraction branch forwards ``debug`` to
+    """The hybrid re-extraction branch forwards ``record_usage`` to
     ``extract_text_hybrid`` so ``dgml check --debug`` records hybrid_merge
     usage (and plain ``check`` records nothing)."""
     import dgml_core.consistency as consistency
@@ -360,7 +360,7 @@ def test_reextract_hybrid_threads_debug(
     monkeypatch.setattr(consistency, "load_text_extraction_config", lambda ws: object())
 
     def fake_hybrid(*args: Any, **kwargs: Any) -> ExtractDigitalResult:
-        captured["debug"] = kwargs.get("debug")
+        captured["record_usage"] = kwargs.get("record_usage")
         return ExtractDigitalResult(pages_written=1, pages_with_words=1, total_words=1)
 
     monkeypatch.setattr(consistency, "extract_text_hybrid", fake_hybrid)
@@ -368,6 +368,6 @@ def test_reextract_hybrid_threads_debug(
     fid = "fid"
     workspace.blobs.put_blob(f"files/{fid}/doc.pdf", b"%PDF-1.4\n")
     source_key = layout.file_source_key(fid, "doc.pdf")
-    _reextract(workspace, source_key, fid, "hybrid", debug=debug)
+    _reextract(workspace, source_key, fid, "hybrid", record_usage=record_usage)
 
-    assert captured["debug"] is debug
+    assert captured["record_usage"] is record_usage

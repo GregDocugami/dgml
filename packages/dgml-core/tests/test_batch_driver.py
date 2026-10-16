@@ -46,7 +46,7 @@ def _cfg(ws: Workspace | None = None, **kw: Any) -> llm.LLMConfig:
     return llm.LLMConfig(
         model=MODEL,
         workspace=ws,
-        debug=ws is not None,
+        record_usage=ws is not None,
         operation="transcribe",
         **kw,
     )
