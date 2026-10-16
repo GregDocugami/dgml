@@ -82,7 +82,7 @@ def test_schema_provider_failure_keeps_its_message_and_error_row(
     capture_kwargs(boom)
     with pytest.raises(SchemaGenerationFailed) as failed:
         generate_schema(
-            workspace, ["f1aaaaaaaaaa"], config=schema_config(), docset_name="D", debug=True
+            workspace, ["f1aaaaaaaaaa"], config=schema_config(), docset_name="D", record_usage=True
         )
     assert str(failed.value) == "schema generation call failed: RuntimeError: provider exploded"
     (row,) = read_events(workspace)

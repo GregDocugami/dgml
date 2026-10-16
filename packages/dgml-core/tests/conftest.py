@@ -15,13 +15,18 @@
 from __future__ import annotations
 
 import shutil
+import sys
+import types
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 from dgml_core import DEFAULT_STORAGE_PROVIDER, BlobStore, LocalStore, StorageConfig
+from dgml_core.configuration import Configuration, Identity, ProviderSpec, Storage
 from dgml_core.pages import GS_BINARIES
 from dgml_core.storage import Workspace
+from dgml_core.storage_service import DocStore
 from dgml_core.workspaces_resolve import default_workspaces_store
 from dgml_core.workspaces_store import WORKSPACES_ENV_VAR
 
@@ -54,6 +59,96 @@ class DefaultBridgeStore(LocalStore):
 def default_bridge_store(root: Path) -> DefaultBridgeStore:
     cfg = LocalStore.parse_config(StorageConfig(DEFAULT_STORAGE_PROVIDER, root))
     return DefaultBridgeStore(cfg)
+
+
+class InMemoryStore(BlobStore, DocStore):
+    """A store with no directory — what "every store is remote" looks like to the
+    scratch-root guard — so that path can be exercised without a real backend."""
+
+    name = "in-memory"
+    config_fields = frozenset[str]()
+
+    @classmethod
+    def parse_config(cls, config: StorageConfig) -> StorageConfig:
+        cls._check_no_extra_fields(config.options)
+        return config
+
+    def __init__(self, config: StorageConfig) -> None:
+        self._blobs: dict[str, bytes] = {}
+        self._docs: dict[str, dict[str, dict[str, Any]]] = {}
+        self._log: dict[str, list[dict[str, Any]]] = {}
+
+    def put_blob(self, key: str, data: bytes) -> None:
+        self._blobs[key] = data
+
+    def get_blob(self, key: str) -> bytes:
+        try:
+            return self._blobs[key]
+        except KeyError:
+            raise FileNotFoundError(key) from None
+
+    def delete_blob(self, key: str) -> None:
+        self._blobs.pop(key, None)
+
+    def blob_exists(self, key: str) -> bool:
+        return key in self._blobs
+
+    def list_blobs(self, prefix: str) -> list[str]:
+        return sorted(k for k in self._blobs if k.startswith(prefix))
+
+    def upload_blob(self, key: str, src: Path) -> None:
+        self._blobs[key] = src.read_bytes()
+
+    def download_blob(self, key: str, dest: Path) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(self.get_blob(key))
+
+    def delete_blobs(self, prefix: str) -> None:
+        for key in self.list_blobs(prefix):
+            del self._blobs[key]
+
+    def append_doc(self, collection: str, doc: dict[str, Any]) -> None:
+        self._log.setdefault(collection, []).append(dict(doc))
+
+    def get_doc(self, collection: str, doc_id: str) -> dict[str, Any] | None:
+        found = self._docs.get(collection, {}).get(doc_id)
+        return dict(found) if found is not None else None
+
+    def find_docs(self, collection: str, query: Mapping[str, Any]) -> list[dict[str, Any]]:
+        rows = list(self._docs.get(collection, {}).values()) + self._log.get(collection, [])
+        return [dict(d) for d in rows if all(d.get(k) == v for k, v in query.items())]
+
+    def put_doc(self, collection: str, doc_id: str, doc: dict[str, Any]) -> None:
+        self._docs.setdefault(collection, {})[doc_id] = dict(doc)
+
+    def delete_doc(self, collection: str, doc_id: str) -> None:
+        self._docs.get(collection, {}).pop(doc_id, None)
+
+    def delete_docs(self, collection: str, query: Mapping[str, Any]) -> int:
+        col = self._docs.get(collection, {})
+        hits = [i for i, d in col.items() if all(d.get(k) == v for k, v in query.items())]
+        for i in hits:
+            del col[i]
+        return len(hits)
+
+
+def register_provider(monkeypatch: pytest.MonkeyPatch, cls: type, attr: str) -> str:
+    """Register ``cls`` under an importable module name; return its dotted path."""
+    module = types.ModuleType("fake_stores")
+    setattr(module, attr, cls)
+    monkeypatch.setitem(sys.modules, "fake_stores", module)
+    return f"fake_stores:{attr}"
+
+
+def scratch_configuration(monkeypatch: pytest.MonkeyPatch) -> Configuration:
+    """A configuration whose stores are all remote, so `Workspace.open` makes a
+    scratch root for it."""
+    return Configuration.build(
+        identity=Identity(workspace_id="tenant-1", name="Tenant", organization="TenantOrg"),
+        storage=Storage.combined(
+            ProviderSpec(register_provider(monkeypatch, InMemoryStore, "InMemoryStore"))
+        ),
+    )
 
 
 def _toml_scalar(value: Any) -> str:
@@ -238,12 +333,15 @@ def _reset_warning_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
     the Logging section of ../CLAUDE.md) so tests stay order-independent —
     any test may trigger these paths, not only the modules that assert on them."""
     from dgml_core import grounded, models_config, ocr, rotation
+    from dgml_core.generation import pipeline
 
     models_config._WARNED_TIER_FALLBACKS.clear()
     models_config._WARNED_DISABLED.clear()
     ocr._WARNED_NO_OCR_PROVIDER.clear()
     grounded._REQUIRED_TOOL_CHOICE_REJECTED.clear()
+    grounded._WARNED_TELEMETRY.clear()
     monkeypatch.setattr(rotation, "_WARNED_PILLOW_MISSING", False)
+    monkeypatch.setattr(pipeline, "_WARNED_DEBUG_WITHOUT_USAGE", False)
 
 
 @pytest.fixture

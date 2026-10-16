@@ -3476,3 +3476,24 @@ def test_loads_tolerant_still_rejects_genuine_garbage() -> None:
 
     with _pytest.raises(json.JSONDecodeError):
         loads_tolerant('{"labels": [{"concept": "Buyer", "quote": "trunc')
+
+
+def test_debug_without_record_usage_warns_once(
+    workspace: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`debug=True` with a workspace used to write usage rows and now does not;
+    unlike every other old `debug=` caller (a TypeError) this one would go quiet,
+    so it says so — once per process, and never when record_usage is set."""
+    caplog.set_level("WARNING", logger="dgml_core.generation.pipeline")
+
+    def warn(**kw: Any) -> None:
+        opts = pipeline_mod.ConvertOptions(model="m", label_model="m", workspace=workspace, **kw)
+        pipeline_mod._warn_if_debug_without_usage(opts)
+
+    warn(debug=True, record_usage=True)
+    warn(debug=False)
+    assert not caplog.records
+    warn(debug=True)
+    warn(debug=True)
+    (record,) = caplog.records
+    assert "record_usage=True" in record.message

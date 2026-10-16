@@ -62,7 +62,7 @@ def run_extraction(ws: Workspace, capture_kwargs: Any, replies: list[Any], model
     ds_id, _ = _seed_docset_with_schema(ws, FID)
     captured = capture_kwargs(replies)
     cfg = GroundedConfig(schema_model=model, values_model=model)
-    extract_values(ws, ds_id, FID, config=cfg, debug=True)
+    extract_values(ws, ds_id, FID, config=cfg, record_usage=True, write_stats=True)
     return captured.kwargs
 
 
@@ -245,7 +245,7 @@ def test_sync_extraction_repairs_and_refuses_like_the_steps(
     capture_kwargs([lookup, submit({"Invoice": {"text": "x"}})])
     cfg = GroundedConfig(schema_model=DEFAULT_VALUES_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with pytest.raises(ValuesExtractionFailed, match="nothing that fits the schema"):
-        extract_values(workspace, ds_id, FID, config=cfg, debug=True)
+        extract_values(workspace, ds_id, FID, config=cfg, record_usage=True, write_stats=True)
     row = read_events(workspace)[-1]
     assert (row["outcome"], row["context"]["tool_calls"]) == ("error", 1)
     assert stats(ds_id)["outcome"] == "error"

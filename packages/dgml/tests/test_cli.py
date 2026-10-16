@@ -2676,8 +2676,9 @@ def test_docset_generate_cache_dir_and_debug_threading(
     tmp_path: Path, text_pdf: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The cache dir is always set (it holds functional files the next run
-    reloads); --debug only flips ConvertOptions.debug, which gates the
-    debug-only artifacts. An explicit --cache-dir always wins."""
+    reloads); --debug flips ConvertOptions.debug, which gates the debug-only
+    artifacts, and ConvertOptions.record_usage, which gates the usage rows.
+    An explicit --cache-dir always wins."""
     ws = tmp_path / "ws"
     did = _init_with_docset(ws, capsys)
     main(_ws_args(ws) + ["file", "add", str(text_pdf)])
@@ -2712,10 +2713,12 @@ def test_docset_generate_cache_dir_and_debug_threading(
     default_opts = _run([], [])
     assert default_opts.cache_dir == cache_dir
     assert default_opts.debug is False
+    assert default_opts.record_usage is False
     # --debug: same cache dir, debug on (debug-only files also written).
     debug_opts = _run(["--debug"], [])
     assert debug_opts.cache_dir == cache_dir
     assert debug_opts.debug is True
+    assert debug_opts.record_usage is True
     # Explicit --cache-dir always wins.
     explicit = tmp_path / "mycache"
     assert _run([], ["--cache-dir", str(explicit)]).cache_dir == explicit
@@ -5895,9 +5898,10 @@ def test_extraction_extract_refuses_unknown_values_effort(
 def test_extraction_extract_records_usage_under_debug(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`extraction extract --debug` forwards debug into extract_values, so the
-    LLM cost/token row lands in usage.jsonl — same gating as every other LLM
-    op and the auto-extract path. Without --debug, no row is written."""
+    """`extraction extract --debug` turns on usage recording and the stats
+    document in extract_values, so the LLM cost/token row lands in usage.jsonl
+    and extraction_stats.json is stored — same gating as every other LLM op and
+    the auto-extract path. Without --debug, neither is written."""
     from dgml_core.usage import read_events
 
     ws = tmp_path / "ws"
@@ -5921,13 +5925,15 @@ def test_extraction_extract_records_usage_under_debug(
     response._hidden_params = {"response_cost": 0.004}
     response.usage = SimpleNamespace(prompt_tokens=300, completion_tokens=40, total_tokens=340)
 
-    # Without --debug: no usage row.
+    # Without --debug: no usage row and no stats document.
     fid = _fresh_file()
     with patch("litellm.completion", return_value=response):
         assert main(_ws_args(ws) + ["extraction", "extract", ds_id, fid]) == 0
     assert read_events(Workspace(root=ws)) == []
+    assert Workspace(root=ws).docs.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
 
-    # With --debug (global flag, precedes the subcommand): one extract_values row.
+    # With --debug (global flag, precedes the subcommand): one extract_values
+    # row, and the stats document.
     _wsx = Workspace(root=ws)
     _wsx.blobs.delete_blob(layout.dgml_xml_key(ds_id, fid, "doc"))  # re-extract cleanly
     with patch("litellm.completion", return_value=response):
@@ -5936,6 +5942,8 @@ def test_extraction_extract_records_usage_under_debug(
     assert len(events) == 1
     assert events[0]["operation"] == "extract_values"
     assert events[0]["cost_usd"] == 0.004
+    stats = Workspace(root=ws).docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None and stats["outcome"] == "ok"
 
 
 def test_docset_add_file_auto_extracts_when_schema_set(
@@ -5960,6 +5968,7 @@ def test_docset_add_file_auto_extracts_when_schema_set(
     # dropped as unverifiable.)
     values = {"VendorName": {"text": "Acme", "method": "defaulted"}}
     response = _tool_response("submit_values", {"values": values})
+    response._hidden_params = {"response_cost": 0.03}
     with patch("litellm.completion", return_value=response):
         rc = main(_ws_args(ws) + ["docset", "add-file", "fileauto0001", "--docset", ds_id])
     assert rc == 0
@@ -5968,6 +5977,17 @@ def test_docset_add_file_auto_extracts_when_schema_set(
     assert payload["extraction"]["performed"] is True
     assert payload["extraction"]["error"] is None
     assert payload["extraction"]["model"] == "gemini/gemini-2.5-pro"
+    # The run's cost is reported without --debug, so no usage.jsonl is needed.
+    assert payload["extraction"]["usage"]["cost_usd"] == 0.03
+    assert set(payload["extraction"]["usage"]) == {
+        "cost_usd",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cache_read_tokens",
+        "cache_creation_tokens",
+        "duration_s",
+    }
 
     _wsx = Workspace(root=ws)
     xml = _wsx.blobs.get_blob(layout.dgml_xml_key(ds_id, "fileauto0001", "doc")).decode("utf-8")
@@ -6015,9 +6035,39 @@ def test_docset_add_file_extraction_failure_is_soft(
     payload = _read_stdout(capsys)
     assert payload["assigned"] is True
     assert "GROUNDED_CONFIG_MISSING" in payload["extraction"]["error"]
+    # Nothing was spent before the config error.
+    assert payload["extraction"]["usage"] is None
     # Assignment is on disk despite the failed extraction.
     main(_ws_args(ws) + ["docset", "list-files", ds_id])
     assert "fileauto0003" in _read_stdout(capsys)["file_ids"]
+
+
+def test_docset_add_file_failed_extraction_reports_what_it_spent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A soft extraction failure after an LLM call still reports that call's
+    cost in `extraction.usage`, without --debug."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _write_grounded_config(ws)
+    ds_id = _new_docset(ws, capsys)
+    schema_file = tmp_path / "schema.rnc"
+    schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
+    main(_ws_args(ws) + ["extraction", "set-schema", ds_id, "--schema-file", str(schema_file)])
+    capsys.readouterr()
+    _seed_file_dir(ws, "fileauto0004", pages=1)
+
+    # A tree that fits no schema root is refused after the call was billed.
+    bogus = {"Bogus": {"text": "x", "locations": [{"page_number": 1}]}}
+    response = _tool_response("submit_values", {"values": bogus})
+    response._hidden_params = {"response_cost": 0.05}
+    with patch("litellm.completion", return_value=response):
+        rc = main(_ws_args(ws) + ["docset", "add-file", "fileauto0004", "--docset", ds_id])
+    assert rc == 0
+    extraction = _read_stdout(capsys)["extraction"]
+    assert "VALUES_EXTRACTION_FAILED" in extraction["error"]
+    assert extraction["usage"]["cost_usd"] == 0.05
 
 
 @needs_gs

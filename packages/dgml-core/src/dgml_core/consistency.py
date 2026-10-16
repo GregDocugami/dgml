@@ -109,14 +109,14 @@ def _entity_ids(ws: Workspace, collection: str, blob_prefix: str) -> list[str]:
 
 
 def check_workspace(
-    ws: Workspace, *, retry_errors: bool = False, debug: bool = False
+    ws: Workspace, *, retry_errors: bool = False, record_usage: bool = False
 ) -> CheckReport:
     """Validate the workspace; repair fixable issues where safe.
 
     With ``retry_errors=True``, recorded permanent errors are cleared before
     checking so that previously-failed operations are re-attempted.
     Hybrid re-extraction logs its per-page diagnostics through
-    ``dgml_core.hybrid`` (see :mod:`dgml_core.hybrid`). ``debug`` is
+    ``dgml_core.hybrid`` (see :mod:`dgml_core.hybrid`). ``record_usage`` is
     forwarded so a hybrid LLM merge during re-extraction records its usage
     telemetry (only the hybrid path issues LLM calls).
     """
@@ -128,7 +128,7 @@ def check_workspace(
             ws,
             file_id,
             retry_errors=retry_errors,
-            debug=debug,
+            record_usage=record_usage,
             report=report,
         )
 
@@ -144,7 +144,7 @@ def _check_file(
     file_id: str,
     *,
     retry_errors: bool,
-    debug: bool,
+    record_usage: bool,
     report: CheckReport,
 ) -> None:
     # Scanned pages OCR could not recover leave a full set of page_text files
@@ -301,7 +301,7 @@ def _check_file(
             file_id=file_id,
             text_mode=text_mode,
             dpi=dpi,
-            debug=debug,
+            record_usage=record_usage,
             report=report,
             retry=retry_scanned_pages,
         )
@@ -522,7 +522,7 @@ def _check_text_extraction(
     file_id: str,
     text_mode: str,
     dpi: int,
-    debug: bool,
+    record_usage: bool,
     report: CheckReport,
     retry: bool = False,
 ) -> None:
@@ -560,7 +560,7 @@ def _check_text_extraction(
         return
 
     try:
-        result = _reextract(ws, source_key, file_id, text_mode, dpi=dpi, debug=debug)
+        result = _reextract(ws, source_key, file_id, text_mode, dpi=dpi, record_usage=record_usage)
     except (TextExtractionFailed, OcrFailed, AuthError, DgmlError) as exc:
         append_recorded_error(
             ws,
@@ -624,7 +624,7 @@ def _reextract(
     text_mode: str,
     *,
     dpi: int = DEFAULT_DPI,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> ExtractDigitalResult:
     """Re-extract text for ``file_id`` using whichever mode it was added with.
 
@@ -666,7 +666,7 @@ def _reextract(
                     text_extraction_config=text_extraction_config,
                     workspace=ws,
                     dpi=dpi,
-                    debug=debug,
+                    record_usage=record_usage,
                 )
         result = extract_text_digital(pdf_path, text_dir, file_id=file_id, dpi=dpi)
         # Same per-page OCR fallback as `file add`, so configuring a provider and

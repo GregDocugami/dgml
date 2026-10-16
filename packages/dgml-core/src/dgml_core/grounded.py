@@ -67,6 +67,7 @@ from .errors import (
     CONVERT_TO_PDF_OPERATION,
     AuthError,
     ConversionFailed,
+    DgmlError,
     FileNotFound,
     GroundedConfigInvalid,
     GroundedConfigMissing,
@@ -139,10 +140,10 @@ from .usage import (
     UsageEvent,
     add_partial,
     public_totals,
-    record_usage,
     scope_events,
     with_tier,
 )
+from .usage import record_usage as _append_usage_event
 
 logger = logging.getLogger(__name__)
 
@@ -541,7 +542,7 @@ def generate_schema(
     *,
     config: GroundedConfig,
     docset_name: str,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> str:
     """Ask the configured LLM to propose an extraction schema from one or
     more PDFs of the same kind, returning the at-rest RELAX NG Compact form.
@@ -566,8 +567,13 @@ def generate_schema(
 
     Raises :class:`SchemaGenerationFailed` on any non-config failure
     (no files, missing PDF, malformed LLM response, network error).
+
+    ``record_usage`` appends one ``schema_generate`` row to the workspace's
+    ``usage.jsonl``; it is independent of debug artifacts.
     """
-    llm_config, steps = generate_schema_steps(workspace, file_ids, config=config, debug=debug)
+    llm_config, steps = generate_schema_steps(
+        workspace, file_ids, config=config, record_usage=record_usage
+    )
     try:
         result = llm.drive(steps, llm_config)
     except SchemaGenerationFailed:
@@ -582,7 +588,7 @@ def generate_schema_steps(
     file_ids: list[str],
     *,
     config: GroundedConfig,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> tuple[LLMConfig, LLMSteps[CallResult]]:
     """The schema-generation request as ``(config, steps)``.
 
@@ -608,8 +614,8 @@ def generate_schema_steps(
     # max_tokens=None so the wrapper doesn't add the max_tokens alias alongside
     # max_completion_tokens. reasoning_effort is set unconditionally; the
     # wrapper drops it for Anthropic + forced tool_choice.
-    # Single call → the driver records its usage row (gated on --debug) from the
-    # context carried on the config.
+    # Single call → the driver records its usage row (gated on ``record_usage``)
+    # from the context carried on the config.
     llm_config = LLMConfig(
         model=config.schema_model,
         api_key=api_key,
@@ -619,7 +625,7 @@ def generate_schema_steps(
         timeout=_DEFAULT_TIMEOUT_SECONDS,
         reasoning_effort=_DEFAULT_REASONING_EFFORT,
         workspace=workspace,
-        debug=debug,
+        record_usage=record_usage,
         operation=OPERATION_SCHEMA_GENERATE,
         context={"from_file_ids": list(file_ids)},
     )
@@ -951,6 +957,18 @@ class ExtractionResult:
     ``tool_calls`` is the count of ``get_page_words`` grounding lookups the
     model performed before finalizing — a rough proxy for how much grounding it
     leaned on. ``model`` is the values model that produced it.
+
+    ``usage`` is the cost/token accounting of the whole call — the same totals
+    the ``extract_values`` row in ``usage.jsonl`` carries (phase 1 + phase 3
+    summed; ``cost_usd`` and the token counts are ``None`` when the provider
+    did not report them) plus ``duration_s`` — and ``stats`` is the full
+    per-phase breakdown that ``extraction_stats.json`` holds. Both are
+    populated whether or not anything was persisted, so a host that keeps
+    telemetry out of the workspace can read them here. The one exception: if
+    building one fails (logged, never raised — the values are already stored),
+    that field is ``{}``, so read it with ``.get`` rather than indexing. A
+    failed run carries the same docs on its error instead (see
+    :class:`~dgml_core.errors.DgmlError`), ``None`` there when unbuilt.
     """
 
     values: dict[str, Any]
@@ -958,6 +976,8 @@ class ExtractionResult:
     xml_key: str
     mode: str
     model: str
+    usage: dict[str, Any] = field(default_factory=dict)
+    stats: dict[str, Any] = field(default_factory=dict)
 
 
 def extract_values(
@@ -966,8 +986,8 @@ def extract_values(
     file_id: str,
     *,
     config: GroundedConfig,
-    write_stats: bool = True,
-    debug: bool = False,
+    write_stats: bool = False,
+    record_usage: bool = False,
 ) -> ExtractionResult:
     """Ask the configured LLM to extract values from a file against a docset's schema.
 
@@ -994,15 +1014,22 @@ def extract_values(
        never has to echo the whole structure, so phase-3 prompts and
        outputs stay small.
 
-    Cost telemetry (``--debug`` only, via ``debug``): a single
-    ``extract_values`` row in ``usage.jsonl`` sums phase 1 + 3 (phase 2 is
-    code only). Per-phase timings, costs, and match percentages are also
-    written to ``extraction_stats.json`` (unless ``write_stats=False``, which
-    the CLI sets unless ``--debug``) so the UX can render them without
-    re-deriving anything from the usage log.
+    Cost telemetry: with ``record_usage`` a single ``extract_values`` row in
+    ``usage.jsonl`` sums phase 1 + 3 (phase 2 is code only). With
+    ``write_stats`` the per-phase timings, costs, and match percentages are
+    stored as the pair's ``extraction_stats.json``. Both are off by default
+    and independent of debug artifacts (the CLI turns both on under
+    ``--debug``); the same numbers come back on the result as ``usage`` and
+    ``stats`` regardless, so a caller that persists neither can still read
+    them.
     """
     run = _FileExtraction(
-        workspace, docset_id, file_id, config=config, write_stats=write_stats, debug=debug
+        workspace,
+        docset_id,
+        file_id,
+        config=config,
+        write_stats=write_stats,
+        record_usage=record_usage,
     )
     try:
         steps = run.phase1_steps()
@@ -1065,14 +1092,14 @@ class _FileExtraction:
         *,
         config: GroundedConfig,
         write_stats: bool,
-        debug: bool,
+        record_usage: bool,
     ) -> None:
         self.workspace = workspace
         self.docset_id = docset_id
         self.file_id = file_id
         self.config = config
         self.write_stats = write_stats
-        self.debug = debug
+        self.record_usage = record_usage
 
         store = DocSetStore(workspace)
         self.store = store
@@ -1139,6 +1166,14 @@ class _FileExtraction:
         self.phase1 = Phase1Result(totals=self.phase1_totals)
         self._phase2_values: dict[str, Any] = {}
         self._phase2_unmatched_locations = 0
+        # Both built once, by finish() on success and otherwise by record(),
+        # from whatever the phases got done; the same dicts are what the result
+        # (or the DgmlError that ended the run) carries and what ``usage.jsonl`` /
+        # ``extraction_stats.json`` store, so the views never disagree
+        # (``duration_s`` is a clock read).
+        self.stats_doc: dict[str, Any] | None = None
+        self.usage_doc: dict[str, Any] | None = None
+        self.failure: DgmlError | None = None
 
     # ---- phase 1 ------------------------------------------------------
 
@@ -1239,7 +1274,7 @@ class _FileExtraction:
         self.tool_calls_total += self.phase1.tool_calls
         self.phase1_duration = round(time.monotonic() - self.phase1_started, 3)
         # Recorded above, before this refusal raises, so a refused run's
-        # --debug usage row and stats sidecar still carry what phase 1 did.
+        # usage row and stats sidecar still carry what phase 1 did.
         if self.phase1.refusal is not None:
             raise ValuesExtractionFailed(self.phase1.refusal)
         # The merged extracted_value leaf shape lets a sloppy model blur the
@@ -1347,6 +1382,13 @@ class _FileExtraction:
             reasoning_effort=self.config.locations_reasoning_effort,
         )
 
+    def fold_failed_phase3(self, page_totals: list[dict[str, Any]]) -> None:
+        """Fold what phase 3 spent into the run when a page failed, in page
+        order (as :meth:`finish` would), since :meth:`finish` will not run."""
+        for totals in page_totals:
+            add_partial(self.phase3_totals, totals)
+        self.phase3_duration = round(time.monotonic() - self.phase3_started, 3)
+
     # ---- finish -------------------------------------------------------
 
     def finish(self, per_page: list[_PageOutcome]) -> ExtractionResult:
@@ -1419,16 +1461,27 @@ class _FileExtraction:
             doc = standalone_extraction_doc(final_values, vocab=self.vocab)
         workspace.blobs.put_blob(xml_key, doc.encode("utf-8"))
         self.outcome = OUTCOME_OK
+        # The values are already stored: telemetry failing to build must not
+        # turn this into a failed extraction.
+        self.stats_doc = _safe_summary(self._stats_summary, "stats")
+        self.usage_doc = _safe_summary(self._usage_summary, "usage")
         return ExtractionResult(
             values=final_values,
             tool_calls=self.tool_calls_total,
             xml_key=xml_key,
             mode=mode,
             model=self.config.values_model,
+            usage=self.usage_doc or {},
+            stats=self.stats_doc or {},
         )
 
     def fail(self, exc: BaseException) -> None:
-        """Note why the run failed, for the usage row and the stats."""
+        """Note why the run failed, for the usage row and the stats, and keep
+        a :class:`DgmlError` so :meth:`record` can hand it the run's usage."""
+        if isinstance(exc, DgmlError):
+            # Any DGML error, not only ValuesExtractionFailed: a FileNotFound
+            # from finish() (unassigned mid-run) comes after both LLM phases.
+            self.failure = exc
         if isinstance(exc, ValuesExtractionFailed):
             self.error_msg = str(exc)
         elif isinstance(exc, Exception):
@@ -1437,87 +1490,149 @@ class _FileExtraction:
             self.error_msg = f"{type(exc).__name__}: {exc}"
         # An interrupt records the error outcome with no message, as before.
 
+    # ---- telemetry ----------------------------------------------------
+
+    def _usage_summary(self) -> dict[str, Any]:
+        return {
+            **public_totals(_merge_totals(self.phase1_totals, self.phase3_totals)),
+            "duration_s": round(time.monotonic() - self.started, 3),
+        }
+
+    def _stats_summary(self) -> dict[str, Any]:
+        return _build_extraction_stats(
+            model=self.config.values_model,
+            outcome=self.outcome,
+            error_msg=self.error_msg,
+            phase1_totals=self.phase1_totals,
+            phase3_totals=self.phase3_totals,
+            phase1_duration=self.phase1_duration,
+            phase2_duration=self.phase2_duration,
+            phase3_duration=self.phase3_duration,
+            phase3_page_calls=self.phase3_page_calls,
+            phase3_grid_pages=self.phase3_grid_pages,
+            phase3_boxes_dropped=self.phase3_boxes_dropped,
+            phase3_pages_out_of_range=self.phase3_pages_out_of_range,
+            phase2_matched=self.phase2_matched,
+            phase3_matched=self.phase3_matched,
+            unmatched=self.unmatched_count,
+            total_locations=self.total_locations,
+            unprinted_fields=self.unprinted_fields,
+            partly_printed_fields=self.partly_printed_fields,
+            dropped_inputs=self.dropped_inputs,
+            unsupported_values=self.unsupported_values,
+            repaired_inputs=self.repaired_inputs,
+            located_pageless=self.located_pageless,
+            dropped_unboxed_values=self.dropped_unboxed_values,
+            dropped_unboxed_paths=self.dropped_unboxed_paths,
+            rejected_boxes=self.rejected_boxes,
+            snapped_boxes=self.snapped_boxes,
+            unnormalized_enums=self.unnormalized_enums,
+            derivations_checked=self.derivations_checked,
+            derivations_mismatched=self.derivations_mismatched,
+            invariants_checked=self.invariants_checked,
+            invariant_violations=self.invariant_violations,
+            phase1_layout=self.phase1_layout,
+            phase1_tool_schema=self.phase1_tool_schema_mode,
+            phase1_chunk_calls=self.phase1_chunk_calls,
+            phase1_truncated_retries=self.phase1_truncated_retries,
+            phase1_pdf_parts=self.phase1_pdf_parts,
+            phase1_envelope_repairs=self.phase1_envelope_repairs,
+            phase1_no_tool_call_retries=self.phase1_no_tool_call_retries,
+        )
+
+    def _append_usage_rows(self, usage_doc: dict[str, Any]) -> None:
+        event = UsageEvent(
+            at=now_iso(),
+            operation=OPERATION_EXTRACT_VALUES,
+            model=self.config.values_model,
+            cost_usd=usage_doc["cost_usd"],
+            prompt_tokens=usage_doc["prompt_tokens"],
+            completion_tokens=usage_doc["completion_tokens"],
+            total_tokens=usage_doc["total_tokens"],
+            cache_read_tokens=usage_doc["cache_read_tokens"],
+            cache_creation_tokens=usage_doc["cache_creation_tokens"],
+            duration_s=usage_doc["duration_s"],
+            outcome=self.outcome,
+            context={
+                "file_id": self.file_id,
+                "docset_id": self.docset_id,
+                "tool_calls": self.tool_calls_total,
+            },
+            error=self.error_msg,
+        )
+        # One row, or one per tier when phase 1 and phase 3 responses were
+        # served by different tiers.
+        merged_totals = _merge_totals(self.phase1_totals, self.phase3_totals)
+        for part in scope_events(event, merged_totals):
+            _append_usage_event(self.workspace, part)
+
     def record(self) -> None:
-        """Write the usage row (``--debug``) and the stats (when opted in)."""
-        # Usage recording is gated on --debug (like every other LLM path).
-        # This aggregates phase 1 + 3 into one row; the internal per-call
-        # configs carry no workspace, so they don't each auto-record.
-        if self.debug:
-            merged_totals = _merge_totals(self.phase1_totals, self.phase3_totals)
-            event = UsageEvent(
-                at=now_iso(),
-                operation=OPERATION_EXTRACT_VALUES,
-                model=self.config.values_model,
-                cost_usd=merged_totals["cost_usd"],
-                prompt_tokens=merged_totals["prompt_tokens"],
-                completion_tokens=merged_totals["completion_tokens"],
-                total_tokens=merged_totals["total_tokens"],
-                cache_read_tokens=merged_totals["cache_read_tokens"],
-                cache_creation_tokens=merged_totals["cache_creation_tokens"],
-                duration_s=round(time.monotonic() - self.started, 3),
-                outcome=self.outcome,
-                context={
-                    "file_id": self.file_id,
-                    "docset_id": self.docset_id,
-                    "tool_calls": self.tool_calls_total,
-                },
-                error=self.error_msg,
-            )
-            # One row, or one per tier when phase 1 and phase 3 responses
-            # were served by different tiers.
-            for part in scope_events(event, merged_totals):
-                record_usage(self.workspace, part)
-        # Even on failure, partial numbers help diagnose where we
-        # stalled. Wrapped in try/except so telemetry can never break
-        # the caller. Suppressed entirely unless the caller opted in
-        # (the CLI does so only under --debug).
-        try:
-            if self.write_stats:
-                _write_extraction_stats(
-                    workspace=self.workspace,
-                    docset_id=self.docset_id,
-                    file_id=self.file_id,
-                    model=self.config.values_model,
-                    outcome=self.outcome,
-                    error_msg=self.error_msg,
-                    phase1_totals=self.phase1_totals,
-                    phase3_totals=self.phase3_totals,
-                    phase1_duration=self.phase1_duration,
-                    phase2_duration=self.phase2_duration,
-                    phase3_duration=self.phase3_duration,
-                    phase3_page_calls=self.phase3_page_calls,
-                    phase3_grid_pages=self.phase3_grid_pages,
-                    phase3_boxes_dropped=self.phase3_boxes_dropped,
-                    phase3_pages_out_of_range=self.phase3_pages_out_of_range,
-                    phase2_matched=self.phase2_matched,
-                    phase3_matched=self.phase3_matched,
-                    unmatched=self.unmatched_count,
-                    total_locations=self.total_locations,
-                    unprinted_fields=self.unprinted_fields,
-                    partly_printed_fields=self.partly_printed_fields,
-                    dropped_inputs=self.dropped_inputs,
-                    unsupported_values=self.unsupported_values,
-                    repaired_inputs=self.repaired_inputs,
-                    located_pageless=self.located_pageless,
-                    dropped_unboxed_values=self.dropped_unboxed_values,
-                    dropped_unboxed_paths=self.dropped_unboxed_paths,
-                    rejected_boxes=self.rejected_boxes,
-                    snapped_boxes=self.snapped_boxes,
-                    unnormalized_enums=self.unnormalized_enums,
-                    derivations_checked=self.derivations_checked,
-                    derivations_mismatched=self.derivations_mismatched,
-                    invariants_checked=self.invariants_checked,
-                    invariant_violations=self.invariant_violations,
-                    phase1_layout=self.phase1_layout,
-                    phase1_tool_schema=self.phase1_tool_schema_mode,
-                    phase1_chunk_calls=self.phase1_chunk_calls,
-                    phase1_truncated_retries=self.phase1_truncated_retries,
-                    phase1_pdf_parts=self.phase1_pdf_parts,
-                    phase1_envelope_repairs=self.phase1_envelope_repairs,
-                    phase1_no_tool_call_retries=self.phase1_no_tool_call_retries,
+        """Build the usage and stats docs if :meth:`finish` did not, hand them
+        to a :class:`DgmlError` in flight, and persist them when opted in (call
+        last, on every exit).
+
+        Everything here is telemetry and must never break the caller or mask
+        the error in flight: each step is guarded on its own. On the failure
+        paths the docs are built here, from whatever the phases got done, and
+        ride out on the DgmlError so a caller that persists nothing can still
+        account for what the run spent.
+        """
+        if self.usage_doc is None:
+            self.usage_doc = _safe_summary(self._usage_summary, "usage")
+        if self.stats_doc is None:
+            self.stats_doc = _safe_summary(self._stats_summary, "stats")
+        if self.failure is not None:
+            self.failure.usage = self.usage_doc
+            self.failure.stats = self.stats_doc
+        # Usage recording is gated on ``record_usage`` (like every other LLM
+        # path), not on debug artifacts. This aggregates phase 1 + 3 into one
+        # row; the internal per-call configs carry no workspace, so they don't
+        # each auto-record.
+        if self.record_usage and self.usage_doc is not None:
+            try:
+                self._append_usage_rows(self.usage_doc)
+            except Exception:
+                _warn_telemetry(
+                    "usage-write", "could not record extract_values usage for file %s", self.file_id
                 )
-        except Exception:
-            pass
+        # Even on failure, partial numbers help diagnose where we stalled.
+        # Suppressed when the caller opted out.
+        if self.write_stats and self.stats_doc is not None:
+            try:
+                _write_extraction_stats(
+                    self.workspace, self.docset_id, self.file_id, self.stats_doc
+                )
+            except Exception:
+                _warn_telemetry(
+                    "stats-write", "could not write extraction stats for file %s", self.file_id
+                )
+
+
+# Extraction-telemetry failures already reported this process, keyed by what
+# failed (building or writing the usage / stats doc). A broken docstore fails
+# every file the same way, so a bulk run (`cluster`, `file add --auto-classify`)
+# would otherwise log one traceback per file; recurrences go to DEBUG.
+_WARNED_TELEMETRY: set[str] = set()
+
+
+def _warn_telemetry(kind: str, msg: str, *args: object) -> None:
+    """Log a telemetry failure from inside an ``except``: WARNING with the
+    traceback the first time *kind* fails in this process, DEBUG after."""
+    if kind in _WARNED_TELEMETRY:
+        logger.debug(msg, *args, exc_info=True)
+        return
+    _WARNED_TELEMETRY.add(kind)
+    logger.warning(msg, *args, exc_info=True)
+
+
+def _safe_summary(build: Callable[[], dict[str, Any]], what: str) -> dict[str, Any] | None:
+    """Build a telemetry doc, or log and return ``None`` — telemetry never
+    breaks an extraction nor masks the error a failed one is raising."""
+    try:
+        return build()
+    except Exception:
+        _warn_telemetry(f"{what}-build", "could not build extraction %s", what)
+        return None
 
 
 def _run_phase3_pages(
@@ -1531,17 +1646,31 @@ def _run_phase3_pages(
     by :meth:`_FileExtraction.finish` after every call returns. A failed page
     raises out of the pool's ordered ``map``, so the first failing page (in
     page order) is the one reported, as before.
+
+    ``finish`` never runs when a page fails, so the pages' totals are folded
+    here instead — every page's, the failing one's partial spend included —
+    so the usage row, the stats and ``exc.usage`` count what phase 3 spent.
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    def _do_page(page: int, items: list[UnmatchedItem]) -> _PageOutcome:
-        local_totals = _empty_totals()
-        page_result = llm.drive(run.phase3_steps(page, items, local_totals), run.phase3_config())
-        return page, items, page_result, local_totals
+    # Allocated up front so a page that raises still leaves its totals behind.
+    page_totals = [_empty_totals() for _ in pages]
+
+    def _do_page(i: int) -> _PageOutcome:
+        page, items = pages[i]
+        totals = page_totals[i]
+        page_result = llm.drive(run.phase3_steps(page, items, totals), run.phase3_config())
+        return page, items, page_result, totals
 
     workers = min(_PHASE3_MAX_PARALLEL, max(1, len(pages)))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        return list(ex.map(lambda kv: _do_page(*kv), pages))
+    try:
+        # Leaving the ``with`` waits for the pages still in flight, so by the
+        # time the ``except`` runs every page's totals are final.
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            return list(ex.map(_do_page, range(len(pages))))
+    except BaseException:
+        run.fold_failed_phase3(page_totals)
+        raise
 
 
 def _empty_totals() -> dict[str, Any]:
@@ -1582,10 +1711,16 @@ def _merge_totals(*partials: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_extraction_stats(
+    workspace: Workspace, docset_id: str, file_id: str, stats: dict[str, Any]
+) -> None:
+    """Store *stats* as the pair's ``extraction_stats.json``."""
+    workspace.docs.put_doc(
+        layout.Collection.EXTRACTION_STATS, layout.pair_id(docset_id, file_id), stats
+    )
+
+
+def _build_extraction_stats(
     *,
-    workspace: Workspace,
-    docset_id: str,
-    file_id: str,
     model: str,
     outcome: str,
     error_msg: str | None,
@@ -1624,15 +1759,17 @@ def _write_extraction_stats(
     phase1_envelope_repairs: int,
     phase1_no_tool_call_retries: int,
     phase1_pdf_parts: list[tuple[int, int]] | None = None,
-) -> None:
-    """Write ``extraction_stats.json`` into the file's marker directory.
+) -> dict[str, Any]:
+    """The ``extraction_stats.json`` document for one extraction run — what
+    :func:`extract_values` returns as ``ExtractionResult.stats`` and, with
+    ``write_stats``, stores into the file's marker directory.
 
     Phase 2's row carries no cost/token fields because it never makes an
     LLM call. The three match counts together cover every phase-1
     location: ``phase2_matched + phase3_matched + unmatched == total``.
     Computed (reasoned) fields carry no locations, so they sit outside
     that invariant and are counted separately."""
-    stats = {
+    return {
         "completed_at": now_iso(),
         "model": model,
         "outcome": outcome,
@@ -1724,9 +1861,6 @@ def _write_extraction_stats(
         # vocabulary pruning.
         "phase1_tool_schema": phase1_tool_schema,
     }
-    workspace.docs.put_doc(
-        layout.Collection.EXTRACTION_STATS, layout.pair_id(docset_id, file_id), stats
-    )
 
 
 # ---- Step plumbing shared by phase 1 and phase 3 --------------------------

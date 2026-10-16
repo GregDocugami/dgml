@@ -713,7 +713,7 @@ def test_steps_write_no_usage_row(tmp_path: Path) -> None:
     from dgml_core.usage import read_events
 
     ws = Workspace(root=tmp_path)
-    cfg = llm.LLMConfig(model=_MODEL, workspace=ws, debug=True, operation="links")
+    cfg = llm.LLMConfig(model=_MODEL, workspace=ws, record_usage=True, operation="links")
     _hand_drive(links_mod.plan_links_steps(_XML, cfg), [_GOOD_REPLY, _VERDICTS])
     assert read_events(ws) == []
 
@@ -757,7 +757,7 @@ def test_propose_and_verify_write_one_usage_row(capture_kwargs: Any, tmp_path: P
         ]
     )
     ws = Workspace(root=tmp_path)
-    cfg = llm.LLMConfig(model=_MODEL, workspace=ws, debug=True, operation="links")
+    cfg = llm.LLMConfig(model=_MODEL, workspace=ws, record_usage=True, operation="links")
     plan_links(_XML, cfg)
 
     (row,) = read_events(ws)

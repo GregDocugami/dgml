@@ -42,9 +42,21 @@ if TYPE_CHECKING:
 
 
 class DgmlError(Exception):
-    """Base class for all DGML errors. Carries a stable ``code`` for the CLI."""
+    """Base class for all DGML errors. Carries a stable ``code`` for the CLI.
+
+    ``usage`` and ``stats`` are set when the error ends a value extraction
+    (:func:`dgml_core.grounded.extract_values`, and so ``extract_file`` /
+    ``add_file_and_extract``) after it may have spent money: they carry what
+    the run got done — the same shapes ``ExtractionResult.usage`` / ``.stats``
+    have on success — so a caller that persists no telemetry can still account
+    for a failed run. Both are ``None`` for every other error, and when they
+    could not be built. Errors that are not a ``DgmlError`` (a bug, a raw
+    storage exception) never carry them.
+    """
 
     code: str = "DGML_ERROR"
+    usage: dict[str, Any] | None = None
+    stats: dict[str, Any] | None = None
 
     def __reduce__(self) -> tuple[Any, ...]:
         # ``Exception.__reduce__`` rebuilds via ``cls(*args)`` — the message
@@ -426,6 +438,10 @@ class GenerationFailed(DgmlError):
 
 
 class ValuesExtractionFailed(DgmlError):
+    """Value extraction could not finish. Out of
+    :func:`dgml_core.grounded.extract_values` it carries the run's partial
+    ``usage`` / ``stats`` (see :class:`DgmlError`)."""
+
     code = "VALUES_EXTRACTION_FAILED"
 
 
