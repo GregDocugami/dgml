@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -55,6 +56,8 @@ from dgml_core.generation.vocab import OPEN_VOCAB, TagVocab
 from dgml_core.pages import PdfConfig
 from dgml_core.storage import Workspace
 from dgml_core.usage import OPERATION_LABEL, OPERATION_TRANSCRIBE
+
+logger = logging.getLogger(__name__)
 
 
 def load_labeled_docs_from_cache(
@@ -202,6 +205,33 @@ class ConvertOptions:
     record_usage: bool = False
 
 
+# Set once the debug-without-record_usage advisory has been logged. Process-wide:
+# a host builds its ConvertOptions once, so one line per process is enough.
+_WARNED_DEBUG_WITHOUT_USAGE = False
+
+
+def _warn_if_debug_without_usage(opts: ConvertOptions) -> None:
+    """Flag the one silent change of the ``debug`` / ``record_usage`` split.
+
+    ``debug=True`` with a ``workspace`` used to write usage rows; it now keeps
+    only the cache artifacts. Every other entry point that dropped ``debug``
+    fails loudly with ``TypeError``, so this is the one upgrade that would take
+    a host's cost accounting to zero without a signal.
+    """
+    global _WARNED_DEBUG_WITHOUT_USAGE
+    if (
+        opts.debug
+        and opts.workspace is not None
+        and not opts.record_usage
+        and not _WARNED_DEBUG_WITHOUT_USAGE
+    ):
+        _WARNED_DEBUG_WITHOUT_USAGE = True
+        logger.warning(
+            "ConvertOptions(debug=True) no longer records usage.jsonl rows; "
+            "set record_usage=True to keep cost/token telemetry"
+        )
+
+
 def _config(
     opts: ConvertOptions, model: str | None = None, *, operation: str | None = None
 ) -> llm.LLMConfig:
@@ -264,6 +294,7 @@ def convert_batch(
     *prior_outputs*).
     """
     opts = options
+    _warn_if_debug_without_usage(opts)
     vocab = opts.vocab or OPEN_VOCAB
     log = opts.progress or (lambda _m: None)
 

@@ -53,6 +53,13 @@ def _auto_extract(
     the assignment is already on disk; any failure here surfaces in
     ``extraction.error`` without aborting the parent command. A config
     load error is captured into ``error`` the same way.
+
+    ``usage`` is the run's cost/token totals (``ExtractionResult.usage``),
+    present whether or not ``record_usage`` persisted a row, so a host can
+    account for auto-extraction without reading ``usage.jsonl``. A failed run
+    reports what it spent before failing (the error's ``usage``); it is
+    ``None`` when nothing was spent (a config error) or the totals could not
+    be built.
     """
     from .grounded import extract_values, load_grounded_config
 
@@ -60,6 +67,7 @@ def _auto_extract(
         "performed": True,
         "model": None,
         "tool_calls": None,
+        "usage": None,
         "error": None,
     }
     try:
@@ -79,6 +87,7 @@ def _auto_extract(
         )
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
+        block["usage"] = exc.usage
         return block
     except Exception as exc:
         # Bug-grade exception from extraction (e.g. IndexError in a phase).
@@ -89,6 +98,7 @@ def _auto_extract(
         block["error"] = f"{type(exc).__name__}: {exc}"
         return block
     block["tool_calls"] = result.tool_calls
+    block["usage"] = result.usage or None
     return block
 
 

@@ -5908,6 +5908,7 @@ def test_docset_add_file_auto_extracts_when_schema_set(
     # Empty locations → phase 2 has nothing to match, no phase-3 call needed.
     values = {"VendorName": {"text": "Acme", "locations": []}}
     response = _tool_response("submit_values", {"values": values})
+    response._hidden_params = {"response_cost": 0.03}
     with patch("litellm.completion", return_value=response):
         rc = main(_ws_args(ws) + ["docset", "add-file", "fileauto0001", "--docset", ds_id])
     assert rc == 0
@@ -5916,6 +5917,17 @@ def test_docset_add_file_auto_extracts_when_schema_set(
     assert payload["extraction"]["performed"] is True
     assert payload["extraction"]["error"] is None
     assert payload["extraction"]["model"] == "gemini/gemini-2.5-pro"
+    # The run's cost is reported without --debug, so no usage.jsonl is needed.
+    assert payload["extraction"]["usage"]["cost_usd"] == 0.03
+    assert set(payload["extraction"]["usage"]) == {
+        "cost_usd",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cache_read_tokens",
+        "cache_creation_tokens",
+        "duration_s",
+    }
 
     _wsx = Workspace(root=ws)
     xml = _wsx.blobs.get_blob(layout.dgml_xml_key(ds_id, "fileauto0001", "doc")).decode("utf-8")
@@ -5963,9 +5975,39 @@ def test_docset_add_file_extraction_failure_is_soft(
     payload = _read_stdout(capsys)
     assert payload["assigned"] is True
     assert "GROUNDED_CONFIG_MISSING" in payload["extraction"]["error"]
+    # Nothing was spent before the config error.
+    assert payload["extraction"]["usage"] is None
     # Assignment is on disk despite the failed extraction.
     main(_ws_args(ws) + ["docset", "list-files", ds_id])
     assert "fileauto0003" in _read_stdout(capsys)["file_ids"]
+
+
+def test_docset_add_file_failed_extraction_reports_what_it_spent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A soft extraction failure after an LLM call still reports that call's
+    cost in `extraction.usage`, without --debug."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _write_grounded_config(ws)
+    ds_id = _new_docset(ws, capsys)
+    schema_file = tmp_path / "schema.rnc"
+    schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
+    main(_ws_args(ws) + ["extraction", "set-schema", ds_id, "--schema-file", str(schema_file)])
+    capsys.readouterr()
+    _seed_file_dir(ws, "fileauto0004", pages=1)
+
+    # A tree that fits no schema root is refused after the call was billed.
+    bogus = {"Bogus": {"text": "x", "locations": [{"page_number": 1}]}}
+    response = _tool_response("submit_values", {"values": bogus})
+    response._hidden_params = {"response_cost": 0.05}
+    with patch("litellm.completion", return_value=response):
+        rc = main(_ws_args(ws) + ["docset", "add-file", "fileauto0004", "--docset", ds_id])
+    assert rc == 0
+    extraction = _read_stdout(capsys)["extraction"]
+    assert "VALUES_EXTRACTION_FAILED" in extraction["error"]
+    assert extraction["usage"]["cost_usd"] == 0.05
 
 
 @needs_gs

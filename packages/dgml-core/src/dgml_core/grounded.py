@@ -66,6 +66,7 @@ from .errors import (
     CONVERT_TO_PDF_OPERATION,
     AuthError,
     ConversionFailed,
+    DgmlError,
     FileNotFound,
     GroundedConfigInvalid,
     GroundedConfigMissing,
@@ -954,7 +955,11 @@ class ExtractionResult:
     did not report them) plus ``duration_s`` — and ``stats`` is the full
     per-phase breakdown that ``extraction_stats.json`` holds. Both are
     populated whether or not anything was persisted, so a host that keeps
-    telemetry out of the workspace can read them here.
+    telemetry out of the workspace can read them here. The one exception: if
+    building one fails (logged, never raised — the values are already stored),
+    that field is ``{}``, so read it with ``.get`` rather than indexing. A
+    failed run carries the same docs on its error instead (see
+    :class:`~dgml_core.errors.DgmlError`), ``None`` there when unbuilt.
     """
 
     values: dict[str, Any]
@@ -1145,12 +1150,12 @@ class _FileExtraction:
         self._phase2_unmatched_locations = 0
         # Both built once, by finish() on success and otherwise by record(),
         # from whatever the phases got done; the same dicts are what the result
-        # (or the ValuesExtractionFailed) carries and what ``usage.jsonl`` /
+        # (or the DgmlError that ended the run) carries and what ``usage.jsonl`` /
         # ``extraction_stats.json`` store, so the views never disagree
         # (``duration_s`` is a clock read).
         self.stats_doc: dict[str, Any] | None = None
         self.usage_doc: dict[str, Any] | None = None
-        self.failure: ValuesExtractionFailed | None = None
+        self.failure: DgmlError | None = None
 
     # ---- phase 1 ------------------------------------------------------
 
@@ -1328,6 +1333,13 @@ class _FileExtraction:
             reasoning_effort=self.config.locations_reasoning_effort,
         )
 
+    def fold_failed_phase3(self, page_totals: list[dict[str, Any]]) -> None:
+        """Fold what phase 3 spent into the run when a page failed, in page
+        order (as :meth:`finish` would), since :meth:`finish` will not run."""
+        for totals in page_totals:
+            add_partial(self.phase3_totals, totals)
+        self.phase3_duration = round(time.monotonic() - self.phase3_started, 3)
+
     # ---- finish -------------------------------------------------------
 
     def finish(self, per_page: list[_PageOutcome]) -> ExtractionResult:
@@ -1391,10 +1403,14 @@ class _FileExtraction:
         )
 
     def fail(self, exc: BaseException) -> None:
-        """Note why the run failed, for the usage row and the stats."""
+        """Note why the run failed, for the usage row and the stats, and keep
+        a :class:`DgmlError` so :meth:`record` can hand it the run's usage."""
+        if isinstance(exc, DgmlError):
+            # Any DGML error, not only ValuesExtractionFailed: a FileNotFound
+            # from finish() (unassigned mid-run) comes after both LLM phases.
+            self.failure = exc
         if isinstance(exc, ValuesExtractionFailed):
             self.error_msg = str(exc)
-            self.failure = exc
         elif isinstance(exc, Exception):
             # Non-ValuesExtractionFailed errors (programmer bug) — still
             # record what we can before letting them propagate.
@@ -1471,14 +1487,14 @@ class _FileExtraction:
 
     def record(self) -> None:
         """Build the usage and stats docs if :meth:`finish` did not, hand them
-        to a :class:`ValuesExtractionFailed` in flight, and persist them when
-        opted in (call last, on every exit).
+        to a :class:`DgmlError` in flight, and persist them when opted in (call
+        last, on every exit).
 
         Everything here is telemetry and must never break the caller or mask
         the error in flight: each step is guarded on its own. On the failure
         paths the docs are built here, from whatever the phases got done, and
-        ride out on the ValuesExtractionFailed so a caller that persists
-        nothing can still account for what the run spent.
+        ride out on the DgmlError so a caller that persists nothing can still
+        account for what the run spent.
         """
         if self.usage_doc is None:
             self.usage_doc = _safe_summary(self._usage_summary, "usage")
@@ -1495,10 +1511,8 @@ class _FileExtraction:
             try:
                 self._append_usage_rows(self.usage_doc)
             except Exception:
-                logger.warning(
-                    "could not record extract_values usage for file %s",
-                    self.file_id,
-                    exc_info=True,
+                _warn_telemetry(
+                    "usage-write", "could not record extract_values usage for file %s", self.file_id
                 )
         # Even on failure, partial numbers help diagnose where we stalled.
         # Suppressed when the caller opted out.
@@ -1508,9 +1522,26 @@ class _FileExtraction:
                     self.workspace, self.docset_id, self.file_id, self.stats_doc
                 )
             except Exception:
-                logger.warning(
-                    "could not write extraction stats for file %s", self.file_id, exc_info=True
+                _warn_telemetry(
+                    "stats-write", "could not write extraction stats for file %s", self.file_id
                 )
+
+
+# Extraction-telemetry failures already reported this process, keyed by what
+# failed (building or writing the usage / stats doc). A broken docstore fails
+# every file the same way, so a bulk run (`cluster`, `file add --auto-classify`)
+# would otherwise log one traceback per file; recurrences go to DEBUG.
+_WARNED_TELEMETRY: set[str] = set()
+
+
+def _warn_telemetry(kind: str, msg: str, *args: object) -> None:
+    """Log a telemetry failure from inside an ``except``: WARNING with the
+    traceback the first time *kind* fails in this process, DEBUG after."""
+    if kind in _WARNED_TELEMETRY:
+        logger.debug(msg, *args, exc_info=True)
+        return
+    _WARNED_TELEMETRY.add(kind)
+    logger.warning(msg, *args, exc_info=True)
 
 
 def _safe_summary(build: Callable[[], dict[str, Any]], what: str) -> dict[str, Any] | None:
@@ -1519,7 +1550,7 @@ def _safe_summary(build: Callable[[], dict[str, Any]], what: str) -> dict[str, A
     try:
         return build()
     except Exception:
-        logger.warning("could not build extraction %s", what, exc_info=True)
+        _warn_telemetry(f"{what}-build", "could not build extraction %s", what)
         return None
 
 
@@ -1534,17 +1565,31 @@ def _run_phase3_pages(
     by :meth:`_FileExtraction.finish` after every call returns. A failed page
     raises out of the pool's ordered ``map``, so the first failing page (in
     page order) is the one reported, as before.
+
+    ``finish`` never runs when a page fails, so the pages' totals are folded
+    here instead — every page's, the failing one's partial spend included —
+    so the usage row, the stats and ``exc.usage`` count what phase 3 spent.
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    def _do_page(page: int, items: list[UnmatchedItem]) -> _PageOutcome:
-        local_totals = _empty_totals()
-        page_result = llm.drive(run.phase3_steps(page, items, local_totals), run.phase3_config())
-        return page, items, page_result, local_totals
+    # Allocated up front so a page that raises still leaves its totals behind.
+    page_totals = [_empty_totals() for _ in pages]
+
+    def _do_page(i: int) -> _PageOutcome:
+        page, items = pages[i]
+        totals = page_totals[i]
+        page_result = llm.drive(run.phase3_steps(page, items, totals), run.phase3_config())
+        return page, items, page_result, totals
 
     workers = min(_PHASE3_MAX_PARALLEL, max(1, len(pages)))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        return list(ex.map(lambda kv: _do_page(*kv), pages))
+    try:
+        # Leaving the ``with`` waits for the pages still in flight, so by the
+        # time the ``except`` runs every page's totals are final.
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            return list(ex.map(_do_page, range(len(pages))))
+    except BaseException:
+        run.fold_failed_phase3(page_totals)
+        raise
 
 
 def _empty_totals() -> dict[str, Any]:

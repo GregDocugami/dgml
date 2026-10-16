@@ -711,6 +711,14 @@ gains an `extraction` block; extraction failures are **soft** (the error
 lands in `extraction.error`, the assignment stands, exit stays 0). No schema
 → plain assignment, no block.
 
+`extraction.usage` is the run's cost and token totals — the same numbers the
+`extract_values` row in `usage.jsonl` carries — reported with or without
+`--debug`, so a caller can account for auto-extraction cost without reading
+`usage.jsonl`. A failed extraction reports what it spent before failing;
+`usage` is `null` when nothing was spent (e.g. a config error).
+`cost_usd` and the token counts are `null` when the provider did not report
+them.
+
 ```json
 {
   "docset_id": "o8vr8rs488vg",
@@ -720,6 +728,15 @@ lands in `extraction.error`, the assignment stands, exit stays 0). No schema
     "performed": true,
     "model": "gemini/gemini-2.5-pro",
     "tool_calls": 0,
+    "usage": {
+      "cost_usd": 0.0123,
+      "prompt_tokens": 12345,
+      "completion_tokens": 234,
+      "total_tokens": 12579,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0,
+      "duration_s": 15.2
+    },
     "error": null
   }
 }

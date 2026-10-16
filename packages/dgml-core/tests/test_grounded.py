@@ -2289,6 +2289,104 @@ def test_extract_values_succeeds_when_building_stats_fails(workspace: Workspace)
     assert workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
 
 
+def test_extract_values_phase3_failure_still_counts_every_pages_spend(
+    workspace: Workspace,
+) -> None:
+    """A failing phase-3 page must not drop phase 3 from the accounting: the
+    completed page's cost and the failing page's own (billed) call both reach
+    exc.usage, the usage row and the stats. Pages run in parallel, so which
+    page fails is not fixed — the totals are the same either way."""
+    from dgml_core.usage import read_events
+
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid, page_count=2)
+    for page in (1, 2):
+        _seed_page_text(workspace, fid, page=page)
+        _seed_page_image(workspace, fid, page)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {
+        "title": {"text": "Goodnight", "locations": [{"page_number": 1}]},
+        "subtitle": {"text": "Farewell", "locations": [{"page_number": 2}]},
+    }
+    p1 = _tool_call_response(
+        "submit_values", {"values": phase1_values}, call_id="p1", cost_usd=0.01, prompt_tokens=100
+    )
+    ok = _tool_call_response(
+        "submit_locations",
+        {"locations": [{"id": "a", "bounding_boxes": [[10.0, 20.0, 30.0, 40.0]]}]},
+        call_id="ok",
+        cost_usd=0.02,
+        prompt_tokens=200,
+    )
+    # Billed, then rejected: an unknown tool fails the page after its usage counts.
+    bad = _tool_call_response("bogus_tool", {}, call_id="bad", cost_usd=0.04, prompt_tokens=400)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=[p1, ok, bad]):
+        with pytest.raises(ValuesExtractionFailed, match=r"phase 3 page [12]") as excinfo:
+            extract_values(
+                workspace, ds_id, fid, config=config, record_usage=True, write_stats=True
+            )
+
+    usage = excinfo.value.usage
+    assert usage is not None
+    assert usage["cost_usd"] == pytest.approx(0.07)  # phase 1 + both phase-3 pages
+    assert usage["prompt_tokens"] == 700
+    (row,) = read_events(workspace)
+    assert row["outcome"] == "error"
+    assert row["cost_usd"] == pytest.approx(0.07)
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
+    assert stats["phases"]["phase3"]["cost_usd"] == pytest.approx(0.06)
+    assert stats == excinfo.value.stats
+
+
+def test_extract_values_attaches_usage_to_any_dgml_error(workspace: Workspace) -> None:
+    """Not only ValuesExtractionFailed: a FileNotFound raised after the LLM
+    phases (the file was unassigned mid-run) still carries what they cost."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    response = _tool_call_response("submit_values", {"values": phase1_values}, cost_usd=0.03)
+
+    def unassign_then_answer(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        DocSetStore(workspace).remove_file(ds_id, fid)
+        return response
+
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=unassign_then_answer):
+        with pytest.raises(FileNotFound, match="no longer assigned") as excinfo:
+            extract_values(workspace, ds_id, fid, config=config)
+    assert excinfo.value.usage is not None
+    assert excinfo.value.usage["cost_usd"] == 0.03
+    assert excinfo.value.stats is not None and excinfo.value.stats["outcome"] == "error"
+
+
+def test_extract_values_telemetry_failure_warns_once_per_process(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A broken docstore fails every file the same way; a bulk run logs the
+    first failure as a WARNING with its traceback and the rest at DEBUG."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    response = _tool_call_response("submit_values", {"values": phase1_values})
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    caplog.set_level(logging.DEBUG, logger="dgml_core.grounded")
+    with (
+        patch("litellm.completion", return_value=response),
+        patch("dgml_core.grounded._write_extraction_stats", side_effect=OSError("disk full")),
+    ):
+        for _ in range(3):
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
+    stats_records = [r for r in caplog.records if "could not write extraction stats" in r.message]
+    assert [r.levelno for r in stats_records] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    assert stats_records[0].exc_info is not None
+
+
 def test_expand_refs_inlines_definitions(workspace: Workspace) -> None:
     """A schema with `$ref` pointers gets flattened so the resulting
     spec is self-contained — what we hand to a tool-call validator
