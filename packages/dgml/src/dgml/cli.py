@@ -179,11 +179,14 @@ _VERBOSE_HELP = (
     "warnings. DGML_DEBUG=1 in the environment has the same effect."
 )
 _DEBUG_HELP = (
-    "Keep intermediate pipeline files in the workspace: the `docset generate` "
-    "cache/ and coverage_report.json, the `docset ground` grounding_stats.json, "
-    "and the `file extract` extraction_stats.json. Default off — only final "
-    "files (DGML XML, page text/images, schemas, values, metadata) are kept. "
-    "Does not change log output (that is --verbose / DGML_DEBUG=1)."
+    "Keep intermediate pipeline files in the workspace and record LLM cost/token "
+    "telemetry to usage.jsonl: the `docset generate` cache/ and "
+    "coverage_report.json, the in-place grounding pass's grounding_stats.json, "
+    "and a value extraction's extraction_stats.json (from `extraction extract`, "
+    "`docset add-file`, auto-classifying `file add`, and `cluster`). Default off — only "
+    "final files (DGML XML, page text/images, schemas, values, metadata) are "
+    "kept and no usage rows are written. Does not change log output (that is "
+    "--verbose / DGML_DEBUG=1)."
 )
 
 
@@ -2265,7 +2268,7 @@ def _dispatch(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         return 0
 
     if cmd == "check":
-        report = check_workspace(ws, retry_errors=args.retry_errors, debug=args.debug)
+        report = check_workspace(ws, retry_errors=args.retry_errors, record_usage=args.debug)
         _emit(report.to_json(), fmt)
         return 0 if report.ok else 2
 
@@ -2288,7 +2291,8 @@ def _dispatch(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                 mode=getattr(args, "mode", "auto"),
                 method=getattr(args, "method", "auto"),
                 small_corpus_threshold=getattr(args, "small_corpus_threshold", 8),
-                debug=args.debug,
+                write_stats=args.debug,
+                record_usage=args.debug,
             ),
             fmt,
         )
@@ -2820,7 +2824,9 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                 f"docset '{args.docset_id}' has no files; pass --from-file or add files first",
                 fmt,
             )
-        rnc = generate_schema(ws, file_ids, config=config, docset_name=ds.name, debug=args.debug)
+        rnc = generate_schema(
+            ws, file_ids, config=config, docset_name=ds.name, record_usage=args.debug
+        )
         store.set_schema(args.docset_id, rnc)
         _emit(
             {
@@ -2883,7 +2889,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             values_effort=args.values_effort,
             locations_effort=args.locations_effort,
             write_stats=args.debug,
-            debug=args.debug,
+            record_usage=args.debug,
         )
         _emit(
             {
@@ -3480,7 +3486,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         enabled=not args.no_semlinks,
         verify=not args.no_semlink_verify,
         use_cache=not args.no_semlink_cache,
-        debug=args.debug,
+        record_usage=args.debug,
         log=_log.info,
     )
 
@@ -3713,7 +3719,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                     output_path=gpath,
                     force=True,
                     write_stats=args.debug,
-                    debug=args.debug,
+                    record_usage=args.debug,
                     # Under --batch an OCR file's image-style pass joins one
                     # batch stage with every other document's (see below).
                     defer_style=batch_opts is not None,
@@ -4024,6 +4030,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                     max_parallel_docs=args.max_parallel_calls,
                     cache_dir=cache_dir,
                     debug=args.debug,
+                    record_usage=args.debug,
                     page_text_dirs=page_text_dirs,
                     workspace=ws,
                     dgml_header=build_header(ws.organization, ds.name),
@@ -4196,7 +4203,7 @@ def _docset_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         from dgml_core.extraction import add_file_and_extract
 
         extraction_block = add_file_and_extract(
-            ws, args.docset_id, args.file_id, write_stats=args.debug, debug=args.debug
+            ws, args.docset_id, args.file_id, write_stats=args.debug, record_usage=args.debug
         )
         payload: dict[str, Any] = {
             "docset_id": args.docset_id,
@@ -4330,7 +4337,7 @@ def _file_add_bulk(args: argparse.Namespace, ws: Workspace, store: FileStore, fm
                 on_conflict=on_conflict,
                 text_mode=text_mode,
                 dpi=args.dpi,
-                debug=args.debug,
+                record_usage=args.debug,
             )
         except DgmlError as exc:
             counts["hard_failed"] += 1
@@ -4364,7 +4371,8 @@ def _file_add_bulk(args: argparse.Namespace, ws: Workspace, store: FileStore, fm
                 config=config,
                 docsets=docsets,
                 mode=classify_mode,
-                debug=args.debug,
+                write_stats=args.debug,
+                record_usage=args.debug,
             )
             if block["performed"] and block["docset_id"] is None:
                 unassigned += 1
@@ -4415,7 +4423,7 @@ def _file_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             on_conflict=ConflictPolicy(args.on_conflict),
             text_mode=TextMode(args.text_mode),
             dpi=args.dpi,
-            debug=args.debug,
+            record_usage=args.debug,
         )
         payload: dict[str, Any] = _file_add_payload(result)
         if classify_mode is not None:
@@ -4428,7 +4436,8 @@ def _file_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                 config=config,
                 docsets=docsets,
                 mode=classify_mode,
-                debug=args.debug,
+                write_stats=args.debug,
+                record_usage=args.debug,
             )
         _emit(payload, fmt)
     elif sub == "list":
@@ -4456,7 +4465,8 @@ def _auto_classify(
     config: ClassificationConfig | None = None,
     docsets: list[DocSet] | None = None,
     mode: ClassifyMode = ClassifyMode.EXISTING_OR_NEW,
-    debug: bool = False,
+    write_stats: bool = False,
+    record_usage: bool = False,
 ) -> dict[str, Any]:
     """Run LLM auto-classification on a freshly added File and assign it.
 
@@ -4516,7 +4526,7 @@ def _auto_classify(
 
     try:
         decision = classify_file(
-            ws, file_id, config=config, docsets=docsets, mode=mode, debug=debug
+            ws, file_id, config=config, docsets=docsets, mode=mode, record_usage=record_usage
         )
     except NoExistingDocSets:
         # A precondition on the request, not a failure of the call — callers
@@ -4547,7 +4557,7 @@ def _auto_classify(
             }
             try:
                 extraction_block = add_file_and_extract(
-                    ws, existing.id, file_id, write_stats=debug, debug=debug
+                    ws, existing.id, file_id, write_stats=write_stats, record_usage=record_usage
                 )
             except DgmlError:
                 # The assignment may have landed before the failure.

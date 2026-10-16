@@ -202,6 +202,7 @@ def _run(
             cache_dir=cache_dir,
             debug=True,
             workspace=ws,
+            record_usage=True,
             max_parallel_docs=1,
             window_size=1,  # one page per window: multi-page docs need several waves
             schema_seed=schema,

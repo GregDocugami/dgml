@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -59,6 +60,8 @@ from dgml_core.generation.vocab import OPEN_VOCAB, TagVocab
 from dgml_core.pages import PdfConfig
 from dgml_core.storage import Workspace
 from dgml_core.usage import OPERATION_LABEL, OPERATION_TRANSCRIBE
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     # Type-only: ``dgml_core.batch`` loads every provider backend at import, so
@@ -340,13 +343,45 @@ class ConvertOptions:
     # vocabulary open so labeling may add to it.
     vocab: TagVocab | None = None
     progress: Callable[[str], None] | None = field(default=None)
-    # Workspace to record LLM usage into. When set (and ``debug`` is True), the
-    # transcription/labeling calls append rows to ``usage.jsonl``; None disables
-    # recording (library/test callers that don't want telemetry).
+    # Workspace to record LLM usage into. When set (and ``record_usage`` is
+    # True), the transcription/labeling calls append rows to ``usage.jsonl``;
+    # None disables recording (library/test callers that don't want telemetry).
     workspace: Workspace | None = None
+    # Record cost/token rows for the generation's LLM calls. Independent of
+    # ``debug`` (the artifacts): the CLI sets both under --debug, a host can
+    # account for cost without writing debug files.
+    record_usage: bool = False
+
     # Batch mode (see BatchOptions). None = the synchronous pipeline, exactly
     # as without this field.
     batch: BatchOptions | None = None
+
+
+# Set once the debug-without-record_usage advisory has been logged. Process-wide:
+# a host builds its ConvertOptions once, so one line per process is enough.
+_WARNED_DEBUG_WITHOUT_USAGE = False
+
+
+def _warn_if_debug_without_usage(opts: ConvertOptions) -> None:
+    """Flag the one silent change of the ``debug`` / ``record_usage`` split.
+
+    ``debug=True`` with a ``workspace`` used to write usage rows; it now keeps
+    only the cache artifacts. Every other entry point that dropped ``debug``
+    fails loudly with ``TypeError``, so this is the one upgrade that would take
+    a host's cost accounting to zero without a signal.
+    """
+    global _WARNED_DEBUG_WITHOUT_USAGE
+    if (
+        opts.debug
+        and opts.workspace is not None
+        and not opts.record_usage
+        and not _WARNED_DEBUG_WITHOUT_USAGE
+    ):
+        _WARNED_DEBUG_WITHOUT_USAGE = True
+        logger.warning(
+            "ConvertOptions(debug=True) no longer records usage.jsonl rows; "
+            "set record_usage=True to keep cost/token telemetry"
+        )
 
 
 def _config(
@@ -360,7 +395,7 @@ def _config(
         max_tokens=opts.max_tokens,
         thinking=opts.thinking,
         workspace=opts.workspace,
-        debug=opts.debug,
+        record_usage=opts.record_usage,
         operation=operation,
     )
 
@@ -411,6 +446,7 @@ def convert_batch(
     *prior_outputs*).
     """
     opts = options
+    _warn_if_debug_without_usage(opts)
     vocab = opts.vocab or OPEN_VOCAB
     log = opts.progress or (lambda _m: None)
 
@@ -467,9 +503,9 @@ def convert_batch(
 
     # One aggregated usage row for the whole labeling pass: label_documents
     # threads this single config through every call, so a scope on it folds
-    # them into one row (gated on --debug via the config). The labeling model is
-    # always configured independently of transcription (it may name a different
-    # provider), so it gets its own LLMConfig with its own credentials.
+    # them into one row (gated on ``record_usage`` via the config). The labeling
+    # model is always configured independently of transcription (it may name a
+    # different provider), so it gets its own LLMConfig with its own credentials.
     label_config = llm.LLMConfig(
         model=opts.label_model,
         api_key=opts.label_api_key,
@@ -478,7 +514,7 @@ def convert_batch(
         max_tokens=opts.max_tokens,
         thinking=opts.thinking,
         workspace=opts.workspace,
-        debug=opts.debug,
+        record_usage=opts.record_usage,
         operation=OPERATION_LABEL,
     )
     label_config.context = {"doc_count": len(docs)}

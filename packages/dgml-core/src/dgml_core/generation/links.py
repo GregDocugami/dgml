@@ -434,7 +434,8 @@ def plan_links(xml: str, config: llm.LLMConfig, *, verify: bool = True) -> list[
     read an answer out of raises :class:`LinkPlanFailed` rather than returning
     one, so a caller that caches the result never stores a failure as a fact.
     """
-    # Propose + verify fold into one usage row (gated on --debug via the config).
+    # Propose + verify fold into one usage row (gated on ``record_usage`` via
+    # the config).
     with llm.record_usage_for(config):
         return llm.drive(plan_links_steps(xml, config, verify=verify), config)
 

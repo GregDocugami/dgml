@@ -519,8 +519,11 @@ skips the debug-only cache artifacts (raw LLM responses,
 `usage.jsonl` cost/token rows. Pass the global `--debug` flag
 (`uv run dgml --debug docset generate "$ds"`) to retain those artifacts and to
 record per-operation cost telemetry to `<workspace>/usage.jsonl` (this gating
-applies to every LLM command — classify, cluster, generate). Coverage summaries
-still print on stderr under `--verbose` regardless.
+applies to every LLM command — classify, cluster, generate, extraction
+extract). `--debug` also writes a value extraction's per-file
+`extraction_stats.json` (phase timings, cost, match counts) from `docset
+add-file`, auto-classifying `file add`, `cluster`, and `extraction extract`.
+Coverage summaries still print on stderr under `--verbose` regardless.
 
 **Parallelism.** `--max-parallel-calls` transcribes that many documents
 concurrently (windows *within* a document stay serial, since each window
@@ -695,9 +698,12 @@ uv run dgml extraction get-guidance "$ds" | jq -r .guidance
 #    builds the tree and carries the dg:extraction over (full-extraction).
 #    NOTE: once the schema is set, assigning a file (docset add-file /
 #    --auto-classify / cluster into an existing docset) auto-extracts it —
-#    check the payload's `extraction` block; run `extract` manually only for
+#    check the payload's `extraction` block (`error` on a soft failure;
+#    `usage.cost_usd` is the run's cost, reported even without --debug and
+#    even when the extraction failed); run `extract` manually only for
 #    files assigned before the schema existed or to re-extract. The file must
 #    already be assigned to the docset (FILE_NOT_FOUND otherwise).
+uv run dgml docset add-file "$fid" --docset "$ds" | jq '.extraction | {error, cost: .usage.cost_usd}'
 uv run dgml extraction extract "$ds" "$fid" | jq '{mode, tool_calls, field_count, xml_key}'
 
 # 3) Read them back. Default is values-shape JSON (projected from dg:extraction);

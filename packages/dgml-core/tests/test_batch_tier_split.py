@@ -50,7 +50,7 @@ MODEL = "anthropic/claude-haiku-4-5"
 
 def _cfg(ws: Workspace, **kw: Any) -> llm.LLMConfig:
     kw.setdefault("operation", "transcribe")
-    return llm.LLMConfig(model=MODEL, workspace=ws, debug=True, **kw)
+    return llm.LLMConfig(model=MODEL, workspace=ws, record_usage=True, **kw)
 
 
 def _text(content: str) -> list[dict[str, Any]]:

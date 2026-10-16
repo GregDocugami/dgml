@@ -100,7 +100,7 @@ def test_no_schema_is_refused_first(workspace: Workspace, monkeypatch: pytest.Mo
         extract_file(workspace, ds_id, "fileaaaaaaaa")
 
 
-def test_uses_workspace_config_and_defaults_stats_off(
+def test_uses_workspace_config_and_defaults_stats_and_usage_off(
     workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ds_id = _docset(workspace)
@@ -109,7 +109,7 @@ def test_uses_workspace_config_and_defaults_stats_off(
 
     result = extract_file(workspace, ds_id, "fileaaaaaaaa")
 
-    assert seen == {"config": _CONFIG, "write_stats": False, "debug": False}
+    assert seen == {"config": _CONFIG, "write_stats": False, "record_usage": False}
     assert result.model == "test/values-model"
 
 

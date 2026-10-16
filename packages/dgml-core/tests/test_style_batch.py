@@ -141,7 +141,7 @@ def _sync_style(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, An
     stats: dict[str, Any] = {}
     for fid, src in sources.items():
         res = ground_dgml_xml(
-            ws, fid, src, output_path=src, force=True, write_stats=False, debug=True
+            ws, fid, src, output_path=src, force=True, write_stats=False, record_usage=True
         )
         xml[fid] = src.read_text(encoding="utf-8")
         stats[fid] = _stats(res.stats)
@@ -206,7 +206,7 @@ def test_batch_style_matches_sync(
             output_path=src,
             force=True,
             write_stats=False,
-            debug=True,
+            record_usage=True,
             defer_style=True,
         )
         assert res.pending_style is not None

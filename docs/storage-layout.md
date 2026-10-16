@@ -1027,9 +1027,13 @@ workspace — classification, clustering's DocSet-naming, transcription
 (`transcribe`), labeling (`label`), semantic links (`links`), schema
 generation, value extraction, and hybrid text-merge (`hybrid_merge`).
 
-**Recording is gated on `--debug`.** Without `--debug`, no rows are
-written for any operation; pass `--debug` to log cost/token telemetry
-alongside the other debug artifacts. One JSON object per line; readers
+**Recording is opt-in.** The CLI turns it on under `--debug`: without
+`--debug`, no rows are written for any operation; pass `--debug` to log
+cost/token telemetry alongside the other debug artifacts. A library caller
+sets `record_usage=True` on the operation (or on its `LLMConfig`) instead,
+which records rows without writing any debug artifact; `extract_values`
+also returns the same totals on `ExtractionResult.usage` for callers that
+keep telemetry out of the workspace. One JSON object per line; readers
 tolerate corrupt tail lines from a crashed mid-write append. The CLI
 never reads this file; it exists for introspection and cost accounting
 by external tooling that aggregates and renders it.

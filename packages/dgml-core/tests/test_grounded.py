@@ -1263,7 +1263,7 @@ def test_extract_values_phase3_page_without_words_uses_the_grid(workspace: Works
             _tool_call_response("submit_locations", phase3_args, call_id="p3"),
         ],
     ) as mock_completion:
-        result = extract_values(workspace, ds_id, fid, config=config)
+        result = extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     kwargs = mock_completion.call_args_list[1].kwargs
     messages = kwargs["messages"]
@@ -1301,7 +1301,7 @@ def test_extract_values_rejects_a_phase3_box_on_the_wrong_words(workspace: Works
             _tool_call_response("submit_locations", phase3_args, call_id="p3"),
         ],
     ):
-        result = extract_values(workspace, ds_id, fid, config=config)
+        result = extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     assert "title" not in result.values
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
@@ -1405,7 +1405,7 @@ def test_extract_values_grounds_a_value_phase1_left_without_locations(
         "litellm.completion",
         return_value=_tool_call_response("submit_values", {"values": phase1_values}),
     ) as mock_completion:
-        result = extract_values(workspace, ds_id, fid, config=config)
+        result = extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 1  # phase 2 grounded it; no phase 3
     assert result.values["title"]["locations"] == [
@@ -1470,7 +1470,7 @@ def test_extract_values_phase3_drops_a_box_off_the_page(workspace: Workspace) ->
             _tool_call_response("submit_locations", phase3_args, call_id="p3"),
         ],
     ):
-        result = extract_values(workspace, ds_id, fid, config=config)
+        result = extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     # The only box was off the page, so the value has none: it is dropped
     # rather than written with no dg:origin.
@@ -1625,7 +1625,7 @@ def test_extract_values_phase3_merges_costs_across_parallel_pages(
             ),
         ],
     ) as mock_completion:
-        extract_values(workspace, ds_id, fid, config=config)
+        extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 3
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
@@ -1641,8 +1641,9 @@ def test_extract_values_phase3_merges_costs_across_parallel_pages(
 
 
 def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
-    """Every successful extract_values writes extraction_stats.json with
-    per-phase timings and match counts. The UX reads this directly."""
+    """A successful extract_values with write_stats=True (what the CLI passes
+    under --debug) stores extraction_stats.json with per-phase timings and
+    match counts. The UX reads this directly."""
     fid = "f1aaaaaaaaaa"
     _seed_file(workspace, fid)
     _seed_page_text(workspace, fid, page=1)
@@ -1654,7 +1655,7 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
         "litellm.completion",
         return_value=_tool_call_response("submit_values", {"values": phase1_values}),
     ):
-        extract_values(workspace, ds_id, fid, config=config)
+        extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None
@@ -1734,9 +1735,10 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
     assert stats["phases"]["phase3"]["page_calls"] == 0
 
 
-def test_extract_values_write_stats_false_suppresses_file(workspace: Workspace) -> None:
-    """write_stats=False (set by the CLI unless --debug) skips the
-    extraction_stats.json sidecar; extracted.dgml.xml is still written."""
+def test_extract_values_write_stats_defaults_off(workspace: Workspace) -> None:
+    """The default (write_stats=False, what the CLI passes unless --debug)
+    skips the extraction_stats.json document; extracted.dgml.xml is still
+    written and the caller still gets the numbers on the result."""
     fid = "f1aaaaaaaaaa"
     _seed_file(workspace, fid)
     _seed_page_text(workspace, fid, page=1)
@@ -1748,10 +1750,22 @@ def test_extract_values_write_stats_false_suppresses_file(workspace: Workspace) 
         "litellm.completion",
         return_value=_tool_call_response("submit_values", {"values": phase1_values}),
     ):
-        extract_values(workspace, ds_id, fid, config=config, write_stats=False)
+        result = extract_values(workspace, ds_id, fid, config=config)
 
     assert workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
     assert workspace.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc"))
+    # Nothing persisted, but the caller still gets the numbers on the result.
+    assert result.stats["outcome"] == "ok"
+    assert result.stats["matching"]["matched_phase2"] == 1
+    assert set(result.usage) == {
+        "cost_usd",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cache_read_tokens",
+        "cache_creation_tokens",
+        "duration_s",
+    }
 
 
 # Phase 1 leaves only Anthropic on auto tool choice, so the text-only retry
@@ -1774,7 +1788,7 @@ def test_extract_values_no_tool_call_errors(workspace: Workspace) -> None:
     reply = _no_tool_call_response("Here are the values: title is Hello world.", "stop")
     with patch("litellm.completion", return_value=reply) as mock_completion:
         with pytest.raises(ValuesExtractionFailed) as excinfo:
-            extract_values(workspace, ds_id, fid, config=config)
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     # The first reply plus one retry per allowed text-only turn, then the error
     # names the stop reason and quotes the reply so the cause is visible.
@@ -1804,7 +1818,7 @@ def test_extract_values_retries_after_a_text_only_reply(workspace: Workspace) ->
     ]
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=ANTHROPIC_VALUES_MODEL)
     with patch("litellm.completion", side_effect=responses) as mock_completion:
-        extract_values(workspace, ds_id, fid, config=config)
+        extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 2
     _, retry_kwargs = mock_completion.call_args_list[1]
@@ -1902,7 +1916,7 @@ def test_extract_values_falls_back_to_auto_when_required_is_rejected(
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with caplog.at_level(logging.WARNING, logger="dgml_core.grounded"):
         with patch("litellm.completion", side_effect=responses) as mock_completion:
-            extract_values(workspace, ds_id, fid, config=config)
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     calls = _phase1_calls(mock_completion)
     assert [c.get("tool_choice") for c in calls] == ["required", None, None]
@@ -2024,7 +2038,7 @@ def test_schema_overflow_rejection_keeps_the_permissive_fallback(workspace: Work
     ]
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with patch("litellm.completion", side_effect=responses) as mock_completion:
-        extract_values(workspace, ds_id, fid, config=config)
+        extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     calls = _phase1_calls(mock_completion)
     assert [c["tool_choice"] for c in calls] == ["required", "required"]
@@ -2065,7 +2079,7 @@ def test_extract_values_does_not_retry_an_abnormal_stop(
     reply = _no_tool_call_response("I can't help with that.", finish_reason)
     with patch("litellm.completion", return_value=reply) as mock_completion:
         with pytest.raises(ValuesExtractionFailed, match="after 0 retries"):
-            extract_values(workspace, ds_id, fid, config=config)
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 1
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
@@ -2203,7 +2217,9 @@ def test_generate_schema_records_usage_on_success(workspace: Workspace) -> None:
     response._hidden_params = {"response_cost": 0.012}
     response.usage = SimpleNamespace(prompt_tokens=1000, completion_tokens=200, total_tokens=1200)
     with patch("litellm.completion", return_value=response):
-        generate_schema(workspace, ["f1aaaaaaaaaa"], config=config, docset_name="D", debug=True)
+        generate_schema(
+            workspace, ["f1aaaaaaaaaa"], config=config, docset_name="D", record_usage=True
+        )
 
     events = read_events(workspace)
     assert len(events) == 1
@@ -2224,7 +2240,9 @@ def test_generate_schema_records_usage_on_provider_exception(workspace: Workspac
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with patch("litellm.completion", side_effect=RuntimeError("network down")):
         with pytest.raises(SchemaGenerationFailed):
-            generate_schema(workspace, ["f1aaaaaaaaaa"], config=config, docset_name="D", debug=True)
+            generate_schema(
+                workspace, ["f1aaaaaaaaaa"], config=config, docset_name="D", record_usage=True
+            )
 
     events = read_events(workspace)
     assert len(events) == 1
@@ -2280,7 +2298,9 @@ def test_extract_values_records_one_event_summing_across_turns(workspace: Worksp
 
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with patch("litellm.completion", side_effect=[p1, p3]):
-        extract_values(workspace, ds_id, fid, config=config, debug=True)
+        result = extract_values(
+            workspace, ds_id, fid, config=config, record_usage=True, write_stats=True
+        )
 
     events = read_events(workspace)
     assert len(events) == 1
@@ -2294,6 +2314,14 @@ def test_extract_values_records_one_event_summing_across_turns(workspace: Worksp
     assert e["outcome"] == "ok"
     assert e["context"]["file_id"] == fid
     assert e["context"]["docset_id"] == ds_id
+    # The result carries the same accounting the row does, plus the stats
+    # document, so a library caller needs neither file.
+    assert result.usage["cost_usd"] == 0.005
+    assert result.usage["prompt_tokens"] == 800
+    assert result.usage["total_tokens"] == 910
+    assert result.usage["duration_s"] == e["duration_s"]
+    assert result.stats == workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert result.stats["phases"]["phase3"]["page_calls"] == 1
 
 
 def test_extract_values_records_error_event_when_max_iters_exceeded(
@@ -2317,13 +2345,197 @@ def test_extract_values_records_error_event_when_max_iters_exceeded(
     )
     with patch("litellm.completion", side_effect=[r, r, r]):
         with pytest.raises(ValuesExtractionFailed, match="max_tool_iters"):
-            extract_values(workspace, ds_id, fid, config=config, debug=True)
+            extract_values(workspace, ds_id, fid, config=config, record_usage=True)
     events = read_events(workspace)
     assert len(events) == 1
     e = events[0]
     assert e["outcome"] == "error"
     assert e["cost_usd"] == 0.003  # 3 phase-1 calls x 0.001 — partial cost still recorded
     assert "max_tool_iters" in (e["error"] or "")
+
+
+def test_extract_values_failure_carries_usage_and_stats_on_the_error(
+    workspace: Workspace,
+) -> None:
+    """A failed run hands its partial accounting to the caller on the
+    exception, so a host that persists no telemetry still sees what it spent."""
+    from dgml_core.usage import read_events
+
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    r = _tool_call_response("get_page_words", {"page": 1}, call_id="cX")
+    r._hidden_params = {"response_cost": 0.001}
+    r.usage = SimpleNamespace(prompt_tokens=100, completion_tokens=5, total_tokens=105)
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model=DEFAULT_VALUES_MODEL,
+        max_tool_iters=3,
+    )
+    with patch("litellm.completion", side_effect=[r, r, r]):
+        with pytest.raises(ValuesExtractionFailed, match="max_tool_iters") as excinfo:
+            extract_values(workspace, ds_id, fid, config=config)
+    assert excinfo.value.usage is not None
+    assert excinfo.value.usage["cost_usd"] == 0.003
+    assert excinfo.value.usage["prompt_tokens"] == 300
+    assert excinfo.value.stats is not None and excinfo.value.stats["outcome"] == "error"
+    # Nothing persisted: both switches were off.
+    assert read_events(workspace) == []
+    assert workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
+
+
+def test_extract_values_usage_write_failure_does_not_mask_the_extraction_error(
+    workspace: Workspace,
+) -> None:
+    """A storage failure appending the usage row is logged, not raised: the
+    caller still sees the real extraction error, and the stats doc is still
+    written."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    r = _tool_call_response("get_page_words", {"page": 1}, call_id="cX")
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model=DEFAULT_VALUES_MODEL,
+        max_tool_iters=3,
+    )
+    with (
+        patch("litellm.completion", side_effect=[r, r, r]),
+        patch("dgml_core.grounded._append_usage_event", side_effect=OSError("disk full")),
+    ):
+        with pytest.raises(ValuesExtractionFailed, match="max_tool_iters"):
+            extract_values(
+                workspace, ds_id, fid, config=config, record_usage=True, write_stats=True
+            )
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None and stats["outcome"] == "error"
+
+
+def test_extract_values_succeeds_when_building_stats_fails(workspace: Workspace) -> None:
+    """The values are stored before telemetry is built, so a telemetry bug
+    must not turn a finished extraction into a failed one."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    _seed_page_image(workspace, fid, 1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Goodnight", "locations": [{"page_number": 1}]}}
+    p1 = _tool_call_response("submit_values", {"values": phase1_values}, call_id="p1")
+    p3 = _tool_call_response(
+        "submit_locations",
+        {"locations": [{"id": "a", "bounding_boxes": [[1, 2, 3, 4]]}]},
+        call_id="p3",
+    )
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with (
+        patch("litellm.completion", side_effect=[p1, p3]),
+        patch("dgml_core.grounded._build_extraction_stats", side_effect=TypeError("boom")),
+    ):
+        result = extract_values(workspace, ds_id, fid, config=config, write_stats=True)
+    assert result.stats == {}
+    assert result.usage["duration_s"] >= 0
+    assert workspace.blobs.blob_exists(result.xml_key)
+    assert workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
+
+
+def test_extract_values_phase3_failure_still_counts_every_pages_spend(
+    workspace: Workspace,
+) -> None:
+    """A failing phase-3 page must not drop phase 3 from the accounting: the
+    completed page's cost and the failing page's own (billed) call both reach
+    exc.usage, the usage row and the stats. Pages run in parallel, so which
+    page fails is not fixed — the totals are the same either way."""
+    from dgml_core.usage import read_events
+
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid, page_count=2)
+    for page in (1, 2):
+        _seed_page_text(workspace, fid, page=page)
+        _seed_page_image(workspace, fid, page)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {
+        "title": {"text": "Goodnight", "locations": [{"page_number": 1}]},
+        "subtitle": {"text": "Farewell", "locations": [{"page_number": 2}]},
+    }
+    p1 = _tool_call_response(
+        "submit_values", {"values": phase1_values}, call_id="p1", cost_usd=0.01, prompt_tokens=100
+    )
+    ok = _tool_call_response(
+        "submit_locations",
+        {"locations": [{"id": "a", "bounding_boxes": [[10.0, 20.0, 30.0, 40.0]]}]},
+        call_id="ok",
+        cost_usd=0.02,
+        prompt_tokens=200,
+    )
+    # Billed, then rejected: an unknown tool fails the page after its usage counts.
+    bad = _tool_call_response("bogus_tool", {}, call_id="bad", cost_usd=0.04, prompt_tokens=400)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=[p1, ok, bad]):
+        with pytest.raises(ValuesExtractionFailed, match=r"phase 3 page [12]") as excinfo:
+            extract_values(
+                workspace, ds_id, fid, config=config, record_usage=True, write_stats=True
+            )
+
+    usage = excinfo.value.usage
+    assert usage is not None
+    assert usage["cost_usd"] == pytest.approx(0.07)  # phase 1 + both phase-3 pages
+    assert usage["prompt_tokens"] == 700
+    (row,) = read_events(workspace)
+    assert row["outcome"] == "error"
+    assert row["cost_usd"] == pytest.approx(0.07)
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
+    assert stats["phases"]["phase3"]["cost_usd"] == pytest.approx(0.06)
+    assert stats == excinfo.value.stats
+
+
+def test_extract_values_attaches_usage_to_any_dgml_error(workspace: Workspace) -> None:
+    """Not only ValuesExtractionFailed: a FileNotFound raised after the LLM
+    phases (the file was unassigned mid-run) still carries what they cost."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    response = _tool_call_response("submit_values", {"values": phase1_values}, cost_usd=0.03)
+
+    def unassign_then_answer(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        DocSetStore(workspace).remove_file(ds_id, fid)
+        return response
+
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=unassign_then_answer):
+        with pytest.raises(FileNotFound, match="no longer assigned") as excinfo:
+            extract_values(workspace, ds_id, fid, config=config)
+    assert excinfo.value.usage is not None
+    assert excinfo.value.usage["cost_usd"] == 0.03
+    assert excinfo.value.stats is not None and excinfo.value.stats["outcome"] == "error"
+
+
+def test_extract_values_telemetry_failure_warns_once_per_process(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A broken docstore fails every file the same way; a bulk run logs the
+    first failure as a WARNING with its traceback and the rest at DEBUG."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    response = _tool_call_response("submit_values", {"values": phase1_values})
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    caplog.set_level(logging.DEBUG, logger="dgml_core.grounded")
+    with (
+        patch("litellm.completion", return_value=response),
+        patch("dgml_core.grounded._write_extraction_stats", side_effect=OSError("disk full")),
+    ):
+        for _ in range(3):
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
+    stats_records = [r for r in caplog.records if "could not write extraction stats" in r.message]
+    assert [r.levelno for r in stats_records] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    assert stats_records[0].exc_info is not None
 
 
 def test_expand_refs_inlines_definitions(workspace: Workspace) -> None:
@@ -2591,7 +2803,7 @@ def test_extract_values_calculated_field_end_to_end(workspace: Workspace) -> Non
         "litellm.completion",
         return_value=_tool_call_response("submit_values", {"values": phase1_values}),
     ) as mock_completion:
-        result = extract_values(workspace, ds.id, fid, config=config)
+        result = extract_values(workspace, ds.id, fid, config=config, write_stats=True)
 
     # One LLM call: phase 2 matched the grounded leaf; the calculated leaf
     # never became an unmatched item, so no phase 3.
@@ -2660,7 +2872,7 @@ def test_extract_values_counts_dropped_inputs_in_stats(workspace: Workspace) -> 
         "litellm.completion",
         return_value=_tool_call_response("submit_values", {"values": phase1_values}),
     ):
-        extract_values(workspace, ds.id, fid, config=config)
+        extract_values(workspace, ds.id, fid, config=config, write_stats=True)
 
     stats = workspace.docs.get_doc("extraction_stats", f"{ds.id}/{fid}")
     assert stats is not None
@@ -2692,7 +2904,7 @@ def test_extract_values_grounds_evidence_into_chunks(workspace: Workspace) -> No
         "litellm.completion",
         return_value=_tool_call_response("submit_values", {"values": phase1_values}),
     ) as mock_completion:
-        result = extract_values(workspace, ds.id, fid, config=config)
+        result = extract_values(workspace, ds.id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 1  # phase 2 boxed the evidence
     xml = workspace.blobs.get_blob(result.xml_key).decode("utf-8")
@@ -2804,7 +3016,7 @@ def test_extract_values_repairs_a_miscounted_input(workspace: Workspace) -> None
         "litellm.completion",
         return_value=_tool_call_response("submit_values", {"values": phase1_values}),
     ):
-        result = extract_values(workspace, ds.id, fid, config=config)
+        result = extract_values(workspace, ds.id, fid, config=config, write_stats=True)
 
     xml = workspace.blobs.get_blob(result.xml_key).decode("utf-8")
     assert 'dg:inputs="#bill-items-1-amount" dg:method="calculated"' in xml
@@ -3106,7 +3318,7 @@ def test_extract_values_permissive_fallback_on_too_many_states(workspace: Worksp
             _tool_call_response("submit_values", {"values": phase1_values}),
         ],
     ) as mock_completion:
-        result = extract_values(workspace, ds.id, fid, config=config)
+        result = extract_values(workspace, ds.id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 2
     # Retry used the permissive values parameter (no inlined properties).
@@ -3330,7 +3542,7 @@ def test_extract_values_chunked_submission_merges_and_prunes(workspace: Workspac
     ]
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with patch("litellm.completion", side_effect=responses) as mock_completion:
-        result = extract_values(workspace, ds.id, fid, config=config)
+        result = extract_values(workspace, ds.id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 4  # truncated attempt + 3 chunked calls
     items = result.values["Bill"]["Items"]
@@ -3412,7 +3624,7 @@ def test_extract_values_truncation_retries_with_chunk_directive(workspace: Works
     ]
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with patch("litellm.completion", side_effect=responses) as mock_completion:
-        result = extract_values(workspace, ds.id, fid, config=config)
+        result = extract_values(workspace, ds.id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 3
 
@@ -3720,7 +3932,7 @@ def test_extract_values_phase3_skips_a_page_the_file_does_not_have(workspace: Wo
             _tool_call_response("submit_locations", phase3_args, call_id="p3"),
         ],
     ) as mock_completion:
-        result = extract_values(workspace, ds_id, fid, config=config)
+        result = extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 2  # phase 1, then phase 3 for page 1 only
     assert result.values["title"]["locations"] == [
@@ -3751,7 +3963,7 @@ def test_extract_values_phase3_makes_no_call_when_every_page_is_missing(
         "litellm.completion",
         return_value=_tool_call_response("submit_values", {"values": phase1_values}),
     ) as mock_completion:
-        result = extract_values(workspace, ds_id, fid, config=config)
+        result = extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 1
     # Like any printed value grounding couldn't box, it is dropped rather
@@ -3782,7 +3994,7 @@ def test_extract_values_phase3_counts_the_dropped_page_even_when_a_page_call_fai
         ],
     ):
         with pytest.raises(ValuesExtractionFailed, match="phase 3 page 1 call failed"):
-            extract_values(workspace, ds_id, fid, config=config)
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None and stats["outcome"] == "error"
     assert stats["phases"]["phase3"]["pages_out_of_range"] == 1
@@ -3805,7 +4017,7 @@ def test_extract_values_phase3_still_calls_a_page_the_file_has(workspace: Worksp
             _tool_call_response("submit_locations", phase3_args, call_id="p3b"),
         ],
     ) as mock_completion:
-        result = extract_values(workspace, ds_id, fid, config=config)
+        result = extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 3
     assert result.values["subtitle"]["locations"] == [
@@ -3837,7 +4049,7 @@ def test_extract_values_phase3_still_calls_a_rendered_page_past_a_stale_page_cou
             _tool_call_response("submit_locations", phase3_args, call_id="p3b"),
         ],
     ) as mock_completion:
-        result = extract_values(workspace, ds_id, fid, config=config)
+        result = extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 3
     assert result.values["subtitle"]["locations"] == [
@@ -3870,7 +4082,7 @@ def test_extract_values_phase3_treats_a_non_positive_page_count_as_unknown(
         return_value=_tool_call_response("submit_values", {"values": phase1_values}),
     ):
         with pytest.raises(ValuesExtractionFailed, match=r"no page image .* page 3"):
-            extract_values(workspace, ds_id, fid, config=config)
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None and stats["outcome"] == "error"
     assert stats["phases"]["phase3"]["pages_out_of_range"] == 0
@@ -4059,7 +4271,7 @@ def _extract_with_submit_args(
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with patch("litellm.completion", return_value=_tool_call_response("submit_values", args)):
-        result = extract_values(workspace, ds_id, fid, config=config)
+        result = extract_values(workspace, ds_id, fid, config=config, write_stats=True)
     return result, workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
 
 
@@ -4169,7 +4381,7 @@ def test_extract_values_records_a_repair_even_when_the_run_fails_later(
         return_value=_tool_call_response("submit_values", {"values": {"values": tree}}),
     ):
         with pytest.raises(ValuesExtractionFailed, match="no page image"):
-            extract_values(workspace, ds_id, fid, config=config)
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None
     assert stats["outcome"] == "error"
@@ -4293,7 +4505,7 @@ def test_extract_values_records_the_phase1_duration_on_the_refusal(
     bogus = {"values": {"Bogus": {"text": "x", "locations": [{"page_number": 1}]}}}
     with patch("litellm.completion", return_value=_tool_call_response("submit_values", bogus)):
         with pytest.raises(ValuesExtractionFailed, match="nothing that fits the schema"):
-            extract_values(workspace, ds_id, fid, config=config)
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None and stats["outcome"] == "error"
     assert stats["phases"]["phase1"]["duration_s"] >= 1.0
@@ -4326,7 +4538,9 @@ def test_extract_values_records_phase1_tool_calls_and_layout_on_the_refusal(
         ],
     ):
         with pytest.raises(ValuesExtractionFailed, match="nothing that fits the schema"):
-            extract_values(workspace, ds_id, fid, config=config, debug=True)
+            extract_values(
+                workspace, ds_id, fid, config=config, record_usage=True, write_stats=True
+            )
     (event,) = read_events(workspace)
     assert event["outcome"] == "error"
     assert event["context"]["tool_calls"] == 2
@@ -4364,7 +4578,7 @@ def test_extract_values_refuses_a_tree_nothing_of_which_fits_the_schema(
     response = _tool_call_response("submit_values", {"values": values})
     with patch("litellm.completion", return_value=response):
         with pytest.raises(ValuesExtractionFailed, match=r"nothing that fits the schema.*'title'"):
-            extract_values(workspace, ds_id, fid, config=config)
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None and stats["outcome"] == "error"
     assert workspace.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc")) is False
@@ -4387,7 +4601,7 @@ def test_extract_values_refuses_a_tree_pruned_to_nothing_in_permissive_mode(
         ],
     ):
         with pytest.raises(ValuesExtractionFailed, match="nothing that fits the schema"):
-            extract_values(workspace, ds_id, fid, config=config)
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None and stats["outcome"] == "error"
 

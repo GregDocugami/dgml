@@ -57,7 +57,7 @@ or after a command group (`dgml docset --format text list`).
 | `--workspace-config` | **Removed.** Still accepted so an existing caller gets a JSON error envelope instead of an argparse usage dump; passing it (or setting `$DGML_CONFIG`) fails with `INVALID_ARGUMENT` naming the replacement. It only ever worked as an address because the per-machine index recorded the location and handed it back on the next open. To start a workspace from a config you authored, use `dgml workspace create --from-config <path>`. |
 | `--format`       | `json` (default) or `text`. |
 | `--verbose`      | Emit informational diagnostics (INFO-level log lines) to stderr: hybrid text-mode warnings (digital/OCR conflicts, OCR misses) and the per-page merge summary, per-page style-annotation failures, workspace-upgrade notices, and the `docset generate` pipeline's progress lines. Off by default, so stderr carries only error envelopes and warnings. `DGML_DEBUG=1` in the environment has the same effect (plus the full traceback on an uncaught error, which `--verbose` also shows). |
-| `--debug`        | Keep intermediate debug files in the workspace **and** record LLM cost/token telemetry to `<workspace>/usage.jsonl`. Off by default, so only final files (and the small functional cache the next run reloads) are kept. With `--debug` off: no `usage.jsonl` rows are written for **any** operation (classify, cluster, transcribe, label, links, schema/value extraction, hybrid merge); `docset generate` skips the debug-only `cache/` artifacts (raw LLM dumps, `*.concept.xml`/`*.semantic.xml`, prompt listings) and `coverage_report.json`; and the in-place grounding pass skips the `<stem>.dgml.grounding_stats.json` sidecar. The functional `cache/` files (`*_blocks.json`, `label_*_cNN_raw.json`, `concept_roster.json`) are **always** written — incremental generation reloads them. Pass `--debug` to retain the debug artifacts and log usage. (Coverage summaries still print on stderr under `--verbose` either way.) `--debug` does not change log output — log verbosity is `--verbose` / `DGML_DEBUG=1`. |
+| `--debug`        | Keep intermediate debug files in the workspace **and** record LLM cost/token telemetry to `<workspace>/usage.jsonl`. Off by default, so only final files (and the small functional cache the next run reloads) are kept. With `--debug` off: no `usage.jsonl` rows are written for **any** operation (classify, cluster, transcribe, label, links, schema/value extraction, hybrid merge); `docset generate` skips the debug-only `cache/` artifacts (raw LLM dumps, `*.concept.xml`/`*.semantic.xml`, prompt listings) and `coverage_report.json`; the in-place grounding pass skips the `<stem>.dgml.grounding_stats.json` sidecar; and a value extraction skips the per-file `extraction_stats.json`. The functional `cache/` files (`*_blocks.json`, `label_*_cNN_raw.json`, `concept_roster.json`) are **always** written — incremental generation reloads them. Pass `--debug` to retain the debug artifacts and log usage. (Coverage summaries still print on stderr under `--verbose` either way.) `--debug` does not change log output — log verbosity is `--verbose` / `DGML_DEBUG=1`. In the library these are separate switches, all off by default: `debug` keeps the generation artifacts, `write_stats` the stats files, and `record_usage` logs usage. |
 
 ## Workspace commands
 
@@ -714,6 +714,14 @@ gains an `extraction` block; extraction failures are **soft** (the error
 lands in `extraction.error`, the assignment stands, exit stays 0). No schema
 → plain assignment, no block.
 
+`extraction.usage` is the run's cost and token totals — the same numbers the
+`extract_values` row in `usage.jsonl` carries — reported with or without
+`--debug`, so a caller can account for auto-extraction cost without reading
+`usage.jsonl`. A failed extraction reports what it spent before failing;
+`usage` is `null` when nothing was spent (e.g. a config error).
+`cost_usd` and the token counts are `null` when the provider did not report
+them.
+
 ```json
 {
   "docset_id": "o8vr8rs488vg",
@@ -723,6 +731,15 @@ lands in `extraction.error`, the assignment stands, exit stays 0). No schema
     "performed": true,
     "model": "gemini/gemini-2.5-pro",
     "tool_calls": 0,
+    "usage": {
+      "cost_usd": 0.0123,
+      "prompt_tokens": 12345,
+      "completion_tokens": 234,
+      "total_tokens": 12579,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0,
+      "duration_s": 15.2
+    },
     "error": null
   }
 }
@@ -1407,8 +1424,9 @@ index and code builds the boxes from them; on a page without, it draws boxes on
 a 0-1000 grid of the page image. If the file already has
 a generated document tree the extraction is added alongside it
 (`mode: full-extraction`); otherwise a minimal core file is created
-(`mode: extraction`). `extraction_stats.json` is written only under the global
-`--debug` flag. Errors `SCHEMA_NOT_FOUND` if the DocSet has no schema, and
+(`mode: extraction`). `extraction_stats.json` (per-phase timings, cost and match
+counts) and the `usage.jsonl` row are written only under the global `--debug`
+flag. Errors `SCHEMA_NOT_FOUND` if the DocSet has no schema, and
 `FILE_NOT_FOUND` if the file is not assigned to the DocSet — assign it first with
 `docset add-file` (the schema and the assignment can be set in either order; only
 this command needs both in place).

@@ -98,7 +98,7 @@ class LinkStage:
     enabled: bool = True
     verify: bool = True
     use_cache: bool = True
-    debug: bool = False
+    record_usage: bool = False
     log: Callable[[str], None] = _no_log
 
     # -- shared by both drivers ------------------------------------------------
@@ -118,7 +118,7 @@ class LinkStage:
             api_key=self.api_key,
             api_base=self.api_base,
             workspace=self.workspace,
-            debug=self.debug,
+            record_usage=self.record_usage,
             operation=OPERATION_LINKS,
         )
         config.context = {"doc": doc_name}

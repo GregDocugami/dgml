@@ -205,7 +205,7 @@ def test_sync_wrapper_sends_exactly_what_its_generator_yields(capture_kwargs: An
 
 def debug_config(tmp_path: Path, **kw: Any) -> tuple[llm.LLMConfig, Workspace]:
     ws = Workspace(root=tmp_path)
-    return llm.LLMConfig(model=HAIKU, workspace=ws, debug=True, operation="t", **kw), ws
+    return llm.LLMConfig(model=HAIKU, workspace=ws, record_usage=True, operation="t", **kw), ws
 
 
 def test_a_continued_call_writes_one_row_for_all_its_rounds(

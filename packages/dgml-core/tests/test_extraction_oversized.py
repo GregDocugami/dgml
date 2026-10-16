@@ -246,7 +246,7 @@ def test_oversized_pdf_is_split_and_merged(workspace: Workspace, tmp_path: Path)
     # half, then the quarters go through.
     limit = _LIMIT
     with patch("litellm.completion", side_effect=_rejecting(limit, _bill_model, sizes)) as m:
-        result = extract_values(workspace, ds_id, fid, config=_config())
+        result = extract_values(workspace, ds_id, fid, config=_config(), write_stats=True)
 
     first_request = m.call_args_list[0].kwargs
     assert _attached_pdf(first_request) == pdf  # the whole document was tried first
@@ -323,7 +323,7 @@ def test_accepted_request_is_unchanged(workspace: Workspace, tmp_path: Path) -> 
     pdf = _big_pdf(tmp_path)
     ds_id, fid = _seed(workspace, pdf)
     with patch("litellm.completion", side_effect=_rejecting(10**9, _bill_model, [])) as m:
-        extract_values(workspace, ds_id, fid, config=_config())
+        extract_values(workspace, ds_id, fid, config=_config(), write_stats=True)
     assert m.call_count == 1
     content = m.call_args_list[0].kwargs["messages"][1]["content"]
     assert [b["type"] for b in content] == ["text", "file"]

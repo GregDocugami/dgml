@@ -609,7 +609,7 @@ def transcribe_steps(
     page_tokens = _page_token_lists(page_text_dir)
 
     # One usage row per document, aggregating every window's call (gated on
-    # --debug via the config): the driver opens a ``record_usage_for`` scope on
+    # ``record_usage`` via the config): the driver opens a ``record_usage_for`` scope on
     # this config and the row it writes carries this context. ``config`` is
     # fresh per document in the pipeline, so setting it here is thread-local.
     config.context = {"doc": doc_name}
