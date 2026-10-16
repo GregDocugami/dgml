@@ -292,6 +292,7 @@ def test_has_extraction_false_for_generate_only_file() -> None:
         "<docset:Body>tree</docset:Body></dg:chunk>"
     )
     assert has_extraction(core) is False
+    assert has_extraction(core.encode("utf-8")) is False  # stored bytes, no decode needed
 
 
 def test_single_item_collection_inferred_as_container_without_vocab() -> None:

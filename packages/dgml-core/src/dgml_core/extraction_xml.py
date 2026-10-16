@@ -1391,14 +1391,14 @@ def _element_to_value(el: etree._Element, path: LeafPath = (), acc: _ParseAcc | 
     return out
 
 
-def has_extraction(xml: str) -> bool:
+def has_extraction(xml: str | bytes) -> bool:
     """True if the core DGML file carries a ``dg:extraction`` element — i.e. the
     file has extracted values, not merely a generated document tree."""
     root = etree.fromstring(xml.encode("utf-8") if isinstance(xml, str) else xml)
     return any(c.tag == EXTRACTION_TAG for c in root)
 
 
-def has_document_tree(xml: str) -> bool:
+def has_document_tree(xml: str | bytes) -> bool:
     """True if the core DGML file has generated document-tree content — any root
     child other than ``dg:extraction``. Distinguishes a real ``full-extraction``
     target from an extraction-only file left by a prior ``extract`` run."""
@@ -1406,7 +1406,7 @@ def has_document_tree(xml: str) -> bool:
     return any(isinstance(c.tag, str) and c.tag != EXTRACTION_TAG for c in root)
 
 
-def dgml_xml_to_values(xml: str, *, vocab: Vocabulary | None = None) -> dict[str, Any]:
+def dgml_xml_to_values(xml: str | bytes, *, vocab: Vocabulary | None = None) -> dict[str, Any]:
     """Project a core DGML file's ``dg:extraction`` element to values-shape JSON.
 
     ``{tag: {text, value?, locations, inputs?}}`` for printed leaves (in full,

@@ -5533,8 +5533,18 @@ def test_extraction_get_guidance_missing(
     assert _read_stderr(capsys)["error"]["code"] == "GUIDANCE_NOT_FOUND"
 
 
+def _assigned_file(ws: Path, ds_id: str, pdf: Path, capsys: pytest.CaptureFixture[str]) -> str:
+    """Add *pdf* and assign it to *ds_id* (before any schema is set, so the
+    assignment doesn't fire auto-extraction). Returns the file id."""
+    main(_ws_args(ws) + ["file", "add", str(pdf)])
+    fid: str = _read_stdout(capsys)["file"]["id"]
+    main(_ws_args(ws) + ["docset", "add-file", fid, "--docset", ds_id])
+    capsys.readouterr()
+    return fid
+
+
 def test_extraction_get_values_json_and_xml(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """get-values projects the dg:extraction in the core dgml file to values
     JSON (default) or returns the raw XML with --as xml."""
@@ -5545,6 +5555,7 @@ def test_extraction_get_values_json_and_xml(
     _init_ws(ws)
     capsys.readouterr()
     ds_id = _new_docset(ws, capsys)
+    fid = _assigned_file(ws, ds_id, sample_pdf, capsys)
 
     schema_file = tmp_path / "schema.rnc"
     schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
@@ -5552,7 +5563,7 @@ def test_extraction_get_values_json_and_xml(
     capsys.readouterr()
 
     # Drop a core <stem>.dgml.xml (with a dg:extraction element) where
-    # extraction would have written it — get-values globs *.dgml.xml.
+    # extraction would have written it.
     wsx = Workspace(root=ws)
     vocab = parse_rnc(_RNC_SCHEMA)
     values = {
@@ -5562,18 +5573,18 @@ def test_extraction_get_values_json_and_xml(
         }
     }
     wsx.blobs.put_blob(
-        layout.dgml_xml_key(ds_id, "fileabc", "doc"),
+        layout.dgml_xml_key(ds_id, fid, sample_pdf.stem),
         standalone_extraction_doc(values, vocab=vocab).encode(),
     )
 
-    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, "fileabc"])
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid])
     assert rc == 0
     payload = _read_stdout(capsys)
     assert payload["format"] == "values"
     assert payload["values"]["VendorName"]["text"] == "Acme"
     assert payload["values"]["VendorName"]["locations"][0]["bounding_box"] == [10, 20, 30, 40]
 
-    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, "fileabc", "--as", "xml"])
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid, "--as", "xml"])
     assert rc == 0
     payload = _read_stdout(capsys)
     assert payload["format"] == "xml"
@@ -5581,16 +5592,63 @@ def test_extraction_get_values_json_and_xml(
     assert "<docset:VendorName" in payload["xml"]
 
 
+@pytest.mark.parametrize("as_form", ["values", "xml"])
 def test_extraction_get_values_not_found(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str], as_form: str
+) -> None:
+    """Assigned with nothing generated or extracted → DGML_NOT_FOUND; a generated
+    tree with no dg:extraction → VALUES_NOT_FOUND. Same in both output forms."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    ds_id = _new_docset(ws, capsys)
+    fid = _assigned_file(ws, ds_id, sample_pdf, capsys)
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid, "--as", as_form])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "DGML_NOT_FOUND"
+
+    Workspace(root=ws).blobs.put_blob(
+        layout.dgml_xml_key(ds_id, fid, sample_pdf.stem),
+        b'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#" xmlns:docset="http://dgml.io/ns/dgml/t">'
+        b"<docset:Header>tree only</docset:Header></dg:chunk>",
+    )
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid, "--as", as_form])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "VALUES_NOT_FOUND"
+
+
+def test_extraction_get_values_unassigned_file(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file that exists but isn't in the docset is FILE_NOT_FOUND, not
+    VALUES_NOT_FOUND — and an unknown id is too."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    ds_id = _new_docset(ws, capsys)
+    main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
+    fid = _read_stdout(capsys)["file"]["id"]
+
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid])
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "FILE_NOT_FOUND"
+    assert "not assigned" in err["message"]
+
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, "nofile"])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "FILE_NOT_FOUND"
+
+
+def test_extraction_get_values_unknown_docset(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ws = tmp_path / "ws"
     _init_ws(ws)
     capsys.readouterr()
-    ds_id = _new_docset(ws, capsys)
-    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, "nofile"])
+    rc = main(_ws_args(ws) + ["extraction", "get-values", "nodocset", "nofile"])
     assert rc == 1
-    assert _read_stderr(capsys)["error"]["code"] == "VALUES_NOT_FOUND"
+    assert _read_stderr(capsys)["error"]["code"] == "DOCSET_NOT_FOUND"
 
 
 def test_extraction_generate_schema_no_files(

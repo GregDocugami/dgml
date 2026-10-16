@@ -54,6 +54,7 @@ from dgml_core.errors import (
     MissingExtra,
     NoExistingDocSets,
     StorageBackendMismatch,
+    ValuesNotFound,
     WorkspaceNotInitialized,
     short_error_message,
 )
@@ -2803,8 +2804,7 @@ def _coerce_schema_to_rnc(raw: str, path: Path, workspace_name: str, docset_name
 def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     """Dispatch the `extraction` command group."""
     from dgml_core.extraction import extract_file
-    from dgml_core.extraction_schema import parse_rnc, rnc_to_json_schema
-    from dgml_core.extraction_xml import dgml_xml_to_values
+    from dgml_core.extraction_schema import rnc_to_json_schema
     from dgml_core.grounded import (
         generate_schema,
         load_grounded_config,
@@ -2906,40 +2906,38 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         return 0
 
     if sub == "get-values":
-        from dgml_core.extraction_xml import has_extraction
+        from dgml_core.dgml_output import read_dgml
+        from dgml_core.extraction import get_extracted_values
 
-        # Extracted values live as a dg:extraction element inside the file's
-        # core <stem>.dgml.xml — the single *.dgml.xml blob in the pair's prefix.
-        dgml_keys = sorted(
-            k
-            for k in ws.blobs.list_blobs(layout.docset_pair_prefix(args.docset_id, args.file_id))
-            if k.endswith(".dgml.xml")
-        )
-        xml = ws.blobs.get_blob(dgml_keys[0]).decode("utf-8") if dgml_keys else ""
-        if not xml or not has_extraction(xml):
-            return _emit_error(
-                "VALUES_NOT_FOUND",
-                f"no extracted values for file '{args.file_id}' in docset '{args.docset_id}'; "
-                "run 'dgml extraction extract' first",
-                fmt,
-            )
+        # Extracted values live as a dg:extraction element inside the pair's
+        # core <stem>.dgml.xml; the library raises FILE_NOT_FOUND (unassigned),
+        # DGML_NOT_FOUND (nothing generated or extracted yet) and VALUES_NOT_FOUND
+        # (a tree with no extraction) through the usual envelope.
         if args.as_form == "xml":
+            from dgml_core.extraction_xml import has_extraction
+
+            doc = read_dgml(ws, args.docset_id, args.file_id)
+            if not has_extraction(doc.xml):
+                raise ValuesNotFound(
+                    f"no extracted values for file '{args.file_id}' in docset "
+                    f"'{args.docset_id}'; run 'dgml extraction extract' first"
+                )
             _emit(
-                {"docset_id": args.docset_id, "file_id": args.file_id, "format": "xml", "xml": xml},
+                {
+                    "docset_id": args.docset_id,
+                    "file_id": args.file_id,
+                    "format": "xml",
+                    "xml": doc.xml.decode("utf-8"),
+                },
                 fmt,
             )
         else:
-            vocab = (
-                parse_rnc(store.get_schema(args.docset_id))
-                if store.has_schema(args.docset_id)
-                else None
-            )
             _emit(
                 {
                     "docset_id": args.docset_id,
                     "file_id": args.file_id,
                     "format": "values",
-                    "values": dgml_xml_to_values(xml, vocab=vocab),
+                    "values": get_extracted_values(ws, args.docset_id, args.file_id),
                 },
                 fmt,
             )

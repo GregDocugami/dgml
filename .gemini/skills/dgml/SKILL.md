@@ -747,7 +747,10 @@ computed element with no `dg:href`. 0.7 files (`dg:origin="computed"` +
 `dg:href`) still read, with the href targets as inputs. Errors are the
 usual envelope: `SCHEMA_NOT_FOUND` (no schema set), `GUIDANCE_NOT_FOUND`
 (no guidance set), `NO_FILES` (empty docset, no `--from-file`),
-`VALUES_NOT_FOUND` (extract not run yet), `GROUNDED_CONFIG_MISSING` (no
+`DGML_NOT_FOUND` (from `get-values`: nothing generated or extracted yet),
+`VALUES_NOT_FOUND` (from `get-values`: generated but extract not run yet),
+`FILE_NOT_FOUND` (from `get-values`:
+the file isn't assigned to that DocSet), `GROUNDED_CONFIG_MISSING` (no
 `grounded` config). See
 [cli-reference.md](../../../docs/cli-reference.md) for full payloads.
 
