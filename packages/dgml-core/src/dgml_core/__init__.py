@@ -99,8 +99,9 @@ from .errors import (
     WorkspacesWriteConflict,
 )
 
-# Eager: ``.extraction`` imports only docsets/errors/storage at module scope and
-# reaches ``.grounded`` → ``.llm`` inside the function, so it costs nothing here.
+# Eager: ``.extraction`` imports only dgml_output/docsets/errors/storage at module
+# scope (all already loaded above) and reaches ``.grounded`` → ``.llm`` and
+# ``.extraction_xml`` inside the functions, so it costs nothing here.
 from .extraction import add_file_and_extract, extract_file, get_extracted_values
 from .file_attestation import (
     ArtifactKind,
