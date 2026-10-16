@@ -322,7 +322,8 @@ class FileStore:
         ``ValueError``.
         """
         if self.ws.configuration is not None:
-            # No portable root to be relative to (it may be a scratch dir); the
+            # The root is not where the workspace lives (a scratch dir, or a `root=`
+            # the next open may change), so nothing is portable relative to it; the
             # absolute path is the truthful record, and `original_filename` has the name.
             return str(source_path)
         try:
