@@ -259,12 +259,17 @@ def test_only_a_generated_root_is_scratch(tmp_path: Path) -> None:
         Workspace(root=tmp_path, scratch=True)
 
 
-def test_a_scratch_workspace_has_no_embedding_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_scratch_workspace_caches_embeddings_for_its_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cache under a root that goes with the object would be written, then deleted —
-    or, read off a temporary `Workspace`, recreated as an orphan. So there is none."""
-    assert (
-        Workspace.open(configuration=scratch_configuration(monkeypatch)).embedding_cache_dir is None
-    )
-    assert Workspace.open(configuration=_cfg(), root=tmp_path).embedding_cache_dir is not None
+    """The cache is not lasting output: it lives under the scratch root, so repeated
+    runs on a held `Workspace` reuse it, and it goes with the root at GC."""
+    ws = Workspace.open(configuration=scratch_configuration(monkeypatch))
+    cache = ws.embedding_cache_dir
+    assert cache.is_relative_to(ws.root)
+    cache.mkdir(parents=True)
+    (cache / "x.npy").write_bytes(b"")
+    assert ws.embedding_cache_dir == cache  # stable while the object lives
+    del ws
+    gc.collect()
+    assert not cache.exists()

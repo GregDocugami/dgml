@@ -78,7 +78,10 @@ class Workspace:
 
     ``scratch`` marks that generated root: it is removed with this object, so nothing
     lasting may be written under it. Anything that would — a staking bundle, custom
-    chains, the embedding cache — checks the flag and goes elsewhere or refuses.
+    chains — checks the flag and refuses. Caches may live there (the embedding cache
+    does) and go with it. Paths under a scratch root are valid only while this object
+    is referenced: read off a ``Workspace`` nothing else holds, they point at a
+    directory already removed.
 
     Whichever way it was configured, :attr:`config` is the one
     :class:`~dgml_core.configuration.Configuration` every reader consults.
@@ -313,6 +316,9 @@ class Workspace:
         if root is None:
             root = next(iter(declared_roots), None)
         elif declared_roots and root.resolve() not in declared_roots:
+            # Exact after resolving: a case-folded compare would accept two different
+            # directories on a case-sensitive filesystem, and probing the disk is not
+            # reliable everywhere. A caller passing both simply spells them the same.
             raise InvalidArgument(
                 f"root= ({root}) and the local store's 'workspace_path' "
                 f"({next(iter(declared_roots))}) disagree; a workspace has one root"
@@ -436,12 +442,10 @@ class Workspace:
         return self.root / layout.FILES_DIR
 
     @property
-    def embedding_cache_dir(self) -> Path | None:
+    def embedding_cache_dir(self) -> Path:
         """Where clustering encoders cache content-hashed embeddings so
         re-embedding unchanged files across runs is cheap. Per-workspace and
-        safe to delete. ``None`` on a scratch root: nothing is cached there."""
-        if self.scratch:
-            return None
+        safe to delete; on a scratch root it lives as long as this object does."""
         return self.root / layout.CACHE_DIR / layout.EMBEDDINGS_DIR
 
     # Naming workspace artifacts is :mod:`dgml_core.layout`'s job, not this

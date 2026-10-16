@@ -74,11 +74,13 @@ _POLL_INTERVAL_S = 2.0
 def resolve_chain_config_path(ws: Workspace, explicit: Path | None) -> Path | None:
     """Resolve where custom chains live: flag → ``$DGML_CHAINS`` → workspace.
 
-    ``None`` on a scratch root: it is removed with the workspace, so it keeps no
-    custom chains — built-ins only, unless the caller names a path."""
+    A workspace configured in memory reads no ``DGML_*`` environment, so the env
+    var is skipped for it. ``None`` on a scratch root: it is removed with the
+    workspace, so it keeps no custom chains — built-ins only, unless the caller
+    names a path."""
     if explicit is not None:
         return explicit
-    env = os.environ.get("DGML_CHAINS")
+    env = os.environ.get("DGML_CHAINS") if ws.configuration is None else None
     if env:
         return Path(env)
     return None if ws.scratch else ws.root / "chains.json"

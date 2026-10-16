@@ -197,10 +197,11 @@ def test_scratch_workspace_writes_nothing_lasting_under_its_root(
             native_token=None,
             config_path=None,
         )
-    # Explicit locations still win, as they do everywhere.
+    # An explicit location still wins; the environment is not read on this path.
     assert resolve_chain_config_path(ws, tmp_path / "c.json") == tmp_path / "c.json"
     monkeypatch.setenv("DGML_CHAINS", str(tmp_path / "env.json"))
-    assert resolve_chain_config_path(ws, None) == tmp_path / "env.json"
+    assert resolve_chain_config_path(ws, None) is None
+    assert resolve_chain_config_path(Workspace(root=tmp_path), None) == tmp_path / "env.json"
 
 
 def test_stake_node_dry_run_needs_no_bundle_dir(monkeypatch: pytest.MonkeyPatch) -> None:
