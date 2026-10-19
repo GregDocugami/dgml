@@ -291,7 +291,7 @@ def collect_file_version(
         refs.append(_binary_ref("source", source_key, blobs.sha256_blob(source_key)))
 
     # Slot 2: page images, ordered by page number (not lexicographic —
-    # 'page_10.jpg' sorts before 'page_2.jpg' alphabetically).
+    # 'page_10.png' sorts before 'page_2.png' alphabetically).
     for img_key in sorted(
         blobs.list_blobs(layout.file_pages_prefix(file_id)),
         key=lambda k: _page_num(Path(k)),

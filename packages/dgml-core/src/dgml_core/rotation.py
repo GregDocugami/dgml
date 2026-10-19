@@ -16,7 +16,7 @@ When an OCR provider reports that a rendered page's content is skewed
 (Azure Document Intelligence's ``page.angle``), we rotate the page image
 *and* the OCR word boxes by the identical transform so the boxes stay
 aligned with the content, and rewrite the deskewed image back to
-``page_images/page_N.jpg`` so every downstream consumer (grounding,
+``page_images/page_N.{png,jpg}`` so every downstream consumer (grounding,
 generation's vision transcription, DGMLX export) sees the corrected page.
 
 The image rotation uses Pillow; the box transform is pure ``math`` (no NumPy).

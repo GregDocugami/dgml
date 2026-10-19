@@ -94,9 +94,6 @@ def gather_file_pages(workspace: Workspace, file_id: str, max_pages: int) -> lis
     return [workspace.blobs.get_blob(k) for k in keys]
 
 
-_PAGE_IMAGE_PROBE_ORDER = (layout.PNG_PAGE_IMAGE_EXT, layout.JPEG_PAGE_IMAGE_EXT)
-
-
 def page_image_key(workspace: Workspace, file_id: str, page: int) -> str | None:
     """The key of page ``page``'s stored image, or ``None`` when there is none.
 
@@ -106,7 +103,7 @@ def page_image_key(workspace: Workspace, file_id: str, page: int) -> str | None:
     lookups cost one existence check — a round trip on a remote store. A caller
     that goes on to read the image should use :func:`read_page_image` instead.
     """
-    for ext in _PAGE_IMAGE_PROBE_ORDER:
+    for ext in layout.PAGE_IMAGE_EXTS:
         key = layout.file_page_image_key(file_id, page, ext)
         if workspace.blobs.blob_exists(key):
             return key
@@ -118,7 +115,7 @@ def read_page_image(workspace: Workspace, file_id: str, page: int) -> tuple[str,
     is none. Probes in :func:`page_image_key`'s order, but by reading each
     candidate rather than checking that it exists first, so a caller that needs
     the bytes saves a round trip per lookup on a remote store."""
-    for ext in _PAGE_IMAGE_PROBE_ORDER:
+    for ext in layout.PAGE_IMAGE_EXTS:
         key = layout.file_page_image_key(file_id, page, ext)
         try:
             return key, workspace.blobs.get_blob(key)

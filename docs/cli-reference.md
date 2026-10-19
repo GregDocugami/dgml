@@ -438,7 +438,7 @@ Walk the workspace and report inconsistencies. Issue kinds emitted today:
 | `hash_mismatch` | file | Stored sha256 doesn't match current PDF bytes |
 | `pdf_unreadable` | file | pypdf can't parse the PDF (records a permanent error so the next check skips re-parsing) |
 | `pdf_unreadable_permanent` | file | A previous parse recorded a permanent failure; not retried without `--retry-errors` |
-| `page_count_mismatch` | file | `page_images/` has the wrong number of PNGs (`repaired: true` if rerendered successfully) |
+| `page_count_mismatch` | file | `page_images/` has the wrong number of page images (`repaired: true` if rerendered successfully) |
 | `page_render_failed` | file | the configured page renderer failed during rerender |
 | `page_render_failed_permanent` | file | A previous render recorded a permanent failure; not retried without `--retry-errors` |
 | `page_text_count_mismatch` | file | `page_text/` has the wrong number of per-page JSONs (`repaired: true` if re-extracted successfully) |
@@ -817,7 +817,7 @@ the `dg` prefix to (the open `dgml.io` scheme on generated DGML; plain
 `origin` on namespace-free XML). Its value is a `"; "`-separated list of
 boxes, each `<page> <x1> <y1> <x2> <y2>` (space-separated) in integer image
 pixels — top-left origin, relative to the page's
-`page_images/page_N.jpg`:
+`page_images/page_N.{png,jpg}`:
 
 ```xml
 <docset:Body structure="h3"
@@ -872,7 +872,7 @@ with the deterministic digital/hybrid path. A malformed `style` section fails
 `generate` up front with `STYLE_CONFIG_INVALID`.
 
 Requires only the base `dgml` install — the generation pipeline reuses
-the workspace's pre-rendered `page_images/page_N.jpg` files at LLM
+the workspace's pre-rendered `page_images/page_N.{png,jpg}` files at LLM
 input time, so no extra rasterizer is needed at run time (and no
 GPL/poppler escape hatch). For non-workspace inputs (library callers
 passing arbitrary paths), the pipeline renders to a tempdir via the
@@ -2170,7 +2170,7 @@ Configure the model via the `classification` section in
 | Field | Required | Meaning |
 |---|---|---|
 | `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-flash-lite-latest`, `anthropic/claude-opus-5`, `openai/gpt-4o`. |
-| `max_pages` | no (default `3`) | How many rendered page images (`page_images/page_1.jpg` …) to send to the LLM. Cap is per-classification cost: 1 is the cheap setting, 4+ is the thorough one. |
+| `max_pages` | no (default `3`) | How many rendered page images (`page_images/page_1.{png,jpg}` …) to send to the LLM. Cap is per-classification cost: 1 is the cheap setting, 4+ is the thorough one. |
 | `naming_attempts` | no (default `1`) | How many independent proposals to request when naming a *newly clustered* DocSet (`dgml cluster`, not per-file `--auto-classify`). At `1` the single proposal is used as-is. At `2`+ the name the plurality of attempts agreed on wins, and that share is reported as the file's `naming_confidence` — a 3-of-3 agreement is safe to accept unreviewed, a 2-1 split is worth a look. Costs tokens linearly, so raise it only for runs where a wrong DocSet name is expensive to undo. |
 | `api_key` | no | Optional literal API key. Use only on per-developer workspaces (config.toml isn't checked in). Mutually exclusive with `api_key_env`. |
 | `api_key_env` | no | Optional name of the env var to read the API key from. Mutually exclusive with `api_key`. When neither is set, litellm uses its built-in per-provider lookup (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …). When `api_key_env` references an unset env var, `AUTH_ERROR` is raised. |
@@ -2505,8 +2505,8 @@ not a leaf of the Merkle root.
   <artifacts>
     <source>source/contract.docx</source>
     <page-images>
-      <page-image number="1">page_images/page_1.jpg</page-image>
-      <page-image number="2">page_images/page_2.jpg</page-image>
+      <page-image number="1">page_images/page_1.png</page-image>
+      <page-image number="2">page_images/page_2.png</page-image>
     </page-images>
     <full-schema>full-schema.rnc</full-schema>
     <dgml-xml>contract.dgml.xml</dgml-xml>

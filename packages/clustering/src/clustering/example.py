@@ -25,10 +25,10 @@ The workspace layout this script consumes is described in
     │   └── files/<file_id>/           # marker: file is assigned to this docset
     └── files/<file_id>/
         ├── file.json                  # { id, original_filename, page_count, ... }
-        ├── page_images/page_1.jpg     # 300 dpi render of page 1
+        ├── page_images/page_1.png     # render of page 1 (.png or .jpg)
         └── page_text/page_N.json      # word boxes (one per page)
 
-We treat each file as one document, use ``page_1.jpg`` as the visual
+We treat each file as one document, use ``page_1.{png,jpg}`` as the visual
 input, and concatenate ``page_text/*.json`` words into the text input.
 A file's "label" — used as supervision by S2/S3/S5 — is the *name* of
 the DocSet it's already assigned to, or ``None`` if it's unassigned.

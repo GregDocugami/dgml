@@ -26,7 +26,7 @@ collections, the blob key builders, and the mapping from a document
   blobs from documents.
 
 Keys are **workspace-root-relative POSIX strings** and deliberately do not
-depend on a workspace root: ``files/<id>/page_images/page_1.jpg`` names the same
+depend on a workspace root: ``files/<id>/page_images/page_1.png`` names the same
 thing whether it lives on disk or in a bucket. That is why these are module
 functions rather than :class:`~dgml_core.storage.Workspace` methods.
 
@@ -92,10 +92,12 @@ COVERAGE_REPORT_FILE = "coverage_report.json"
 PAGE_IMAGE_TEMPLATE = "page_%d.%s"
 # Each page image is stored as whichever of JPEG and PNG is smaller (see
 # ``dgml_core.pages``), so one file's pages can mix the two, and files added
-# before that change are all PNG. Readers accept either extension.
+# before that change are all PNG. Readers accept either extension, probing in
+# this order: PNG first, since text pages (the common case) and every
+# pre-change file are PNG.
 JPEG_PAGE_IMAGE_EXT = "jpg"
 PNG_PAGE_IMAGE_EXT = "png"
-PAGE_IMAGE_EXTS: tuple[str, ...] = (JPEG_PAGE_IMAGE_EXT, PNG_PAGE_IMAGE_EXT)
+PAGE_IMAGE_EXTS: tuple[str, ...] = (PNG_PAGE_IMAGE_EXT, JPEG_PAGE_IMAGE_EXT)
 PAGE_TEXT_TEMPLATE = "page_%d.json"
 DGML_XML_SUFFIX = ".dgml.xml"
 

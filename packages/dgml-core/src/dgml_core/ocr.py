@@ -439,7 +439,7 @@ def extract_text_ocr(
     page image raises :class:`OcrFailed`. Without it, every page is OCR'd and
     stale page JSONs are cleared first.
 
-    All providers operate per rendered page image (``page_images/page_N.jpg``):
+    All providers operate per rendered page image (``page_images/page_N.{png,jpg}``):
     one provider call per page, no whole-PDF dispatch. This keeps the
     code path symmetric, sidesteps Azure's per-file page ceilings, and
     lets a single bad page surface with a clear page number. Output

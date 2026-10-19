@@ -9,7 +9,7 @@ Every bounding box DGML stores — in `page_text/page_N.json` and in the
 `dg:origin` attributes of `<stem>.dgml.xml` (both the generated document tree
 and the `dg:extraction` element) — uses **one**
 convention: integer **image pixels** `[left, top, right, bottom]`,
-top-left origin, relative to the page's `page_images/page_N.jpg` (rendered
+top-left origin, relative to the page's `page_images/page_N.{png,jpg}` (rendered
 at 300 dpi by default, then fit to the page-edge bounds; see
 [Page images](#page-images-jpeg-edge-bounds)). Page is carried in a sibling `page_number`
 field for structured forms, or as a leading integer inside each
@@ -102,8 +102,8 @@ at all — see [storage services](#storage-services-storage).
         ├── page_images/              # JPEG/PNG page renders at page_image_dpi
         │                             #   (300 by default), fit to the page-edge
         │                             #   bounds (see below; cacheable)
-        │   ├── page_1.jpg
-        │   └── page_2.jpg
+        │   ├── page_1.png
+        │   └── page_2.png
         ├── page_text/                # one JSON of word boxes per page
         │   ├── page_1.json
         │   └── page_2.json
@@ -952,7 +952,7 @@ converted to the engine's `extracted_value` JSON Schema, whose leaf values
 carry `{ "text", "value"?, "locations": [{ "page_number", "bounding_box":
 [left, top, right, bottom] }] }` — verbatim text, optional normalized value
 (enum token, ISO date, plain number), and locations in integer image pixels
-(top-left origin, relative to `page_images/page_N.jpg`) — so every
+(top-left origin, relative to `page_images/page_N.{png,jpg}`) — so every
 extracted value traces back to one or more regions of the source PDF.
 
 When present, `extraction-schema.rnc` is one of the artifacts captured in a
@@ -1147,7 +1147,7 @@ onto every element whose subtree grounded — so `<stem>.dgml.xml`
 carries page positions directly, with no separate grounded artifact. Each
 attribute is a `"; "`-separated box list, each box `<page> <x1> <y1> <x2>
 <y2>` (space-separated) in integer image pixels (top-left origin,
-relative to `page_images/page_N.jpg`). Elements with text-node
+relative to `page_images/page_N.{png,jpg}`). Elements with text-node
 children (leaves and mixed-content parents) carry one box per visual
 line on each page (a parent's lines cover its whole subtree); pure
 containers (all-element children — sections, lists, tables, rows, the
@@ -1220,7 +1220,7 @@ source was already a PDF.
 
 One per page, written regardless of `text_mode` (`"digital"`, `"ocr"`,
 or `"hybrid"` all share this shape). Word locations are
-in **image-pixel space** matching the corresponding `page_images/page_N.jpg`
+in **image-pixel space** matching the corresponding `page_images/page_N.{png,jpg}`
 render — i.e. ints with the top-left origin, computed as
 `round(pdf_pts * dpi / 72)` where `dpi` is the file's `page_image_dpi` — the
 same value `render_pages` used, 300 unless `--dpi` said otherwise — and then
@@ -1235,7 +1235,7 @@ workspace with many pages doesn't bloat on disk:
 {"file_id":"ab55kdjs93kk","page":1,"width":2550,"height":3300,"words":[{"t":"Hello","l":[100,210,182,242],"s":{"b":1,"sz":24.0,"c":"red"}},{"t":"world","l":[190,210,290,242],"s":{"sz":12.0}}]}
 ```
 
-- `width` / `height` — dimensions of the matching `page_images/page_N.jpg`.
+- `width` / `height` — dimensions of the matching `page_images/page_N.{png,jpg}`.
 - `words[*].t` — word text (whitespace-separated run of non-whitespace chars).
 - `words[*].l` — `[left, top, right, bottom]` ints (top-left origin, pixels).
 - `words[*].s` — observed style facts, present only on the digital path (and

@@ -40,9 +40,9 @@ from dgml_core.pages import (
     EngineName,
     PdfConfig,
     list_page_images,
+    make_renderer,
     page_number_from_image_name,
     pdf_page_count_bytes,
-    render_pages,
     slice_pages,
 )
 
@@ -147,7 +147,12 @@ def check_render(pdf: Path, dpi: int, f: Findings) -> dict[EngineName, dict]:
         d = Path(tempfile.mkdtemp(prefix=f"parity-{eng.value}-"))
         t0 = time.perf_counter()
         try:
-            n = render_pages(pdf, d, dpi=dpi, config=PdfConfig(provider=eng))
+            # The engine's own lossless output, not render_pages's stored images:
+            # those are each the smaller of PNG and JPEG, so the two engines'
+            # copies of a page can differ in format and JPEG artifacts would
+            # pass for engine divergence.
+            make_renderer(PdfConfig(provider=eng)).render(pdf, d, dpi=dpi)
+            n = len(list_page_images(d))
             out[eng] = {
                 "dir": d,
                 "pages": n,

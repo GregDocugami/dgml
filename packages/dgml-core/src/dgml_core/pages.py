@@ -572,10 +572,13 @@ def _store_page(raw: Path, output_dir: Path, page: int, image_spec: PageImageSpe
     if png_size <= jpeg.getbuffer().nbytes:
         if png is None:
             shutil.move(raw, target(layout.PNG_PAGE_IMAGE_EXT))
-        else:
-            target(layout.PNG_PAGE_IMAGE_EXT).write_bytes(png)
+            return
+        target(layout.PNG_PAGE_IMAGE_EXT).write_bytes(png)
     else:
         target(layout.JPEG_PAGE_IMAGE_EXT).write_bytes(jpeg.getvalue())
+    # Freed now rather than when the whole render is done, so the scratch
+    # directory never holds every page's full-size render at once.
+    raw.unlink()
 
 
 def render_pages(
@@ -626,7 +629,10 @@ def render_pages(
     renderer = make_renderer(config)
     _clear_page_images(output_dir)
 
-    with tempfile.TemporaryDirectory(prefix="dgml-render-") as raw_dir:
+    # Beside ``output_dir`` rather than in ``$TMPDIR``: the full-size engine
+    # renders stay on the same filesystem as the stored images (LocalStore's
+    # workspace staging, say), never on a RAM-backed /tmp.
+    with tempfile.TemporaryDirectory(prefix=".dgml-render-", dir=output_dir.parent) as raw_dir:
         renderer.render(pdf_path, Path(raw_dir), dpi=dpi)
         count = _store_pages(Path(raw_dir), output_dir, image_spec)
 

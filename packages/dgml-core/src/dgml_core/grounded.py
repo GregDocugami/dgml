@@ -34,7 +34,7 @@ This module powers two CLI surfaces:
 
 Coordinate space contract:
 - Bounding boxes are integer image pixels ``[left, top, right, bottom]``
-  (top-left origin), relative to ``page_images/page_N.jpg`` —
+  (top-left origin), relative to ``page_images/page_N.{png,jpg}`` —
   one convention end-to-end. This is what ``page_text/page_N.json``
   stores, what the ``extracted_value`` form uses in schemas and values,
   and what the ``get_page_words`` tool hands the model. The model reads

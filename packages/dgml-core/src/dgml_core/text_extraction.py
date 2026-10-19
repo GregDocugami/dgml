@@ -15,7 +15,7 @@
 Walks pdfminer.six's page layout, groups characters into whitespace-separated
 words, and emits one compact JSON file per page in the file's ``page_text/``
 directory. Coordinates are converted from PDF points (origin bottom-left) to
-image pixels matching the corresponding ``page_images/page_N.jpg`` render.
+image pixels matching the corresponding ``page_images/page_N.{png,jpg}`` render.
 
 OCR and hybrid extraction live in :mod:`dgml.ocr` and :mod:`dgml.hybrid` and
 share the per-page JSON shape emitted here so downstream consumers don't have
@@ -296,7 +296,7 @@ def extract_text_digital(
     """Extract digital text from each PDF page and write per-page JSON.
 
     One ``page_N.json`` is written per page, where ``N`` is 1-based to align
-    with ``page_images/page_N.jpg``. Stale ``page_*.json`` files in
+    with ``page_images/page_N.{png,jpg}``. Stale ``page_*.json`` files in
     ``output_dir`` are removed first so retries don't leave orphans.
 
     ``dpi`` and ``image_spec`` must be what the matching ``page_images/`` were
