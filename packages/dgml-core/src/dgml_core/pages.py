@@ -552,16 +552,19 @@ def _store_page(raw: Path, output_dir: Path, page: int, image_spec: PageImageSpe
     # the PNG plugin directly skips that guard.
     with PngImagePlugin.PngImageFile(raw) as rendered:
         size = image_spec.fit(rendered.width, rendered.height)
+        resized = size != rendered.size
         stored: Image.Image = rendered
-        if size != rendered.size:
+        if resized:
             stored = rendered.resize(size, Image.Resampling.LANCZOS, reducing_gap=3.0)
-        if stored.mode not in ("RGB", "L"):
-            stored = stored.convert("RGB")
-        stored.save(jpeg, format="JPEG", quality=PAGE_JPEG_QUALITY, optimize=True)
-        if stored is not rendered:
+        if resized:
             buf = io.BytesIO()
             stored.save(buf, format="PNG")
             png = buf.getvalue()
+        # JPEG holds only RGB/L; a mode change alone never re-encodes the PNG,
+        # whose engine bytes already hold the page at its stored size.
+        if stored.mode not in ("RGB", "L"):
+            stored = stored.convert("RGB")
+        stored.save(jpeg, format="JPEG", quality=PAGE_JPEG_QUALITY, optimize=True)
     png_size = len(png) if png is not None else raw.stat().st_size
 
     def target(ext: str) -> Path:

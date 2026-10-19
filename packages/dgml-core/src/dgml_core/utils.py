@@ -25,6 +25,7 @@ import re
 from . import layout
 from .docsets import DocSetStore
 from .files import FileStore
+from .pages import page_number_from_image_name
 from .storage import Workspace
 
 # Every code point XML 1.0 forbids in character data, as lxml enforces it:
@@ -83,7 +84,13 @@ def gather_file_pages(workspace: Workspace, file_id: str, max_pages: int) -> lis
     soft-fails; a future OCR helper may treat it as a precondition).
     """
     prefix = layout.file_pages_prefix(file_id)
-    keys = workspace.blobs.list_blobs(prefix)[:max_pages]
+    # Page order, not key order: keys sort 'page_10' before 'page_2'.
+    numbered = [
+        (number, key)
+        for key in workspace.blobs.list_blobs(prefix)
+        if (number := page_number_from_image_name(key.rsplit("/", 1)[-1])) is not None
+    ]
+    keys = [key for _, key in sorted(numbered)][:max_pages]
     return [workspace.blobs.get_blob(k) for k in keys]
 
 
@@ -91,10 +98,11 @@ def page_image_key(workspace: Workspace, file_id: str, page: int) -> str | None:
     """The key of page ``page``'s stored image, or ``None`` when there is none.
 
     A page is stored as a JPEG or a PNG, whichever was smaller, so this probes
-    both extensions (JPEG first). A file added before that change is all PNG
-    and resolves the same way, without a migration.
+    both extensions. PNG is probed first: text pages (the common case) encode
+    smaller as PNG, and a file added before that change is all PNG, so most
+    lookups cost one existence check — a round trip on a remote store.
     """
-    for ext in layout.PAGE_IMAGE_EXTS:
+    for ext in (layout.PNG_PAGE_IMAGE_EXT, layout.JPEG_PAGE_IMAGE_EXT):
         key = layout.file_page_image_key(file_id, page, ext)
         if workspace.blobs.blob_exists(key):
             return key
