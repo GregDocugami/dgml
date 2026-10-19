@@ -3181,7 +3181,8 @@ def _add_generate_subparser(
         help=(
             "Override the per-page transcription model for this run (e.g. "
             "'anthropic/claude-haiku-4-5'). Layers on top of --generation-config / "
-            "the workspace config."
+            "the workspace config. No configured key or api_base carries over to it; "
+            "the model reads LiteLLM's per-provider env var (e.g. ANTHROPIC_API_KEY)."
         ),
     )
     gen.add_argument(
@@ -3191,7 +3192,8 @@ def _add_generate_subparser(
         help=(
             "Override the batch-wide semantic-labeling model for this run (e.g. "
             "'anthropic/claude-sonnet-4-6'). Layers on top of --generation-config / "
-            "the workspace config."
+            "the workspace config. No configured key or api_base carries over to it; "
+            "the model reads LiteLLM's per-provider env var (e.g. ANTHROPIC_API_KEY)."
         ),
     )
     gen.add_argument("--window-size", type=int, default=10, help="Pages per transcription window.")

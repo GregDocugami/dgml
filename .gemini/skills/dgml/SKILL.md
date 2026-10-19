@@ -370,8 +370,11 @@ cheap). Without a `generation` section, an un-overridden `generate` fails with
 
 To run against an explicit model config **without editing `config.json`** (e.g.
 a cheap smoke-test run, or an A/B), use the override flags — they mirror `dgml
-cluster --config`. Precedence: `--model`/`--label-model` > `--generation-config`
-> the workspace config.
+cluster --config`. Precedence: `--model`/`--label-model` >
+`--generation-config` > the workspace config. A flag's model takes no configured key or `api_base` (it
+reads LiteLLM's per-provider env var, e.g. `ANTHROPIC_API_KEY`); for a configured
+key or custom endpoint, put the model and its credentials together in the
+`--generation-config` file or `[generation]`.
 
 ```bash
 # Bundled profile (fast | balanced | quality) — replaces the generation

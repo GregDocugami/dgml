@@ -879,18 +879,27 @@ passing arbitrary paths), the pipeline renders to a tempdir via the
 same canonical `pages.render_pages` (the configured engine — ghostscript by
 default; see [PDF engine configuration](#pdf-engine-configuration)).
 
-The models are **not** CLI flags — like every other model-consuming command
-(`extraction generate-schema`, `extraction extract`, `discover`), `generate` reads them
-solely from the merged config, so each is one visible, deliberate choice. Each
-model resolves from its per-task field (`generation.model`,
+Each model resolves from its per-task field (`generation.model`,
 `generation.label_model`) or, when unset, the `standard` `[models]` tier — for
 both tasks, since measurement did not support paying the `advanced` tier for
 labeling. There is no code default: if neither a
 field nor a tier names a model it fails with `GENERATION_CONFIG_MISSING`, a
-malformed one with `GENERATION_CONFIG_INVALID`. The two models carry independent
+malformed one with `GENERATION_CONFIG_INVALID`. Each model carries its own
 credentials (`api_key`/`api_key_env`/`api_base` for transcription,
-`label_api_key`/`label_api_key_env`/`label_api_base` for labeling) since they may
-name different providers. Anthropic extended thinking is off for both passes
+`label_api_key`/`label_api_key_env`/`label_api_base` for labeling), written beside
+it — a section credential with no section model is `GENERATION_CONFIG_INVALID`,
+and a tier model takes its tier's credentials.
+
+`--generation-config <profile|file>` and `--model` / `--label-model` override the
+models for one run (precedence: flags > `--generation-config` > the merged
+config). A model's credentials move with it, so a model a flag names takes **no**
+configured key or `api_base` — not the file's, the workspace's or a tier's — and
+reads LiteLLM's per-provider env var (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …).
+A model the file names takes only the file's credentials. To run a model with a
+configured key or a custom endpoint, write the model and its credentials together
+in `[generation]` or in the `--generation-config` file.
+
+Anthropic extended thinking is off for both passes
 unless `generation.thinking = "adaptive"` says otherwise — a Claude 4.6+/5 model
 thinks adaptively when a request omits the field, so the mode is stated rather
 than inherited. See the [`generation` config

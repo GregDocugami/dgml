@@ -604,7 +604,7 @@ any settings across.
 ### `classification` (optional, required for `dgml file add --auto-classify`)
 
 The model defaults to the `[models].light` tier; add this section only to
-override it or set classification-specific credentials.
+override it (with that model's own credentials, if any).
 
 ```toml
 [classification]
@@ -618,8 +618,10 @@ Field rules:
 - `max_pages` — optional positive int, default `3`. First-N pages shown to the
   classifier.
 - `api_key` / `api_key_env` / `api_base` — optional; mutually-exclusive key /
-  env-var name, plus an optional endpoint. Apply whether the model is set here or
-  comes from the `light` tier; when unset, litellm uses its per-provider env var.
+  env-var name, plus an optional endpoint, for the `model` set here. They require
+  `model` in the same config layer (else `CLASSIFICATION_CONFIG_INVALID`); a model
+  from the `light` tier takes the tier's own `light_api_key` and friends. When
+  unset, litellm uses its per-provider env var.
 
 ### `ocr` (optional, required for `--text-mode ocr`)
 
@@ -685,8 +687,9 @@ Field rules:
   mutually exclusive with the matching `*_env` field.
 - `schema_api_key_env` / `values_api_key_env` — optional env var names per side.
 - `schema_api_base` / `values_api_base` — optional endpoint per side.
-  These per-side credentials apply whether the model is set here or comes from
-  its tier; when unset, litellm uses its per-provider env var.
+  These per-side credentials are for the model set here and require it in the
+  same config layer (else `GROUNDED_CONFIG_INVALID`); a model from its tier takes
+  the tier's credentials. When unset, litellm uses its per-provider env var.
 - `max_tool_iters` — optional positive int, default 20. Cap on
   `get_page_words` tool calls per extraction.
 - `values_reasoning_effort` — optional, default `"medium"`. The reasoning budget
@@ -738,8 +741,10 @@ Field rules:
 - Labeling credentials: `label_api_key` / `label_api_key_env` /
   `label_api_base`. The two models carry **independent** credentials because
   they may name different providers (e.g. the `anthropic_google` family blends
-  Gemini and Anthropic models). These apply whether the models are set here
-  or come from their tiers; when unset, litellm uses its per-provider env var.
+  Gemini and Anthropic models). Each set is for the model set here and requires
+  it in the same config layer (else `GENERATION_CONFIG_INVALID`); a model from
+  its tier takes the tier's credentials. When unset, litellm uses its
+  per-provider env var.
 - `thinking` — optional; `"disabled"` (default), `"adaptive"`, or
   `"between_tools"` (Claude Sonnet 5.5 rejects `"disabled"`; this is its off
   switch, thinking only between tool calls). Anthropic
