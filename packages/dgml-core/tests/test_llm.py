@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+from types import SimpleNamespace
 from typing import Any
 
 import litellm
@@ -313,6 +314,114 @@ def test_completion_with_retry_retries_transient_exception(
 
     assert calls["n"] == 2
     assert result == _resp("OK")
+
+
+def _server_error(request_id: str | None = "req_abc123") -> Exception:
+    """A LiteLLM 500 as the OpenAI provider raises it, headers included."""
+    import httpx
+
+    headers = {"x-request-id": request_id} if request_id else {}
+    return litellm.exceptions.InternalServerError(
+        message="InternalServerError: OpenAIException - Internal Server Error",
+        llm_provider="openai",
+        model="gpt-4o",
+        response=httpx.Response(
+            500, headers=headers, request=httpx.Request("POST", "https://api.openai.com")
+        ),
+        litellm_debug_info="\nModel: gpt-4o\nMessages: `[{'content': 'SECRET DOCUMENT TEXT'}]`",
+    )
+
+
+def test_completion_with_retry_logs_each_retry_and_counts_attempts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def failing(**kwargs: Any) -> Any:
+        raise _server_error()
+
+    monkeypatch.setattr("litellm.completion", failing)
+    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
+    caplog.set_level(logging.INFO, logger="dgml_core.llm")
+
+    with pytest.raises(litellm.exceptions.InternalServerError) as raised:
+        llm._completion_with_retry(
+            {
+                "model": "gpt-4o",
+                "api_base": "https://proxy.example.com/v1",
+                "api_key": "sk-SECRET",
+                "messages": [],
+            }
+        )
+
+    retries = [r.getMessage() for r in caplog.records if r.name == "dgml_core.llm"]
+    context = (
+        "model 'gpt-4o' at https://proxy.example.com, api key passed, HTTP 500, "
+        "request id req_abc123"
+    )
+    assert retries == [
+        f"model call failed (InternalServerError, {context}); retry 1 of 2 in 2s",
+        f"model call failed (InternalServerError, {context}, 2 attempts); retry 2 of 2 in 4s",
+    ]
+    assert llm.provider_error_context(raised.value, model="gpt-4o") == (
+        "model 'gpt-4o', HTTP 500, request id req_abc123, 3 attempts"
+    )
+
+
+def test_completion_with_retry_does_not_log_a_non_transient_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def failing(**kwargs: Any) -> Any:
+        raise ValueError("bad request")
+
+    monkeypatch.setattr("litellm.completion", failing)
+    caplog.set_level(logging.DEBUG, logger="dgml_core.llm")
+
+    with pytest.raises(ValueError) as raised:
+        llm._completion_with_retry({"model": "gpt-4o", "messages": []})
+
+    assert [r for r in caplog.records if r.name == "dgml_core.llm"] == []
+    # One attempt is not worth mentioning.
+    assert llm.provider_error_context(raised.value, model="gpt-4o") == "model 'gpt-4o'"
+
+
+def test_provider_error_context_leaves_out_prompt_and_credentials() -> None:
+    context = llm.provider_error_context(
+        _server_error(),
+        model="gpt-4o",
+        api_base="https://user:hunter2@gw.example.com:8443/tok_SECRET/v1?api-key=sk-SECRET",
+        api_key="sk-SECRET-key-value",
+    )
+
+    assert context == (
+        "model 'gpt-4o' at https://gw.example.com:8443, api key passed, HTTP 500, "
+        "request id req_abc123"
+    )
+    assert "SECRET" not in context and "hunter2" not in context
+
+
+@pytest.mark.parametrize(
+    ("api_key", "state"),
+    [
+        ("sk-x", "api key passed"),
+        ("", "api key empty, not passed"),
+        (None, "api key None, not passed"),
+    ],
+)
+def test_provider_error_context_reports_api_key_state(api_key: str | None, state: str) -> None:
+    assert llm.provider_error_context(RuntimeError("x"), api_key=api_key) == state
+
+
+def test_provider_error_context_leaves_out_an_unreported_api_key() -> None:
+    # Not passing api_key at all is "unknown", not "no key".
+    assert "api key" not in llm.provider_error_context(RuntimeError("x"), model="m")
+
+
+def test_provider_error_context_with_nothing_known() -> None:
+    assert llm.provider_error_context(RuntimeError("x")) == ""
+    assert llm.provider_error_context(_server_error(request_id=None)) == "HTTP 500"
+    assert (
+        llm.provider_error_context(RuntimeError("x"), model="m", api_base="not a url")
+        == "model 'm' at <unparseable api_base>"
+    )
 
 
 def test_call_with_refinement_replays_draft_in_second_request(
@@ -1067,3 +1176,35 @@ def test_call_continued_raises_when_every_round_is_textless(
             system_prompt="s",
             user_content=[{"type": "text", "text": "u"}],
         )
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    ["http://[::1", "https://h:notaport", "https://h:99999", "not a url"],
+)
+def test_redacted_api_base_reports_a_malformed_url(api_base: str) -> None:
+    assert llm._redacted_api_base(api_base) == "<unparseable api_base>"
+
+
+def test_provider_error_context_ignores_a_non_string_api_base() -> None:
+    # Typed str | None; anything else is left out rather than parsed.
+    context = llm.provider_error_context(
+        RuntimeError("x"),
+        model="m",
+        api_base=123,  # type: ignore[arg-type]
+    )
+    assert context == "model 'm'"
+
+
+def test_provider_error_context_reads_only_well_typed_fields() -> None:
+    """Fields that are missing, None, or not the expected type are left out."""
+    exc = RuntimeError("x")
+    exc.status_code = None  # type: ignore[attr-defined]
+    exc.response = SimpleNamespace(headers=None)  # type: ignore[attr-defined]
+    assert llm.provider_error_context(exc) == ""
+
+    exc.response = SimpleNamespace(headers=["x-request-id"])  # type: ignore[attr-defined]
+    assert llm.provider_error_context(exc) == ""
+
+    exc.response = SimpleNamespace(headers={"x-request-id": None})  # type: ignore[attr-defined]
+    assert llm.provider_error_context(exc) == ""

@@ -108,6 +108,7 @@ from .llm import (
     is_request_rejection,
     is_request_too_large,
     model_max_output_tokens,
+    provider_error_context,
     steps_with_tools,
 )
 from .matching import (
@@ -1031,6 +1032,15 @@ def extract_values(
         write_stats=write_stats,
         record_usage=record_usage,
     )
+    # Logged once the run is set up, so a refused file (no schema, not
+    # assigned) never reads as started. A failure is the caller's to report:
+    # only it knows whether one is soft (auto-extraction) or raised.
+    logger.info(
+        "file %s: extracting values into docset %s with %s",
+        file_id,
+        docset_id,
+        config.values_model,
+    )
     try:
         steps = run.phase1_steps()
         try:
@@ -1043,12 +1053,38 @@ def extract_values(
         per_page: list[_PageOutcome] = []
         if pages:
             per_page = _run_phase3_pages(run, pages)
-        return run.finish(per_page)
+        result = run.finish(per_page)
+        logger.info(
+            "file %s: extracted values into docset %s (%s)",
+            file_id,
+            docset_id,
+            _describe_run(result.tool_calls, result.usage),
+        )
+        return result
     except BaseException as exc:
         run.fail(exc)
         raise
     finally:
         run.record()
+
+
+def _describe_run(tool_calls: int, usage: dict[str, Any]) -> str:
+    """Summarize a finished run for its log line: tool calls, then duration and
+    cost when known.
+
+    It runs after the values are written, inside the run's ``try``, so it must
+    not raise. The one way it could is a numeric format applied to ``None``:
+    ``cost_usd`` is ``None`` when the provider reported no cost, and the whole
+    dict is ``{}`` when it could not be built. So each figure is formatted only
+    when it is a number."""
+    parts = [f"{tool_calls} tool calls"]
+    duration = usage.get("duration_s")
+    if isinstance(duration, int | float):
+        parts.append(f"{duration:.1f}s")
+    cost = usage.get("cost_usd")
+    if isinstance(cost, int | float):
+        parts.append(f"${cost:.4f}")
+    return ", ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -1189,6 +1225,7 @@ class _FileExtraction:
         """Build the phase-1 request and return its generator (text + page
         numbers, no bboxes)."""
         self.phase1_started = time.monotonic()
+        logger.info("file %s: phase 1 (values) starting", self.file_id)
         phase1_schema = _drop_bboxes_from_schema(self.schema)
         # The tool parameter gets the expanded schema with prose annotations
         # stripped — the identical keys remain in the user-prompt copy
@@ -1273,6 +1310,7 @@ class _FileExtraction:
         self.phase1_layout = self.phase1.layout
         self.tool_calls_total += self.phase1.tool_calls
         self.phase1_duration = round(time.monotonic() - self.phase1_started, 3)
+        logger.info("file %s: phase 1 (values) done in %.1fs", self.file_id, self.phase1_duration)
         # Recorded above, before this refusal raises, so a refused run's
         # usage row and stats sidecar still carry what phase 1 did.
         if self.phase1.refusal is not None:
@@ -1340,6 +1378,13 @@ class _FileExtraction:
         self.phase2_matched = phase2_result.stats.matched_locations
         self.total_locations = phase2_result.stats.total_locations
         self._phase2_unmatched_locations = phase2_result.stats.unmatched_locations
+        logger.info(
+            "file %s: phase 2 (OCR matching, no LLM) matched %d of %d locations in %.1fs",
+            self.file_id,
+            self.phase2_matched,
+            self.total_locations,
+            self.phase2_duration,
+        )
 
         # --- Phase 3 starts here: per-page LLM for remaining unmatched ---
         self.phase3_started = time.monotonic()
@@ -1352,7 +1397,17 @@ class _FileExtraction:
             phase2_result.unmatched,
             page_count=FileStore(self.workspace).get(self.file_id).page_count,
         )
-        return sorted(_group_by_page(unmatched).items())
+        pages = sorted(_group_by_page(unmatched).items())
+        if pages:
+            logger.info(
+                "file %s: phase 3 (locations) starting: %d items on %d pages",
+                self.file_id,
+                len(unmatched),
+                len(pages),
+            )
+        else:
+            logger.info("file %s: phase 3 (locations) not needed", self.file_id)
+        return pages
 
     # ---- phase 3 ------------------------------------------------------
 
@@ -1403,6 +1458,15 @@ class _FileExtraction:
             ) = _fold_phase3(final_values, per_page, self.phase3_totals)
         self.unmatched_count = self._phase2_unmatched_locations - self.phase3_matched
         self.phase3_duration = round(time.monotonic() - self.phase3_started, 3)
+        if per_page:
+            logger.info(
+                "file %s: phase 3 (locations) matched %d more locations in %.1fs; "
+                "%d still unmatched",
+                self.file_id,
+                self.phase3_matched,
+                self.phase3_duration,
+                self.unmatched_count,
+            )
         # Phase 3's boxes are drawn by a model; where the page has a text
         # layer, a box whose words don't read as its value is wrong: it is
         # moved to the nearest exact match, or stripped before the drop below.
@@ -1874,6 +1938,19 @@ def _phase3_call_failed(page_number: int) -> str:
     return f"phase 3 page {page_number} call failed"
 
 
+def _call_failed(failure: str, exc: Exception, config: LLMConfig) -> ValuesExtractionFailed:
+    """``"<failure>: <Type>: <message> (<context>)"``, the context being the
+    identifiers needed to trace the call with its provider
+    (:func:`~dgml_core.llm.provider_error_context`) — a provider's own message
+    is often no more than "Internal Server Error"."""
+    context = provider_error_context(
+        exc, model=config.model, api_base=config.api_base, api_key=config.api_key
+    )
+    return ValuesExtractionFailed(
+        f"{failure}: {type(exc).__name__}: {exc}" + (f" ({context})" if context else "")
+    )
+
+
 def _tool_call_step(
     config: LLMConfig,
     *,
@@ -1885,9 +1962,8 @@ def _tool_call_step(
 ) -> LLMSteps[CallResult]:
     """:func:`~dgml_core.llm.steps_with_tools`, with any error it raises while
     building the request or reading the response reported as
-    :class:`ValuesExtractionFailed` ``"<failure>: <Type>: <message>"`` — the
-    same wrapping the inline call site applied to the whole ``call_with_tools``
-    call.
+    :class:`ValuesExtractionFailed` by :func:`_call_failed` — the same wrapping
+    the inline call site applied to the whole ``call_with_tools`` call.
 
     Drivers deliver a failed request by throwing its exception in at the pending
     ``yield`` (see :data:`~dgml_core.llm.LLMSteps`), so executor failures land
@@ -1902,7 +1978,7 @@ def _tool_call_step(
             )
         )
     except Exception as exc:
-        raise ValuesExtractionFailed(f"{failure}: {type(exc).__name__}: {exc}") from exc
+        raise _call_failed(failure, exc, config) from exc
 
 
 def _phase1_llm_config(
@@ -3008,7 +3084,8 @@ def phase1_steps(
     Drive it with the config from :func:`_phase1_llm_config` (same effort);
     any failure it does not recover from surfaces as
     :class:`ValuesExtractionFailed` (``"extraction call failed: <Type>:
-    <message>"`` for a failed request). *run* may already carry latches from an
+    <message> (<context>)"`` for a failed request; see :func:`_call_failed`).
+    *run* may already carry latches from an
     earlier run and they are honored.
     """
 
@@ -3402,9 +3479,7 @@ def _phase1_attempt_steps(
                 _remember_required_tool_choice_rejected(endpoint, exc)
                 tool_choice = None
         except Exception as exc:
-            raise ValuesExtractionFailed(
-                f"{_PHASE1_CALL_FAILED}: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise _call_failed(_PHASE1_CALL_FAILED, exc, llm_config) from exc
 
         add_partial(totals, with_tier(result.usage, result.response, None))
 

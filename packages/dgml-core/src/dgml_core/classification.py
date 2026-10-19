@@ -34,6 +34,7 @@ payload fields.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -54,6 +55,8 @@ from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .storage import Workspace
 from .usage import OPERATION_CLASSIFY
 from .utils import gather_file_pages, image_to_data_url
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_PAGES = 3
 DEFAULT_NAMING_ATTEMPTS = 1
@@ -256,7 +259,9 @@ def classify_file(
             )
         if mode == ClassifyMode.EXISTING_FORCED and len(docsets) == 1:
             # Only one possible answer, so there is nothing to decide.
-            return ClassificationDecision(decision="existing", existing_docset_id=docsets[0].id)
+            decision = ClassificationDecision(decision="existing", existing_docset_id=docsets[0].id)
+            _log_decision(file_id, decision, docsets, mode=mode, by="the only docset, no LLM call")
+            return decision
     response = _vision_tool_call(
         workspace,
         [file_id],
@@ -265,7 +270,46 @@ def classify_file(
         tools=_build_tools(docsets, mode=mode),
         record_usage=record_usage,
     )
-    return _parse_response(response, docsets, mode=mode)
+    decision = _parse_response(response, docsets, mode=mode)
+    _log_decision(file_id, decision, docsets, mode=mode, by=config.model)
+    return decision
+
+
+def _log_decision(
+    file_id: str,
+    decision: ClassificationDecision,
+    docsets: list[DocSet],
+    *,
+    mode: ClassifyMode,
+    by: str,
+) -> None:
+    """One INFO line for what :func:`classify_file` decided, and why when the
+    model said.
+
+    Runs after the decision is made, so it must not raise; nothing here can.
+    It only reads string fields and builds f-strings, and the optional ones
+    (``reason``, the docset's name) are checked for ``None`` before use. The
+    rest is lazy ``%s`` arguments, which ``logging`` formats itself."""
+    reason = f": {decision.reason}" if decision.reason else ""
+    if decision.decision == "existing":
+        name = next((d.name for d in docsets if d.id == decision.existing_docset_id), None)
+        target = f"docset {decision.existing_docset_id}" + (f" ({name!r})" if name else "")
+        logger.info(
+            "file %s: classified into %s [mode %s, by %s]%s", file_id, target, mode, by, reason
+        )
+    elif decision.decision == "new":
+        logger.info(
+            "file %s: classification proposes a new docset %r [mode %s, by %s]%s",
+            file_id,
+            decision.new_name,
+            mode,
+            by,
+            reason,
+        )
+    else:
+        logger.info(
+            "file %s: no existing docset fits [mode %s, by %s]%s", file_id, mode, by, reason
+        )
 
 
 def propose_new_docset_for_files(

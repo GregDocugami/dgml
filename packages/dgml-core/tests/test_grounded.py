@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -42,6 +43,7 @@ from dgml_core.grounded import (
     _SCHEMA_TREE_MAX_DEPTH,
     DEFAULT_MAX_TOOL_ITERS,
     GroundedConfig,
+    _describe_run,
     _drop_bboxes_from_schema,
     _empty_totals,
     _field_node_schema,
@@ -1198,6 +1200,97 @@ def test_extract_values_phase3_resolves_unmatched_via_llm(workspace: Workspace) 
     # Final values carry the phase-3 bbox patched in.
     title = result.values["title"]
     assert title["locations"] == [{"page_number": 1, "bounding_box": [100, 56, 200, 76]}]
+
+
+def _phase_log(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The run's INFO lines, with durations masked so they compare exactly."""
+    return [
+        re.sub(r"\d+\.\ds", "Ns", r.getMessage())
+        for r in caplog.records
+        if r.name == "dgml_core.grounded" and r.levelno == logging.INFO
+    ]
+
+
+def test_extract_values_logs_each_phase(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    _seed_page_image(workspace, fid, 1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Goodnight", "locations": [{"page_number": 1}]}}
+    phase3_args = {"locations": [{"id": "a", "bounding_boxes": [[100, 56, 200, 76]]}]}
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    caplog.set_level(logging.INFO, logger="dgml_core")
+
+    with patch(
+        "litellm.completion",
+        side_effect=[
+            _tool_call_response("submit_values", {"values": phase1_values}, call_id="p1"),
+            _tool_call_response("submit_locations", phase3_args, call_id="p3"),
+        ],
+    ):
+        extract_values(workspace, ds_id, fid, config=config)
+
+    assert _phase_log(caplog) == [
+        f"file {fid}: extracting values into docset {ds_id} with {DEFAULT_VALUES_MODEL}",
+        f"file {fid}: phase 1 (values) starting",
+        f"file {fid}: phase 1 (values) done in Ns",
+        f"file {fid}: phase 2 (OCR matching, no LLM) matched 0 of 1 locations in Ns",
+        f"file {fid}: phase 3 (locations) starting: 1 items on 1 pages",
+        f"file {fid}: phase 3 (locations) matched 1 more locations in Ns; 0 still unmatched",
+        f"file {fid}: extracted values into docset {ds_id} (0 tool calls, Ns)",
+    ]
+
+
+def test_describe_run_skips_figures_it_does_not_have() -> None:
+    """It runs after the values are stored, so it must not raise: a cost the
+    provider did not report is None, and usage is {} when it could not be built."""
+    assert _describe_run(2, {"duration_s": 1.25, "cost_usd": 0.5}) == "2 tool calls, 1.2s, $0.5000"
+    assert _describe_run(2, {"duration_s": 1.25, "cost_usd": None}) == "2 tool calls, 1.2s"
+    assert _describe_run(2, {}) == "2 tool calls"
+
+
+def test_extract_values_logs_no_start_for_a_refused_file(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unassigned file is refused before the run starts, so nothing reads as
+    started; reporting the refusal is the caller's."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    DocSetStore(workspace).remove_file(ds_id, fid)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    caplog.set_level(logging.INFO, logger="dgml_core")
+
+    with pytest.raises(FileNotFound):
+        extract_values(workspace, ds_id, fid, config=config)
+
+    assert _phase_log(caplog) == []
+
+
+def test_extract_values_logs_phase3_not_needed(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)  # "Hello", "world"
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    caplog.set_level(logging.INFO, logger="dgml_core")
+
+    with patch(
+        "litellm.completion",
+        return_value=_tool_call_response("submit_values", {"values": phase1_values}),
+    ):
+        extract_values(workspace, ds_id, fid, config=config)
+
+    assert _phase_log(caplog)[-3:-1] == [
+        f"file {fid}: phase 2 (OCR matching, no LLM) matched 1 of 1 locations in Ns",
+        f"file {fid}: phase 3 (locations) not needed",
+    ]
 
 
 def test_extract_values_phase3_words_are_toon_encoded(

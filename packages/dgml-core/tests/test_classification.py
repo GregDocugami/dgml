@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -1225,3 +1226,83 @@ def test_a_nonsensical_attempt_count_is_rejected(workspace: Workspace, attempts:
         with pytest.raises(ValueError, match="at least 1"):
             propose_new_docset_for_files(workspace, ["fid1"], config=cfg, attempts=attempts)
     mock_completion.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# classify_file logs its decision at INFO
+# ---------------------------------------------------------------------------
+
+
+def _decision_log(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "dgml_core.classification" and r.levelno == logging.INFO
+    ]
+
+
+def test_classify_file_logs_an_existing_decision(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    existing_id, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
+    caplog.set_level(logging.INFO, logger="dgml_core")
+
+    with patch("litellm.completion", return_value=response):
+        classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
+
+    assert _decision_log(caplog) == [
+        f"file {new_id}: classified into docset {existing_id} ('Invoices') "
+        f"[mode existing, by {DEFAULT_TEST_MODEL}]"
+    ]
+
+
+def test_classify_file_logs_a_new_decision(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    _, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("create_new_docset", _create_new_args())
+    caplog.set_level(logging.INFO, logger="dgml_core")
+
+    with patch("litellm.completion", return_value=response):
+        classify_file(workspace, new_id, config=cfg)
+
+    assert _decision_log(caplog) == [
+        f"file {new_id}: classification proposes a new docset 'Purchase Orders' "
+        f"[mode existing-or-new, by {DEFAULT_TEST_MODEL}]"
+    ]
+
+
+def test_classify_file_logs_a_decline_with_its_reason(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    _, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("no_matching_docset", {"reason": "A lease, not an invoice."})
+    caplog.set_level(logging.INFO, logger="dgml_core")
+
+    with patch("litellm.completion", return_value=response):
+        classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
+
+    assert _decision_log(caplog) == [
+        f"file {new_id}: no existing docset fits [mode existing, by {DEFAULT_TEST_MODEL}]: "
+        "A lease, not an invoice."
+    ]
+
+
+def test_classify_file_logs_the_forced_single_docset_shortcut(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    only = DocSetStore(workspace).create(name="Invoices")
+    _seed_file(workspace, "nopagesfid")
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    caplog.set_level(logging.INFO, logger="dgml_core")
+
+    classify_file(workspace, "nopagesfid", config=cfg, mode=ClassifyMode.EXISTING_FORCED)
+
+    assert _decision_log(caplog) == [
+        f"file nopagesfid: classified into docset {only.id} ('Invoices') "
+        "[mode existing-forced, by the only docset, no LLM call]"
+    ]

@@ -62,7 +62,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, TypeVar, cast
@@ -969,6 +969,119 @@ def _quiet_stdout() -> Iterator[None]:
             own_sink.drain()
 
 
+# Set on an exception :func:`_completion_with_retry` raises: how many calls it
+# made before giving up. Read back by :func:`provider_error_context`.
+_ATTEMPTS_ATTR = "dgml_attempts"
+
+# Response headers providers put their request id in, most specific first:
+# OpenAI, Anthropic, Azure API Management.
+_REQUEST_ID_HEADERS = ("x-request-id", "request-id", "apim-request-id")
+
+
+def _set_attempts(exc: BaseException, attempts: int) -> None:
+    # Cannot fail: every exception has a __dict__ (BaseException provides one,
+    # and __slots__ in a subclass cannot remove it), so a new attribute is
+    # always accepted.
+    setattr(exc, _ATTEMPTS_ATTR, attempts)
+
+
+def _redacted_api_base(api_base: str) -> str:
+    """``scheme://host[:port]`` of *api_base*. The rest is dropped because it
+    can carry credentials: userinfo, a key in the query string, or a token in
+    the path of some gateways."""
+    from urllib.parse import urlsplit
+
+    # urlsplit raises ValueError on a malformed IPv6 host ("http://[::1"), and
+    # .port on a port that is not a number in range ("https://h:abc").
+    try:
+        parts = urlsplit(api_base)
+        port = parts.port
+    except ValueError:
+        return "<unparseable api_base>"
+    if not parts.hostname:
+        return "<unparseable api_base>"
+    return f"{parts.scheme}://{parts.hostname}" + (f":{port}" if port else "")
+
+
+def _provider_request_id(exc: BaseException) -> str | None:
+    request_id = getattr(exc, "request_id", None)
+    if isinstance(request_id, str) and request_id:
+        return request_id
+    # LiteLLM's errors carry the provider response's httpx.Headers (a Mapping);
+    # anything else (no response, a stand-in without headers) has no id to read.
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if not isinstance(headers, Mapping):
+        return None
+    for name in _REQUEST_ID_HEADERS:
+        value = headers.get(name)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+class _Unreported:
+    """Type of :data:`_UNREPORTED`."""
+
+
+#: ``api_key`` default of :func:`provider_error_context`: the caller does not
+#: know the key, so its state is left out (distinct from ``None``, no key).
+_UNREPORTED = _Unreported()
+
+
+def _api_key_state(api_key: str | None) -> str:
+    """Whether a key was passed — never any part of the key itself. An empty
+    key is not sent (see :func:`_build_completion_kwargs`), so it and ``None``
+    both leave LiteLLM to find one in the provider's environment variable
+    (``OPENAI_API_KEY`` and the like), which may not be the key intended."""
+    if api_key is None:
+        return "api key None, not passed"
+    if not api_key:
+        return "api key empty, not passed"
+    return "api key passed"
+
+
+def provider_error_context(
+    exc: BaseException,
+    *,
+    model: str | None = None,
+    api_base: str | None = None,
+    api_key: str | None | _Unreported = _UNREPORTED,
+) -> str:
+    """Identifiers for tracing a failed model call, safe to log.
+
+    ``model 'm' at https://host, api key passed, HTTP 500, request id req_…,
+    3 attempts`` — each part only when known, ``""`` when none is. The request
+    id is what a provider's support needs to look a failure up. ``api_base`` is
+    cut to scheme and host (see :func:`_redacted_api_base`); ``api_key`` is
+    reported only as passed, empty or absent (see :func:`_api_key_state`).
+    Deliberately absent: the exception's message (callers already carry it) and
+    LiteLLM's ``litellm_debug_info``, which embeds the request's messages, i.e.
+    document content. The HTTP status is LiteLLM's mapped one (its
+    ``InternalServerError`` always says 500).
+    """
+    # It runs inside ``except`` blocks (the retry log, the phase-1/phase-3
+    # failure message), where an error of its own would abort the retries or
+    # replace the provider's error. So every value read off *exc* is
+    # type-checked before use rather than assumed, and *api_base* is parsed
+    # only when it is a string.
+    parts: list[str] = []
+    if model:
+        at = f" at {_redacted_api_base(api_base)}" if isinstance(api_base, str) and api_base else ""
+        parts.append(f"model {model!r}{at}")
+    if not isinstance(api_key, _Unreported):
+        parts.append(_api_key_state(api_key))
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        parts.append(f"HTTP {status}")
+    request_id = _provider_request_id(exc)
+    if request_id:
+        parts.append(f"request id {request_id}")
+    attempts = getattr(exc, _ATTEMPTS_ATTR, None)
+    if isinstance(attempts, int) and attempts > 1:
+        parts.append(f"{attempts} attempts")
+    return ", ".join(parts)
+
+
 def _completion_with_retry(kwargs: dict[str, Any], *, max_retries: int = 3) -> Any:
     """Call litellm.completion with exponential-backoff retries for transient
     failures — both raised errors and *empty* responses.
@@ -990,6 +1103,7 @@ def _completion_with_retry(kwargs: dict[str, Any], *, max_retries: int = 3) -> A
             with _quiet_stdout():
                 response = litellm.completion(**kwargs)
         except Exception as exc:
+            _set_attempts(exc, attempt + 1)
             msg = str(exc).lower()
             # Retry on transient network/server errors only. Rate limits count:
             # they say "not now", not "never", and the pipeline runs documents
@@ -1015,6 +1129,22 @@ def _completion_with_retry(kwargs: dict[str, Any], *, max_retries: int = 3) -> A
             if not transient or attempt == max_retries - 1:
                 raise
             last_exc = exc
+            # A retry that then succeeds leaves no trace in the result, so say
+            # it here; INFO, since nothing is degraded yet. Identifiers only —
+            # never the exception's debug info, which carries the prompt.
+            logger.info(
+                "model call failed (%s, %s); retry %d of %d in %.0fs",
+                type(exc).__name__,
+                provider_error_context(
+                    exc,
+                    model=kwargs.get("model"),
+                    api_base=kwargs.get("api_base"),
+                    api_key=kwargs.get("api_key"),
+                ),
+                attempt + 1,
+                max_retries - 1,
+                delay,
+            )
             time.sleep(delay)
             delay *= 2
             continue
