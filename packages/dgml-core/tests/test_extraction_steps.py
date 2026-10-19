@@ -279,7 +279,7 @@ def test_thrown_errors_keep_their_sync_messages(workspace: Workspace) -> None:
         ValuesExtractionFailed,
         match=(
             rf"^extraction call failed: RuntimeError: x \(model '{DEFAULT_VALUES_MODEL}', "
-            r"api key None, not passed\)$"
+            r"api key not passed\)$"
         ),
     ):
         gen.throw(RuntimeError("x"))

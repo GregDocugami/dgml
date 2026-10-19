@@ -49,7 +49,14 @@ from .errors import (
     ClassificationFailed,
     NoExistingDocSets,
 )
-from .llm import CallResult, LLMConfig, LLMSteps, drive, steps_with_tools
+from .llm import (
+    CallResult,
+    LLMConfig,
+    LLMSteps,
+    describe_call_failure,
+    drive,
+    steps_with_tools,
+)
 from .models import DocSet
 from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .storage import Workspace
@@ -495,8 +502,11 @@ def _vision_tool_call(
     except Exception as exc:
         # litellm normalizes provider errors but we never want a raw
         # provider exception bubbling past — wrap unconditionally with
-        # the type name so the CLI's soft-fail message stays informative.
-        raise ClassificationFailed(f"LLM call failed: {type(exc).__name__}: {exc}") from exc
+        # the type name and the call's tracing context so the CLI's soft-fail
+        # message stays informative.
+        raise ClassificationFailed(
+            f"LLM call failed: {describe_call_failure(exc, llm_config)}"
+        ) from exc
     return result.response
 
 

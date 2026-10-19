@@ -360,8 +360,14 @@ def test_classify_file_provider_exception_wrapped(workspace: Workspace) -> None:
     _, new_id = _seed_for_classify(workspace)
     cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
     with patch("litellm.completion", side_effect=RuntimeError("network boom")):
-        with pytest.raises(ClassificationFailed, match="RuntimeError: network boom"):
+        with pytest.raises(ClassificationFailed) as failed:
             classify_file(workspace, new_id, config=cfg)
+    # A provider's message alone ("Internal Server Error") can't be traced, so
+    # the call's model and key state follow it.
+    assert str(failed.value) == (
+        f"LLM call failed: RuntimeError: network boom "
+        f"(model {DEFAULT_TEST_MODEL!r}, api key not passed)"
+    )
 
 
 def test_classify_file_empty_tool_calls(workspace: Workspace) -> None:

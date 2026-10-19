@@ -403,8 +403,11 @@ def test_missing_key_questions_degrades_gracefully(workspace: Workspace) -> None
 def test_provider_exception_wrapped(workspace: Workspace) -> None:
     _seed(workspace, "a")
     with patch("litellm.completion", side_effect=RuntimeError("boom")):
-        with pytest.raises(ClassificationFailed, match="LLM call failed: RuntimeError"):
+        with pytest.raises(ClassificationFailed) as failed:
             llm_cluster_files(workspace, ["a"], config=_config())
+    assert str(failed.value) == (
+        f"LLM call failed: RuntimeError: boom (model {DEFAULT_TEST_MODEL!r}, api key not passed)"
+    )
 
 
 def test_empty_tool_calls_raises(workspace: Workspace) -> None:

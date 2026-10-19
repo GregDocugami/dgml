@@ -104,11 +104,11 @@ from .llm import (
     LLMSteps,
     _mark_document_cacheable,
     _no_text_detail,
+    describe_call_failure,
     is_anthropic_model,
     is_request_rejection,
     is_request_too_large,
     model_max_output_tokens,
-    provider_error_context,
     steps_with_tools,
 )
 from .matching import (
@@ -580,7 +580,7 @@ def generate_schema(
     except SchemaGenerationFailed:
         raise
     except Exception as exc:
-        raise _schema_call_failed(exc) from exc
+        raise _schema_call_failed(exc, llm_config) from exc
     return schema_rnc_from_result(result, workspace=workspace, docset_name=docset_name)
 
 
@@ -649,7 +649,7 @@ def _schema_request_steps(
 
     A failed request other than a too-large refusal raises its own exception,
     which the usage row records and :func:`generate_schema` wraps as
-    ``"schema generation call failed: <Type>: <message>"``; a failure to trim
+    ``"schema generation call failed: <Type>: <message> (<context>)"``; a failure to trim
     raises :class:`SchemaGenerationFailed` directly."""
     samples = [_SchemaSample(fid, pdf) for fid, pdf in originals]
     pdf_config: PdfConfig | None = None
@@ -694,9 +694,11 @@ def _schema_request_steps(
     return result
 
 
-def _schema_call_failed(exc: BaseException) -> SchemaGenerationFailed:
+def _schema_call_failed(exc: BaseException, config: LLMConfig) -> SchemaGenerationFailed:
     """The error a failed schema request surfaces as."""
-    return SchemaGenerationFailed(f"schema generation call failed: {type(exc).__name__}: {exc}")
+    return SchemaGenerationFailed(
+        f"schema generation call failed: {describe_call_failure(exc, config)}"
+    )
 
 
 def schema_rnc_from_result(result: CallResult, *, workspace: Workspace, docset_name: str) -> str:
@@ -1939,16 +1941,9 @@ def _phase3_call_failed(page_number: int) -> str:
 
 
 def _call_failed(failure: str, exc: Exception, config: LLMConfig) -> ValuesExtractionFailed:
-    """``"<failure>: <Type>: <message> (<context>)"``, the context being the
-    identifiers needed to trace the call with its provider
-    (:func:`~dgml_core.llm.provider_error_context`) — a provider's own message
-    is often no more than "Internal Server Error"."""
-    context = provider_error_context(
-        exc, model=config.model, api_base=config.api_base, api_key=config.api_key
-    )
-    return ValuesExtractionFailed(
-        f"{failure}: {type(exc).__name__}: {exc}" + (f" ({context})" if context else "")
-    )
+    """``"<failure>: <Type>: <message> (<context>)"`` (see
+    :func:`~dgml_core.llm.describe_call_failure`)."""
+    return ValuesExtractionFailed(f"{failure}: {describe_call_failure(exc, config)}")
 
 
 def _tool_call_step(
@@ -2136,7 +2131,8 @@ def phase3_page_steps(
     (the sync :func:`_run_phase3_pages` does so on a thread pool). Drive it with the config from
     :func:`_phase3_llm_config`; a failed request thrown in at the pending
     ``yield`` surfaces as :class:`ValuesExtractionFailed` ``"phase 3 page <n>
-    call failed: <Type>: <message>"``. Each response's usage is folded into
+    call failed: <Type>: <message> (<context>)"`` (see :func:`_call_failed`).
+    Each response's usage is folded into
     *totals* when given, so phase-3 cost survives in the caller's accounting.
     The page image and OCR words are read from *workspace* before the request
     is yielded.

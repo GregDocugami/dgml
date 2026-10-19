@@ -979,10 +979,13 @@ _REQUEST_ID_HEADERS = ("x-request-id", "request-id", "apim-request-id")
 
 
 def _set_attempts(exc: BaseException, attempts: int) -> None:
-    # Cannot fail: every exception has a __dict__ (BaseException provides one,
-    # and __slots__ in a subclass cannot remove it), so a new attribute is
-    # always accepted.
-    setattr(exc, _ATTEMPTS_ATTR, attempts)
+    # Best effort: an exception class can refuse a new attribute (a __setattr__
+    # override), and failing here would replace the provider's error. The count
+    # then just goes unreported.
+    try:
+        setattr(exc, _ATTEMPTS_ATTR, attempts)
+    except Exception:
+        pass
 
 
 def _redacted_api_base(api_base: str) -> str:
@@ -1032,12 +1035,9 @@ def _api_key_state(api_key: str | None) -> str:
     """Whether a key was passed — never any part of the key itself. An empty
     key is not sent (see :func:`_build_completion_kwargs`), so it and ``None``
     both leave LiteLLM to find one in the provider's environment variable
-    (``OPENAI_API_KEY`` and the like), which may not be the key intended."""
-    if api_key is None:
-        return "api key None, not passed"
-    if not api_key:
-        return "api key empty, not passed"
-    return "api key passed"
+    (``OPENAI_API_KEY`` and the like), which may not be the key intended — and
+    both read the same, since the request kwargs cannot tell them apart."""
+    return "api key passed" if api_key else "api key not passed"
 
 
 def provider_error_context(
@@ -1053,7 +1053,7 @@ def provider_error_context(
     3 attempts`` — each part only when known, ``""`` when none is. The request
     id is what a provider's support needs to look a failure up. ``api_base`` is
     cut to scheme and host (see :func:`_redacted_api_base`); ``api_key`` is
-    reported only as passed, empty or absent (see :func:`_api_key_state`).
+    reported only as passed or not passed (see :func:`_api_key_state`).
     Deliberately absent: the exception's message (callers already carry it) and
     LiteLLM's ``litellm_debug_info``, which embeds the request's messages, i.e.
     document content. The HTTP status is LiteLLM's mapped one (its
@@ -1070,16 +1070,33 @@ def provider_error_context(
         parts.append(f"model {model!r}{at}")
     if not isinstance(api_key, _Unreported):
         parts.append(_api_key_state(api_key))
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        parts.append(f"HTTP {status}")
-    request_id = _provider_request_id(exc)
-    if request_id:
-        parts.append(f"request id {request_id}")
-    attempts = getattr(exc, _ATTEMPTS_ATTR, None)
-    if isinstance(attempts, int) and attempts > 1:
-        parts.append(f"{attempts} attempts")
+    # getattr's default absorbs only AttributeError, and a provider exception's
+    # property can raise anything (httpx's RuntimeError for a missing request,
+    # say). Keep what was read before it rather than lose the whole context.
+    try:
+        status = getattr(exc, "status_code", None)
+        if isinstance(status, int):
+            parts.append(f"HTTP {status}")
+        request_id = _provider_request_id(exc)
+        if request_id:
+            parts.append(f"request id {request_id}")
+        attempts = getattr(exc, _ATTEMPTS_ATTR, None)
+        if isinstance(attempts, int) and attempts > 1:
+            parts.append(f"{attempts} attempts")
+    except Exception:
+        pass
     return ", ".join(parts)
+
+
+def describe_call_failure(exc: BaseException, config: LLMConfig) -> str:
+    """``"<Type>: <message> (<context>)"`` for a model call made with *config*
+    that raised *exc*: the text every "… call failed" error carries. The context
+    is :func:`provider_error_context`, since a provider's own message is often
+    no more than "Internal Server Error". Like it, safe inside ``except``."""
+    context = provider_error_context(
+        exc, model=config.model, api_base=config.api_base, api_key=config.api_key
+    )
+    return f"{type(exc).__name__}: {exc}" + (f" ({context})" if context else "")
 
 
 def _completion_with_retry(kwargs: dict[str, Any], *, max_retries: int = 3) -> Any:
@@ -1160,6 +1177,15 @@ def _completion_with_retry(kwargs: dict[str, Any], *, max_retries: int = 3) -> A
                 f"model returned no choices after {max_retries} attempts "
                 f"(model={kwargs.get('model')!r})"
             )
+        # Logged like a raised error's retry: one that then succeeds leaves no
+        # trace in the result, yet costs a paid call and the backoff.
+        logger.info(
+            "model returned no choices (model %r); retry %d of %d in %.0fs",
+            kwargs.get("model"),
+            attempt + 1,
+            max_retries - 1,
+            delay,
+        )
         time.sleep(delay)
         delay *= 2
     raise last_exc  # type: ignore[misc]

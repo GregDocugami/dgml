@@ -223,7 +223,7 @@ def test_completion_with_retry_redirects_only_during_call(
 
 
 def test_completion_with_retry_retries_empty_choices_then_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A successful response with an empty `choices` list (an intermittent
     Gemini glitch) is retried rather than passed through to a downstream
@@ -240,11 +240,18 @@ def test_completion_with_retry_retries_empty_choices_then_succeeds(
 
     monkeypatch.setattr("litellm.completion", flaky_completion)
     monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)  # no backoff wait
+    caplog.set_level(logging.INFO, logger="dgml_core.llm")
 
     result = llm._completion_with_retry({"model": "gemini/gemini-2.5-pro", "messages": []})
 
     assert calls["n"] == 3
     assert result.choices[0].message == "ok"
+    # Each retry costs a paid call and the backoff, so each is logged, like a
+    # raised error's retry.
+    assert [r.getMessage() for r in caplog.records if r.name == "dgml_core.llm"] == [
+        "model returned no choices (model 'gemini/gemini-2.5-pro'); retry 1 of 2 in 2s",
+        "model returned no choices (model 'gemini/gemini-2.5-pro'); retry 2 of 2 in 4s",
+    ]
 
 
 def test_completion_with_retry_raises_on_persistent_empty(
@@ -366,6 +373,30 @@ def test_completion_with_retry_logs_each_retry_and_counts_attempts(
     )
 
 
+def test_completion_with_retry_logs_a_missing_key_as_not_passed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The kwargs leave out an empty key and None alike, so the retry line and
+    # the final error (built from the config) must word both the same.
+    attempts = iter([_server_error(), _resp("ok")])
+
+    def flaky(**kwargs: Any) -> Any:
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr("litellm.completion", flaky)
+    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
+    caplog.set_level(logging.INFO, logger="dgml_core.llm")
+
+    llm._completion_with_retry({"model": "gpt-4o", "messages": []})
+
+    [retry] = [r.getMessage() for r in caplog.records if r.name == "dgml_core.llm"]
+    assert "api key not passed" in retry
+    assert "None" not in retry and "empty" not in retry
+
+
 def test_completion_with_retry_does_not_log_a_non_transient_failure(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -402,8 +433,8 @@ def test_provider_error_context_leaves_out_prompt_and_credentials() -> None:
     ("api_key", "state"),
     [
         ("sk-x", "api key passed"),
-        ("", "api key empty, not passed"),
-        (None, "api key None, not passed"),
+        ("", "api key not passed"),
+        (None, "api key not passed"),
     ],
 )
 def test_provider_error_context_reports_api_key_state(api_key: str | None, state: str) -> None:
@@ -413,6 +444,48 @@ def test_provider_error_context_reports_api_key_state(api_key: str | None, state
 def test_provider_error_context_leaves_out_an_unreported_api_key() -> None:
     # Not passing api_key at all is "unknown", not "no key".
     assert "api key" not in llm.provider_error_context(RuntimeError("x"), model="m")
+
+
+def test_describe_call_failure_appends_the_calls_context() -> None:
+    config = llm.LLMConfig(
+        model="gpt-4o", api_key="sk-SECRET", api_base="https://proxy.example.com/v1"
+    )
+
+    assert llm.describe_call_failure(_server_error(), config) == (
+        "InternalServerError: litellm.InternalServerError: InternalServerError: "
+        "OpenAIException - Internal Server Error "
+        "(model 'gpt-4o' at https://proxy.example.com, api key passed, HTTP 500, "
+        "request id req_abc123)"
+    )
+
+
+def test_provider_error_context_survives_an_exception_whose_attributes_raise() -> None:
+    # Runs inside except blocks: an error of its own would replace the provider's.
+    class Unreadable(Exception):
+        @property
+        def response(self) -> Any:
+            raise RuntimeError("no response attached")
+
+    assert llm.provider_error_context(Unreadable(), model="m") == "model 'm'"
+
+
+def test_completion_with_retry_keeps_an_exception_that_refuses_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Recording the attempt count must never replace the provider's error.
+    class Locked(Exception):
+        def __setattr__(self, name: str, value: Any) -> None:
+            if not name.startswith("__"):
+                raise AttributeError(f"{name} is read-only")
+            super().__setattr__(name, value)
+
+    def failing(**kwargs: Any) -> Any:
+        raise Locked("bad request")
+
+    monkeypatch.setattr("litellm.completion", failing)
+
+    with pytest.raises(Locked):
+        llm._completion_with_retry({"model": "gpt-4o", "messages": []})
 
 
 def test_provider_error_context_with_nothing_known() -> None:
