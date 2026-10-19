@@ -459,6 +459,26 @@ def test_describe_call_failure_appends_the_calls_context() -> None:
     )
 
 
+def test_provider_error_context_reads_the_request_id_litellm_keeps_aside() -> None:
+    # As LiteLLM raises an Anthropic error (seen live): exc.response is a
+    # stand-in with no headers; the real ones are set on the exception after.
+    import httpx
+
+    exc = litellm.exceptions.AuthenticationError(
+        message="AnthropicException - invalid x-api-key",
+        llm_provider="anthropic",
+        model="claude-sonnet-5",
+        response=httpx.Response(401, request=httpx.Request("POST", "https://api.anthropic.com")),
+    )
+    exc.litellm_response_headers = httpx.Headers(  # type: ignore[attr-defined]
+        {"request-id": "req_011live", "content-type": "application/json"}
+    )
+
+    assert llm.provider_error_context(exc, model="anthropic/claude-sonnet-5") == (
+        "model 'anthropic/claude-sonnet-5', HTTP 401, request id req_011live"
+    )
+
+
 def test_provider_error_context_survives_an_exception_whose_attributes_raise() -> None:
     # Runs inside except blocks: an error of its own would replace the provider's.
     class Unreadable(Exception):

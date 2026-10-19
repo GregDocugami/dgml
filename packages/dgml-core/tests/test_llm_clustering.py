@@ -660,10 +660,13 @@ def test_clustering_llm_missing_classification_config_raises(workspace: Workspac
             clustering(workspace, method="llm")
 
 
-def test_clustering_llm_runtime_failure_soft_fails(workspace: Workspace) -> None:
+def test_clustering_llm_runtime_failure_soft_fails(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
     for fid in ("a", "b"):
         _seed(workspace, fid)
     write_classification_config(workspace, {"model": DEFAULT_TEST_MODEL})
+    caplog.set_level(logging.DEBUG, logger="dgml_core.clustering")
 
     with patch("litellm.completion", side_effect=RuntimeError("boom")):
         out = clustering(workspace, method="llm")
@@ -672,6 +675,14 @@ def test_clustering_llm_runtime_failure_soft_fails(workspace: Workspace) -> None
     assert out["n_new_clusters"] == 0
     assert sorted(out["failed_file_ids"]) == ["a", "b"]
     assert DocSetStore(workspace).list_all() == []
+    # failed_file_ids carries no reason, so the log does (at INFO: soft-failed).
+    [record] = [r for r in caplog.records if r.name == "dgml_core.clustering"]
+    assert record.levelno == logging.INFO
+    assert record.getMessage() == (
+        "clustering: the LLM partitioner failed; 2 files left unassigned: "
+        f"LLM call failed: RuntimeError: boom (model {DEFAULT_TEST_MODEL!r}, "
+        "api key not passed)"
+    )
 
 
 def test_unknown_method_rejected(workspace: Workspace) -> None:
@@ -765,7 +776,7 @@ def test_auto_falls_back_to_embedding_without_classification_config(
 
 
 def test_auto_retries_a_failed_partitioner_call_on_the_embedding_engine(
-    workspace: Workspace,
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A partitioner call that fails once started must not lose the run.
 
@@ -795,10 +806,18 @@ def test_auto_retries_a_failed_partitioner_call_on_the_embedding_engine(
             return_value={"a": _prediction("unknown_0"), "b": _prediction("unknown_0")},
         ) as run_embedding,
     ):
+        caplog.set_level(logging.DEBUG, logger="dgml_core.clustering")
         internal = clustering_internal(workspace, method="auto")
 
     assert internal.method == "embedding"
     assert run_embedding.call_count == 1
+    # The run went on, so INFO; the log is the only place the reason is kept.
+    [record] = [r for r in caplog.records if r.name == "dgml_core.clustering"]
+    assert record.levelno == logging.INFO
+    assert record.getMessage().startswith(
+        "clustering: the LLM partitioner failed on 2 files; grouping them with the "
+        "embedding pipeline instead: "
+    )
 
 
 def test_pinned_llm_never_falls_back(workspace: Workspace) -> None:

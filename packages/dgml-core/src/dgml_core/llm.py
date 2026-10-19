@@ -1010,15 +1010,20 @@ def _provider_request_id(exc: BaseException) -> str | None:
     request_id = getattr(exc, "request_id", None)
     if isinstance(request_id, str) and request_id:
         return request_id
-    # LiteLLM's errors carry the provider response's httpx.Headers (a Mapping);
-    # anything else (no response, a stand-in without headers) has no id to read.
-    headers = getattr(getattr(exc, "response", None), "headers", None)
-    if not isinstance(headers, Mapping):
-        return None
-    for name in _REQUEST_ID_HEADERS:
-        value = headers.get(name)
-        if isinstance(value, str) and value:
-            return value
+    # LiteLLM keeps the provider's real headers on ``litellm_response_headers``
+    # (set after it maps the error); its ``exc.response`` is often a stand-in it
+    # builds with no headers, as on Anthropic and Gemini errors. A provider SDK's
+    # own error carries them on its response. Anything else has no id to read.
+    for headers in (
+        getattr(exc, "litellm_response_headers", None),
+        getattr(getattr(exc, "response", None), "headers", None),
+    ):
+        if not isinstance(headers, Mapping):
+            continue
+        for name in _REQUEST_ID_HEADERS:
+            value = headers.get(name)
+            if isinstance(value, str) and value:
+                return value
     return None
 
 
