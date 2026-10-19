@@ -1393,12 +1393,20 @@ class _FileExtraction:
         self._phase2_values = phase2_result.values
         # Items on pages the file does not have are dropped before any call and
         # stay unmatched (#155); the count goes to the stats sidecar.
+        page_count = FileStore(self.workspace).get(self.file_id).page_count
         unmatched, self.phase3_pages_out_of_range = _drop_out_of_range_pages(
-            self.workspace,
-            self.file_id,
-            phase2_result.unmatched,
-            page_count=FileStore(self.workspace).get(self.file_id).page_count,
+            self.workspace, self.file_id, phase2_result.unmatched, page_count=page_count
         )
+        dropped = len(phase2_result.unmatched) - len(unmatched)
+        if dropped:
+            logger.info(
+                "file %s: phase 3 (locations) skipping %d items on %d pages the file "
+                "does not have (it has %s); they stay unmatched",
+                self.file_id,
+                dropped,
+                self.phase3_pages_out_of_range,
+                page_count,
+            )
         pages = sorted(_group_by_page(unmatched).items())
         if pages:
             logger.info(
@@ -1407,7 +1415,7 @@ class _FileExtraction:
                 len(unmatched),
                 len(pages),
             )
-        else:
+        elif not dropped:
             logger.info("file %s: phase 3 (locations) not needed", self.file_id)
         return pages
 
@@ -1717,10 +1725,15 @@ def _run_phase3_pages(
     here instead — every page's, the failing one's partial spend included —
     so the usage row, the stats and ``exc.usage`` count what phase 3 spent.
     """
+    import contextvars
     from concurrent.futures import ThreadPoolExecutor
 
     # Allocated up front so a page that raises still leaves its totals behind.
     page_totals = [_empty_totals() for _ in pages]
+    # One copy of the caller's context per page, taken here on the calling
+    # thread, so what a caller binds (a job id its log handler stamps) is on the
+    # lines the page workers log (see dgml_core.concurrency).
+    contexts = [contextvars.copy_context() for _ in pages]
 
     def _do_page(i: int) -> _PageOutcome:
         page, items = pages[i]
@@ -1733,7 +1746,7 @@ def _run_phase3_pages(
         # Leaving the ``with`` waits for the pages still in flight, so by the
         # time the ``except`` runs every page's totals are final.
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            return list(ex.map(_do_page, range(len(pages))))
+            return list(ex.map(lambda i: contexts[i].run(_do_page, i), range(len(pages))))
     except BaseException:
         run.fold_failed_phase3(page_totals)
         raise

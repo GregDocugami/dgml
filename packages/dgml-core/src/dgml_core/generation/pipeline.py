@@ -21,6 +21,7 @@ the rendered XML with the ``dgml_core.generation.coverage`` tools.
 
 from __future__ import annotations
 
+import contextvars
 import glob
 import json
 import logging
@@ -483,10 +484,16 @@ def convert_batch(
     if opts.batch is not None:
         block_lists = _transcribe_batched(paths, opts, opts.batch, transcribe_errors, log)
     elif workers == 1 or len(paths) == 1:
-        block_lists = [_transcribe(p) for p in paths]
+        # Its own context copy per document here too, so serial and pooled
+        # runs agree: nothing one document binds leaks into the next.
+        block_lists = [contextvars.copy_context().run(_transcribe, p) for p in paths]
     else:
+        # One copy of the caller's context per document, taken on this thread,
+        # so what a caller binds reaches the workers' log lines (see
+        # dgml_core.concurrency).
+        contexts = [contextvars.copy_context() for _ in paths]
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            block_lists = list(pool.map(_transcribe, paths))
+            block_lists = list(pool.map(lambda ctx, p: ctx.run(_transcribe, p), contexts, paths))
     # Hand each transcription failure's short reason to the caller (serially,
     # in input order) so it can name the cause in machine-readable output.
     if on_error is not None:

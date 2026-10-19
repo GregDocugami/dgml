@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import re
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1731,6 +1733,49 @@ def test_extract_values_phase3_merges_costs_across_parallel_pages(
     assert stats["phases"]["phase3"]["total_tokens"] == 525
     # Phase 1's cost stays separate from phase 3's.
     assert stats["phases"]["phase1"]["cost_usd"] == pytest.approx(0.01)
+
+
+_JOB_ID: contextvars.ContextVar[str] = contextvars.ContextVar("test_job_id", default="-")
+
+
+def test_extract_values_phase3_page_calls_run_in_the_callers_context(
+    workspace: Workspace,
+) -> None:
+    """Phase 3's page calls run on a thread pool; each must see what the caller
+    bound (a job id its log handler stamps on every record), so the page
+    workers' retry and failure lines carry it like the main thread's."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid, page_count=2)
+    _seed_page_text(workspace, fid, page=1)
+    _seed_page_text(workspace, fid, page=2)
+    _seed_page_image(workspace, fid, 1)
+    _seed_page_image(workspace, fid, 2)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {
+        "title": {"text": "Goodnight", "locations": [{"page_number": 1}]},
+        "subtitle": {"text": "Farewell", "locations": [{"page_number": 2}]},
+    }
+    phase3_args = {"locations": [{"id": "a", "bounding_boxes": [[10.0, 20.0, 30.0, 40.0]]}]}
+    seen: list[tuple[str, bool]] = []  # (job id, on the main thread?)
+
+    def completion(**kwargs: Any) -> Any:
+        seen.append((_JOB_ID.get(), threading.current_thread() is threading.main_thread()))
+        offered = {t["function"]["name"] for t in kwargs.get("tools") or []}
+        if "submit_values" in offered:
+            return _tool_call_response("submit_values", {"values": phase1_values})
+        return _tool_call_response("submit_locations", phase3_args)
+
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    token = _JOB_ID.set("job-42")
+    try:
+        with patch("litellm.completion", side_effect=completion):
+            extract_values(workspace, ds_id, fid, config=config)
+    finally:
+        _JOB_ID.reset(token)
+
+    # Phase 1 on the caller's thread, then the two page calls on workers.
+    assert seen[0] == ("job-42", True)
+    assert sorted(seen[1:]) == [("job-42", False), ("job-42", False)]
 
 
 def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
@@ -4010,7 +4055,9 @@ def _seed_two_leaves_one_missing_page(
     return ds_id, phase1_values
 
 
-def test_extract_values_phase3_skips_a_page_the_file_does_not_have(workspace: Workspace) -> None:
+def test_extract_values_phase3_skips_a_page_the_file_does_not_have(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
     """Phase 1 cited page 2 of a one-page file. Phase 3 still runs for page
     1 (and patches its leaf), makes no call for page 2, keeps the whole
     tree with that leaf unmatched, and counts the page in the stats."""
@@ -4018,6 +4065,7 @@ def test_extract_values_phase3_skips_a_page_the_file_does_not_have(workspace: Wo
     ds_id, phase1_values = _seed_two_leaves_one_missing_page(workspace, fid, page_count=1)
     phase3_args = {"locations": [{"id": "a", "bounding_boxes": [[10.0, 20.0, 30.0, 40.0]]}]}
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    caplog.set_level(logging.INFO, logger="dgml_core")
     with patch(
         "litellm.completion",
         side_effect=[
@@ -4040,11 +4088,18 @@ def test_extract_values_phase3_skips_a_page_the_file_does_not_have(workspace: Wo
     assert stats["matching"]["matched_phase3"] == 1
     assert stats["matching"]["unmatched"] == 1
     assert stats["matching"]["dropped_unboxed_values"] == 1
+    assert [line for line in _phase_log(caplog) if "phase 3 (locations)" in line][:2] == [
+        f"file {fid}: phase 3 (locations) skipping 1 items on 1 pages the file does not "
+        "have (it has 1); they stay unmatched",
+        f"file {fid}: phase 3 (locations) starting: 1 items on 1 pages",
+    ]
 
 
 def test_extract_values_phase3_makes_no_call_when_every_page_is_missing(
-    workspace: Workspace,
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """Every unmatched item is on a page the file lacks, so phase 3 is skipped,
+    and the log says so rather than calling it "not needed"."""
     fid = "f1aaaaaaaaaa"
     _seed_file(workspace, fid, page_count=1)
     _seed_page_text(workspace, fid, page=1)
@@ -4052,6 +4107,7 @@ def test_extract_values_phase3_makes_no_call_when_every_page_is_missing(
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
     phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 3}]}}
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    caplog.set_level(logging.INFO, logger="dgml_core")
     with patch(
         "litellm.completion",
         return_value=_tool_call_response("submit_values", {"values": phase1_values}),
@@ -4069,6 +4125,11 @@ def test_extract_values_phase3_makes_no_call_when_every_page_is_missing(
     assert stats["phases"]["phase3"]["page_calls"] == 0
     assert stats["phases"]["phase3"]["pages_out_of_range"] == 1
     assert stats["matching"]["unmatched"] == 1
+    phase3_log = [line for line in _phase_log(caplog) if "phase 3 (locations)" in line]
+    assert phase3_log == [
+        f"file {fid}: phase 3 (locations) skipping 1 items on 1 pages the file does not "
+        "have (it has 1); they stay unmatched",
+    ]
 
 
 def test_extract_values_phase3_counts_the_dropped_page_even_when_a_page_call_fails(
