@@ -22,6 +22,9 @@ file already assigned to the DocSet. The *auto-extract-on-assignment* path
 extraction schema set, fires value extraction. Soft-fail semantics: an
 extraction failure surfaces in the returned block's ``error`` field; the
 assignment itself still succeeds. No schema → plain assignment, no block.
+
+:func:`get_extracted_values` is the read side: the extracted values of one pair as
+values-shape JSON, as ``dgml extraction get-values`` prints them.
 """
 
 from __future__ import annotations
@@ -29,21 +32,22 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from .dgml_output import read_dgml
 from .docsets import DocSetStore
-from .errors import DgmlError
+from .errors import DgmlError, ValuesNotFound
 from .storage import Workspace
 
 if TYPE_CHECKING:
-    from .grounded import ExtractionResult
+    from .grounded import ExtractionResult, GroundedConfig
 
 
-def _auto_extract(
+def auto_extract(
     ws: Workspace,
     docset_id: str,
     file_id: str,
     *,
     write_stats: bool = False,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> dict[str, Any]:
     """Run LLM-backed value extraction on a freshly-assigned file.
 
@@ -53,6 +57,13 @@ def _auto_extract(
     the assignment is already on disk; any failure here surfaces in
     ``extraction.error`` without aborting the parent command. A config
     load error is captured into ``error`` the same way.
+
+    ``usage`` is the run's cost/token totals (``ExtractionResult.usage``),
+    present whether or not ``record_usage`` persisted a row, so a host can
+    account for auto-extraction without reading ``usage.jsonl``. A failed run
+    reports what it spent before failing (the error's ``usage``); it is
+    ``None`` when nothing was spent (a config error) or the totals could not
+    be built.
     """
     from .grounded import extract_values, load_grounded_config
 
@@ -60,6 +71,7 @@ def _auto_extract(
         "performed": True,
         "model": None,
         "tool_calls": None,
+        "usage": None,
         "error": None,
     }
     try:
@@ -70,10 +82,16 @@ def _auto_extract(
     block["model"] = config.values_model
     try:
         result = extract_values(
-            ws, docset_id, file_id, config=config, write_stats=write_stats, debug=debug
+            ws,
+            docset_id,
+            file_id,
+            config=config,
+            write_stats=write_stats,
+            record_usage=record_usage,
         )
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
+        block["usage"] = exc.usage
         return block
     except Exception as exc:
         # Bug-grade exception from extraction (e.g. IndexError in a phase).
@@ -84,6 +102,7 @@ def _auto_extract(
         block["error"] = f"{type(exc).__name__}: {exc}"
         return block
     block["tool_calls"] = result.tool_calls
+    block["usage"] = result.usage or None
     return block
 
 
@@ -93,25 +112,25 @@ def add_file_and_extract(
     file_id: str,
     *,
     write_stats: bool = False,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> dict[str, Any] | None:
     """Assign ``file_id`` to ``docset_id``; auto-extract if the DocSet has a schema.
 
-    Returns the extraction block (same shape :func:`_auto_extract` produces)
+    Returns the extraction block (same shape :func:`auto_extract` produces)
     when the DocSet has a schema set, else ``None`` — the omit-when-no-schema
     policy matches the existing ``dgml docset add-file`` contract.
 
-    ``write_stats`` and ``debug`` are forwarded to
-    :func:`dgml_core.grounded.extract_values`. Both default to off, like
-    :func:`extract_file`; CLI callers pass ``args.debug`` for both, so
-    ``extraction_stats.json`` and LLM usage rows are persisted only under
-    ``--debug``.
+    ``write_stats`` and ``record_usage`` are forwarded to
+    :func:`dgml_core.grounded.extract_values`: ``extraction_stats.json`` is
+    stored only when ``write_stats`` is set, and the LLM usage row only when
+    ``record_usage`` is (both off by default; the CLI sets both under
+    ``--debug``).
     """
     store = DocSetStore(ws)
     store.add_file(docset_id, file_id)
     if not store.has_schema(docset_id):
         return None
-    return _auto_extract(ws, docset_id, file_id, write_stats=write_stats, debug=debug)
+    return auto_extract(ws, docset_id, file_id, write_stats=write_stats, record_usage=record_usage)
 
 
 def extract_file(
@@ -123,7 +142,7 @@ def extract_file(
     values_effort: str | None = None,
     locations_effort: str | None = None,
     write_stats: bool = False,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> ExtractionResult:
     """Extract ``file_id`` against ``docset_id``'s schema now — ``dgml extraction extract``.
 
@@ -144,9 +163,41 @@ def extract_file(
     model's whole credential group, so neither the section's ``values_*`` keys nor
     a tier's carry over to the new model
     (see :func:`~dgml_core.grounded.load_grounded_config`).
-    ``write_stats`` defaults to off, matching the CLI.
+    ``write_stats`` and ``record_usage`` (both off by default) are forwarded
+    to :func:`~dgml_core.grounded.extract_values`; the result's ``usage`` and
+    ``stats`` carry the same numbers either way.
     """
-    from .grounded import extract_values, load_grounded_config, parse_reasoning_effort
+    from .grounded import extract_values
+
+    config = extraction_config(
+        ws,
+        values_model=values_model,
+        values_effort=values_effort,
+        locations_effort=locations_effort,
+    )
+    return extract_values(
+        ws,
+        docset_id,
+        file_id,
+        config=config,
+        write_stats=write_stats,
+        record_usage=record_usage,
+    )
+
+
+def extraction_config(
+    ws: Workspace,
+    *,
+    values_model: str | None = None,
+    values_effort: str | None = None,
+    locations_effort: str | None = None,
+) -> GroundedConfig:
+    """The workspace's grounded config with :func:`extract_file`'s per-call
+    overrides applied — the config every ``dgml extraction extract`` form
+    (one file, several, ``--batch``) extracts with. See :func:`extract_file`
+    for what each override means and how ``values_model`` resolves its
+    credentials."""
+    from .grounded import load_grounded_config, parse_reasoning_effort
 
     config = load_grounded_config(ws, values_model=values_model)
     if values_effort is not None:
@@ -161,6 +212,28 @@ def extract_file(
                 locations_effort, source="locations_effort"
             ),
         )
-    return extract_values(
-        ws, docset_id, file_id, config=config, write_stats=write_stats, debug=debug
-    )
+    return config
+
+
+def get_extracted_values(workspace: Workspace, docset_id: str, file_id: str) -> dict[str, Any]:
+    """Return the pair's extracted values as ``{tag: {text, value?, locations}}``.
+
+    Projects the ``dg:extraction`` element of the core DGML file, classifying
+    each element by the docset's extraction schema when one is set (so a
+    single-item collection stays a list), else inferring structure from the XML.
+
+    Raises what :func:`read_dgml` raises, plus :class:`ValuesNotFound` when the
+    DGML has no ``dg:extraction`` element (a generated tree only).
+    """
+    from .extraction_schema import parse_rnc
+    from .extraction_xml import dgml_xml_to_values, has_extraction
+
+    doc = read_dgml(workspace, docset_id, file_id)
+    if not has_extraction(doc.xml):
+        raise ValuesNotFound(
+            f"no extracted values for file '{file_id}' in docset '{docset_id}'; "
+            "run 'dgml extraction extract' first"
+        )
+    store = DocSetStore(workspace)
+    vocab = parse_rnc(store.get_schema(docset_id)) if store.has_schema(docset_id) else None
+    return dgml_xml_to_values(doc.xml, vocab=vocab)

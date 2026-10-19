@@ -35,9 +35,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from .config import load_merged_config
 from .docsets import DocSetStore
@@ -48,12 +49,17 @@ from .errors import (
     ClassificationFailed,
     NoExistingDocSets,
 )
-from .llm import LLMConfig, call_with_tools
+from .llm import CallResult, LLMConfig, LLMSteps, drive, steps_with_tools
 from .models import DocSet
 from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .storage import Workspace
 from .usage import OPERATION_CLASSIFY
 from .utils import gather_file_pages, image_to_data_url
+
+if TYPE_CHECKING:
+    # Type-only: the batch package imports litellm, which upstream keeps off
+    # the deterministic import path; it is imported lazily where it is used.
+    from .batch import BatchExecutor
 
 DEFAULT_MAX_PAGES = 3
 DEFAULT_NAMING_ATTEMPTS = 1
@@ -213,7 +219,7 @@ def classify_file(
     config: ClassificationConfig,
     docsets: list[DocSet] | None = None,
     mode: ClassifyMode = ClassifyMode.EXISTING_OR_NEW,
-    debug: bool = False,
+    record_usage: bool = False,
 ) -> ClassificationDecision:
     """Ask the configured vision LLM to classify ``file_id`` into a DocSet.
 
@@ -263,7 +269,7 @@ def classify_file(
         config=config,
         prompt=_build_prompt(docsets, mode=mode),
         tools=_build_tools(docsets, mode=mode),
-        debug=debug,
+        record_usage=record_usage,
     )
     return _parse_response(response, docsets, mode=mode)
 
@@ -273,7 +279,7 @@ def propose_new_docset_for_files(
     file_ids: list[str],
     *,
     config: ClassificationConfig,
-    debug: bool = False,
+    record_usage: bool = False,
     attempts: int | None = None,
 ) -> ClassificationDecision:
     """Ask the configured vision LLM to propose a new DocSet (name,
@@ -323,7 +329,7 @@ def propose_new_docset_for_files(
                 config=config,
                 prompt=_build_prompt_new_only(),
                 tools=[_create_new_docset_tool()],
-                debug=debug,
+                record_usage=record_usage,
             )
             name, args = _extract_single_tool_call(response)
             decisions.append(_parse_new_docset_args(name, args))
@@ -366,24 +372,31 @@ def _normalize_name(name: str | None) -> str:
     return " ".join((name or "").lower().split())
 
 
-def _vision_tool_call(
+def classify_steps(
     workspace: Workspace,
     file_ids: list[str],
     *,
     config: ClassificationConfig,
     prompt: str,
     tools: list[dict[str, Any]],
-    debug: bool = False,
-) -> Any:
-    """Call the configured vision LLM with ``prompt`` + the rendered page
-    images of every file in ``file_ids`` (up to ``config.max_pages`` per
-    file), forcing it to invoke exactly one of ``tools``. Returns the raw
-    litellm response so callers can run their own tool-call parsing.
+    record_usage: bool = False,
+) -> tuple[LLMConfig, LLMSteps[CallResult]]:
+    """Prepare the classification request without sending it.
 
-    Shared between :func:`classify_file` (always a single file) and
-    :func:`propose_new_docset_for_files` (a cluster of files).
+    Gathers the rendered page images of every file in ``file_ids`` (up to
+    ``config.max_pages`` per file), builds the vision prompt, and returns the
+    :class:`LLMConfig` the request bills against together with a pure step
+    generator (see :data:`dgml_core.llm.LLMSteps`) that yields the single
+    ``tool_choice="required"`` request and returns its :class:`CallResult`.
+    Nothing here touches the network: :func:`_vision_tool_call` drives the
+    generator synchronously, and a batch driver can collect many of these and
+    submit them as one wave.
+
+    The page-image precondition is checked *here*, before any request exists,
+    so every driver sees the same :class:`ClassificationFailed` for a file
+    with no renderable pages. Credential resolution (``AuthError`` on an unset
+    ``api_key_env``) happens here too.
     """
-
     page_bytes: list[bytes] = []
     for fid in file_ids:
         page_bytes.extend(gather_file_pages(workspace, fid, config.max_pages))
@@ -398,25 +411,229 @@ def _vision_tool_call(
     for img in page_bytes:
         content.append({"type": "image_url", "image_url": {"url": image_to_data_url(img)}})
 
-    # The call records its own usage row (gated on --debug) from the context
-    # carried on the config; no wrapper needed for this single call.
+    # The driver records one usage row (gated on ``record_usage``) from the
+    # context carried on the config; no wrapper needed for this single call.
     llm_config = LLMConfig(
         model=config.model,
         api_key=api_key,
         api_base=config.api_base,
         max_tokens=None,
         workspace=workspace,
-        debug=debug,
+        record_usage=record_usage,
         operation=OPERATION_CLASSIFY,
         context={"file_ids": file_ids},
     )
-    try:
-        result = call_with_tools(
-            llm_config,
-            messages=[{"role": "user", "content": content}],
-            tools=tools,
-            tool_choice="required",
+    steps = steps_with_tools(
+        llm_config,
+        messages=[{"role": "user", "content": content}],
+        tools=tools,
+        tool_choice="required",
+    )
+    return llm_config, steps
+
+
+def classify_files_batch(
+    workspace: Workspace,
+    file_ids: list[str],
+    *,
+    config: ClassificationConfig,
+    docsets: list[DocSet],
+    executor: BatchExecutor,
+    mode: ClassifyMode = ClassifyMode.EXISTING,
+    record_usage: bool = False,
+) -> dict[str, ClassificationDecision | Exception]:
+    """:func:`classify_file` in one of the existing-only modes
+    (:attr:`ClassifyMode.EXISTING` or :attr:`ClassifyMode.EXISTING_FORCED`)
+    for many files at once, the classification requests submitted as one batch
+    wave.
+
+    Only the existing-only modes share one wave, because only there is each
+    file's request independent of the others: the prompt and tool list are
+    built from *docsets*, and in those modes no file can add to the list. In
+    :attr:`ClassifyMode.EXISTING_OR_NEW` a file classified earlier in the run
+    can create a DocSet that later files must see, so its requests are
+    inherently sequential: :func:`classify_file_batch` sends them one file per
+    wave, in order; passing that mode here is a :class:`ValueError`.
+
+    Returns ``{file_id: ClassificationDecision | Exception}`` in *file_ids*
+    order. Each entry is what :func:`classify_file` would have returned or
+    raised for that file — the same exception type and message — and one file's
+    failure never affects another. A batch-machinery failure
+    (:class:`~dgml_core.errors.BatchExecutionFailed`) is the entry of every file
+    not yet classified when it happened; files already classified keep theirs.
+    Under :attr:`ClassifyMode.EXISTING_FORCED` with exactly one DocSet there is
+    nothing to decide and no request is made, as in :func:`classify_file`.
+    """
+    from .batch import Unit, run_stage
+
+    if mode == ClassifyMode.EXISTING_OR_NEW:
+        raise ValueError(
+            "classify_files_batch classifies independent files; existing-or-new is "
+            "sequential (use classify_file_batch per file, in order)"
         )
+    if not docsets:
+        raise NoExistingDocSets(
+            "no DocSets to assign to; create one first, or allow "
+            "classification to propose a new DocSet"
+        )
+    if len(file_ids) != len(set(file_ids)):
+        dupes = sorted({f for f in file_ids if file_ids.count(f) > 1})
+        raise ValueError(f"file_ids must be unique; duplicated: {dupes}")
+    if mode == ClassifyMode.EXISTING_FORCED and len(docsets) == 1:
+        only = ClassificationDecision(decision="existing", existing_docset_id=docsets[0].id)
+        return {fid: only for fid in file_ids}
+
+    prompt = _build_prompt(docsets, mode=mode)
+    tools = _build_tools(docsets, mode=mode)
+    results: dict[str, ClassificationDecision | Exception] = {}
+    units: list[Unit] = []
+    for fid in file_ids:
+        try:
+            llm_config, steps = classify_steps(
+                workspace,
+                [fid],
+                config=config,
+                prompt=prompt,
+                tools=tools,
+                record_usage=record_usage,
+            )
+        except Exception as exc:  # no pages, unset key env: before any request
+            results[fid] = exc
+            continue
+        units.append(Unit(fid, llm_config, steps))
+
+    outcomes = run_stage(units, executor, stage="classification") if units else {}
+
+    for fid, outcome in outcomes.items():
+        if outcome.error is not None and outcome.stage_error:
+            # The batch machinery failed before this file's request was served.
+            results[fid] = _as_exception(outcome.error)
+            continue
+        if outcome.error is not None:
+            # Same wrapping _vision_tool_call applies to a failed request.
+            err = outcome.error
+            wrapped = ClassificationFailed(f"LLM call failed: {type(err).__name__}: {err}")
+            wrapped.__cause__ = err
+            results[fid] = wrapped
+            continue
+        try:
+            results[fid] = _parse_response(outcome.result.response, docsets, mode=mode)
+        except Exception as exc:
+            results[fid] = exc
+    return {fid: results[fid] for fid in file_ids}
+
+
+def classify_file_batch(
+    workspace: Workspace,
+    file_id: str,
+    *,
+    config: ClassificationConfig,
+    docsets: list[DocSet],
+    executor: BatchExecutor,
+    mode: ClassifyMode = ClassifyMode.EXISTING_OR_NEW,
+    record_usage: bool = False,
+) -> ClassificationDecision:
+    """:func:`classify_file` with its one request sent through *executor*'s
+    batch API (one wave, one round trip).
+
+    The batch twin for the default mode (:attr:`ClassifyMode.EXISTING_OR_NEW`),
+    where a file's request depends on every DocSet created for the files before
+    it — so a directory classifies one file per wave, in order, each against
+    the DocSet list the previous files left (see
+    :func:`dgml_core.auto_classification.classify_bulk_batch`). Same request,
+    same decision, same errors and messages as :func:`classify_file`; the usage
+    row is the synchronous one tagged with the tier that served it. A failure
+    of the batch stage itself raises its error. In the existing-only modes the
+    no-DocSets and single-DocSet rules of :func:`classify_file` apply.
+    """
+    from .batch import Unit, run_stage
+
+    if mode != ClassifyMode.EXISTING_OR_NEW:
+        if not docsets:
+            raise NoExistingDocSets(
+                "no DocSets to assign to; create one first, or allow "
+                "classification to propose a new DocSet"
+            )
+        if mode == ClassifyMode.EXISTING_FORCED and len(docsets) == 1:
+            return ClassificationDecision(decision="existing", existing_docset_id=docsets[0].id)
+    llm_config, steps = classify_steps(
+        workspace,
+        [file_id],
+        config=config,
+        prompt=_build_prompt(docsets, mode=mode),
+        tools=_build_tools(docsets, mode=mode),
+        record_usage=record_usage,
+    )
+    outcome = run_stage([Unit(file_id, llm_config, steps)], executor, stage="classification")[
+        file_id
+    ]
+    if outcome.error is not None:
+        if outcome.stage_error:
+            raise _as_exception(outcome.error)
+        # Same wrapping _vision_tool_call applies to a failed request.
+        err = outcome.error
+        raise ClassificationFailed(f"LLM call failed: {type(err).__name__}: {err}") from err
+    return _parse_response(outcome.result.response, docsets, mode=mode)
+
+
+def _as_exception(error: BaseException) -> Exception:
+    """A unit outcome's error as an entry (``run_stage`` captures only
+    ``Exception`` per unit; interrupts propagate)."""
+    assert isinstance(error, Exception)
+    return error
+
+
+def classification_batch_executor(
+    config: ClassificationConfig,
+    *,
+    poll_interval_s: float = 30.0,
+    max_poll_s: float | None = None,
+    min_wave_size: int = 1,
+    log: Callable[[str], None] = lambda _m: None,
+) -> BatchExecutor:
+    """:func:`dgml_core.batch.make_executor` for the classification model, with
+    its credentials resolved the way :func:`classify_file` resolves them.
+
+    Raises :class:`AuthError` for an unset ``api_key_env`` (the same error and
+    message the synchronous classification raises) and
+    :class:`~dgml_core.errors.BatchUnavailable` when the provider has no batch
+    backend. Imports the batch package lazily."""
+    from .batch import make_executor
+
+    return make_executor(
+        config.model,
+        api_key=_resolve_api_key(config),
+        api_base=config.api_base,
+        poll_interval_s=poll_interval_s,
+        max_poll_s=max_poll_s,
+        min_wave_size=min_wave_size,
+        log=log,
+    )
+
+
+def _vision_tool_call(
+    workspace: Workspace,
+    file_ids: list[str],
+    *,
+    config: ClassificationConfig,
+    prompt: str,
+    tools: list[dict[str, Any]],
+    record_usage: bool = False,
+) -> Any:
+    """Call the configured vision LLM with ``prompt`` + the rendered page
+    images of every file in ``file_ids`` (up to ``config.max_pages`` per
+    file), forcing it to invoke exactly one of ``tools``. Returns the raw
+    litellm response so callers can run their own tool-call parsing.
+
+    Shared between :func:`classify_file` (always a single file) and
+    :func:`propose_new_docset_for_files` (a cluster of files). The request
+    itself is prepared by :func:`classify_steps`; this is its sync driver.
+    """
+    llm_config, steps = classify_steps(
+        workspace, file_ids, config=config, prompt=prompt, tools=tools, record_usage=record_usage
+    )
+    try:
+        result = drive(steps, llm_config)
     except Exception as exc:
         # litellm normalizes provider errors but we never want a raw
         # provider exception bubbling past — wrap unconditionally with

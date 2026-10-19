@@ -59,7 +59,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from dgml_core.config import load_merged_config
+from dgml_core.config import config_bool, load_merged_config
 from dgml_core.errors import (
     AuthError,
     GenerationConfigInvalid,
@@ -82,6 +82,10 @@ from dgml_core.storage import Workspace
 # Set ``thinking = "adaptive"`` under ``[generation]`` to restore the model
 # default.
 DEFAULT_THINKING = "disabled"
+
+# Pass A wire formats; see ``GenerationConfig.transcription``.
+TRANSCRIPTION_MODES = ("text", "lines")
+DEFAULT_TRANSCRIPTION = "text"
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,25 @@ class GenerationConfig:
     # model is a Claude 5 model and those think adaptively unless told not to —
     # see the note on :data:`DEFAULT_THINKING`. Ignored for non-Anthropic models.
     thinking: str = DEFAULT_THINKING
+    # How Pass A is asked for a window: ``"text"`` -- the model copies the
+    # text into typed block lines; ``"lines"`` -- the model assigns structure
+    # to the numbered lines of the text layer and the text is copied from the
+    # page (``dgml_core.generation.lines``). ``lines`` needs a text layer and
+    # falls back to ``text`` window by window where a page has none.
+    transcription: str = DEFAULT_TRANSCRIPTION
+
+
+def _resolve_transcription(merged: dict[ConfigSection, Any]) -> str:
+    """Read ``[generation] transcription``, defaulting to :data:`DEFAULT_TRANSCRIPTION`."""
+    section = merged.get(ConfigSection.GENERATION) or {}
+    if not isinstance(section, dict):
+        return DEFAULT_TRANSCRIPTION
+    value = section.get("transcription", DEFAULT_TRANSCRIPTION)
+    if value not in TRANSCRIPTION_MODES:
+        raise GenerationConfigInvalid(
+            f"'generation.transcription' must be one of {list(TRANSCRIPTION_MODES)} (got {value!r})"
+        )
+    return str(value)
 
 
 def _resolve_thinking(merged: dict[ConfigSection, Any]) -> str:
@@ -174,6 +197,7 @@ def _resolve_from_merged(merged: dict[ConfigSection, Any]) -> GenerationConfig:
     )
     return GenerationConfig(
         thinking=_resolve_thinking(merged),
+        transcription=_resolve_transcription(merged),
         model=transcribe.model,
         label_model=label.model,
         api_key=transcribe.api_key,
@@ -183,6 +207,36 @@ def _resolve_from_merged(merged: dict[ConfigSection, Any]) -> GenerationConfig:
         label_api_key_env=label.api_key_env,
         label_api_base=label.api_base,
     )
+
+
+def load_generation_batch(workspace: Workspace) -> bool:
+    """The ``[generation] batch`` switch: run ``docset generate`` in batch mode.
+
+    Absent means ``False`` (the synchronous pipeline). A TOML boolean is read
+    as is, and the env-var layer's strings (``DGML_GENERATION__BATCH=true``)
+    through :func:`~dgml_core.config.config_bool`. Anything else raises
+    :class:`GenerationConfigInvalid` rather than being guessed at: a typo
+    silently read as *on* would be a surprise in the opposite direction from
+    what batch mode is for. The CLI's ``--batch`` / ``--no-batch`` flag
+    overrides it.
+    """
+    section = load_merged_config(workspace).get(ConfigSection.GENERATION) or {}
+    value = section.get("batch", False) if isinstance(section, dict) else False
+    parsed = config_bool(value)
+    if parsed is None:
+        raise GenerationConfigInvalid(
+            f"generation.batch must be true or false, got {value!r} ({type(value).__name__})"
+        )
+    return parsed
+
+
+#: ``batch.stages.label.mode`` in a batch run's payload: how Pass B labeled.
+#: ``all-at-once`` — every document as one batch stage (a closed vocabulary:
+#: the roster cannot change between documents); ``sync`` — ordinary
+#: synchronous calls (any other vocabulary: each document's labels extend the
+#: roster the next one is shown, so documents cannot be labeled together).
+LABEL_MODE_ALL_AT_ONCE = "all-at-once"
+LABEL_MODE_SYNC = "sync"
 
 
 def load_generation_config(workspace: Workspace) -> GenerationConfig:

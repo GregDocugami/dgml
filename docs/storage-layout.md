@@ -740,7 +740,9 @@ Field rules:
   they may name different providers (e.g. the `anthropic_google` family blends
   Gemini and Anthropic models). These apply whether the models are set here
   or come from their tiers; when unset, litellm uses its per-provider env var.
-- `thinking` — optional; `"disabled"` (default) or `"adaptive"`. Anthropic
+- `thinking` — optional; `"disabled"` (default), `"adaptive"`, or
+  `"between_tools"` (Claude Sonnet 5.5 rejects `"disabled"`; this is its off
+  switch, thinking only between tool calls). Anthropic
   extended thinking, applied to **both** passes; ignored for non-Anthropic
   models. Omitting the field on the wire is not the same as turning thinking
   off: Claude 4.6+/5 models think adaptively unless told not to, so generation
@@ -1046,9 +1048,13 @@ workspace — classification, clustering's DocSet-naming, transcription
 (`transcribe`), labeling (`label`), semantic links (`links`), schema
 generation, value extraction, and hybrid text-merge (`hybrid_merge`).
 
-**Recording is gated on `--debug`.** Without `--debug`, no rows are
-written for any operation; pass `--debug` to log cost/token telemetry
-alongside the other debug artifacts. One JSON object per line; readers
+**Recording is opt-in.** The CLI turns it on under `--debug`: without
+`--debug`, no rows are written for any operation; pass `--debug` to log
+cost/token telemetry alongside the other debug artifacts. A library caller
+sets `record_usage=True` on the operation (or on its `LLMConfig`) instead,
+which records rows without writing any debug artifact; `extract_values`
+also returns the same totals on `ExtractionResult.usage` for callers that
+keep telemetry out of the workspace. One JSON object per line; readers
 tolerate corrupt tail lines from a crashed mid-write append. The CLI
 never reads this file; it exists for introspection and cost accounting
 by external tooling that aggregates and renders it.
@@ -1090,7 +1096,13 @@ things under its root `dg:chunk`:
 - a **`dg:extraction`** element (`dgml extraction extract`) — a direct child of
   the root holding the docset schema's extracted fields as `docset:` elements,
   each with its text content, a normalized `dg:value`/`xsi:type` where the text
-  is a recognizable typed value, and a `dg:origin` grounding it to the page:
+  is a recognizable typed value, and its provenance (DGML 0.71): `dg:origin`
+  boxes for its printed text, `dg:inputs` naming the elements the value used,
+  and `dg:method` (`calculated` | `inferred` | `defaulted`) on a value the
+  page doesn't print. Printed text a value used that no schema field extracts
+  is an anonymous `<dg:chunk xml:id dg:origin>` next to the field. A 0.7
+  `dg:origin="computed"` element still reads, with its `dg:href` targets as
+  its inputs:
 
 ```xml
 <dg:chunk xmlns:dg="http://dgml.io/ns/dg#"
@@ -1098,7 +1110,9 @@ things under its root `dg:chunk`:
           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <!-- generated document tree, if `generate` ran (full-extraction mode) -->
   <dg:extraction>
-    <docset:Title dg:origin="1 220 475 919 539">Health and Wellness, BAS</docset:Title>
+    <docset:Title xml:id="title" dg:origin="1 220 475 919 539">Health and Wellness, BAS</docset:Title>
+    <docset:Credits xsi:type="integer" dg:value="120" dg:inputs="#title"
+        dg:method="inferred">120</docset:Credits>
   </dg:extraction>
 </dg:chunk>
 ```
@@ -1107,7 +1121,7 @@ When `generate` ran first, `extract` adds the `dg:extraction` element alongside
 the tree (`full-extraction`); otherwise it writes a minimal `dg:chunk` holding
 only the `dg:extraction` element (`extraction`). `dgml extraction get-values`
 projects the `dg:extraction` element back to values-shape JSON
-(`{tag: {text, value?, locations}}`). Placing this file in the pair directory
+(`{tag: {text, value?, locations?, inputs?, evidence?, method?}}`). Placing this file in the pair directory
 (rather than at the docset root) makes the artifact path deterministic
 and unique per file, which is what file attestation
 ([packages/dgml/src/dgml/file_attestation.py](../packages/dgml/src/dgml/file_attestation.py))
