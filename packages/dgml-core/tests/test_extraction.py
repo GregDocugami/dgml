@@ -283,7 +283,7 @@ def test_add_file_and_extract_without_schema_logs_the_skip(
         (IndexError("list index out of range"), "IndexError: list index out of range", True),
     ],
 )
-def test_add_file_and_extract_soft_failure_warns(
+def test_add_file_and_extract_soft_failure_logs_at_info(
     workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -300,13 +300,14 @@ def test_add_file_and_extract_soft_failure_warns(
     block = add_file_and_extract(workspace, ds_id, _FID)
 
     assert block is not None and block["error"] == error
-    warnings = [
-        r
-        for r in caplog.records
-        if r.name == "dgml_core.extraction" and r.levelno == logging.WARNING
+    # The block carries the failure to the caller, so the log only narrates
+    # (under --verbose) — nothing reaches the CLI's default stderr.
+    assert _messages(caplog, logging.WARNING) == []
+    infos = [
+        r for r in caplog.records if r.name == "dgml_core.extraction" and r.levelno == logging.INFO
     ]
-    assert [r.getMessage() for r in warnings] == [
+    assert [r.getMessage() for r in infos] == [
         f"extraction of file {_FID} into docset {ds_id} failed; the file stays assigned "
         f"without extracted values: {error}"
     ]
-    assert bool(warnings[0].exc_info) is traceback
+    assert bool(infos[0].exc_info) is traceback

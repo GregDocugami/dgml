@@ -81,7 +81,7 @@ def _auto_extract(
         config = load_grounded_config(ws)
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
-        _warn_auto_extract_failed(file_id, docset_id, block["error"])
+        _log_auto_extract_failed(file_id, docset_id, block["error"])
         return block
     block["model"] = config.values_model
     # extract_values logs the run's start and finish; only the soft failure,
@@ -98,7 +98,7 @@ def _auto_extract(
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
         block["usage"] = exc.usage
-        _warn_auto_extract_failed(file_id, docset_id, block["error"])
+        _log_auto_extract_failed(file_id, docset_id, block["error"])
         return block
     except Exception as exc:
         # Bug-grade exception from extraction (e.g. IndexError in a phase).
@@ -108,19 +108,22 @@ def _auto_extract(
         # the parent command exits 0. The traceback goes to the log, since
         # the block can only carry the message.
         block["error"] = f"{type(exc).__name__}: {exc}"
-        _warn_auto_extract_failed(file_id, docset_id, block["error"], exc_info=True)
+        _log_auto_extract_failed(file_id, docset_id, block["error"], exc_info=True)
         return block
     block["tool_calls"] = result.tool_calls
     block["usage"] = result.usage or None
     return block
 
 
-def _warn_auto_extract_failed(
+def _log_auto_extract_failed(
     file_id: str, docset_id: str, error: str, *, exc_info: bool = False
 ) -> None:
     """Log a soft-failed auto-extraction: the assignment stands, but the file has
-    no extracted values — degraded output, hence WARNING."""
-    logger.warning(
+    no extracted values. INFO, not WARNING: the failure already reaches the caller
+    in the block's ``error``, and extraction was incidental to the assignment, so
+    the line (and any traceback) belongs under --verbose. A WARNING would also
+    repeat once per file in a bulk run."""
+    logger.info(
         "extraction of file %s into docset %s failed; the file stays assigned "
         "without extracted values: %s",
         file_id,
