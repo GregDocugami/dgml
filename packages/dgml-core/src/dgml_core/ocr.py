@@ -560,7 +560,7 @@ def _image_dimensions(data: bytes) -> tuple[int, int]:
     immune to mediabox/CropBox/rotation mismatches between the PDF
     parser and the renderer, and to the page-edge fit applied at render.
 
-    A PNG (a legacy render) is read straight from its IHDR chunk: 8-byte
+    A PNG is read straight from its IHDR chunk: 8-byte
     signature, then a chunk with 4-byte big-endian length, 4-byte type
     ("IHDR"), then width (uint32 BE) at byte offset 16 and height at 20. A
     JPEG is read by Pillow, which parses the header without decoding pixels.

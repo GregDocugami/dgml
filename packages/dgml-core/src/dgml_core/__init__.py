@@ -161,7 +161,7 @@ from .storage_service import (
     StorageConfig,
 )
 from .text_extraction import TextMode
-from .utils import page_image_key
+from .utils import page_image_key, read_page_image
 from .workspace_config import WorkspaceIdentity
 from .workspace_create import CreateWorkspaceResult, create_workspace
 from .workspace_id import (
@@ -424,6 +424,7 @@ __all__ = [
     "prepare_bulk_classify",
     "read_attestation",
     "read_dgml",
+    "read_page_image",
     "resolve_store_configs",
     "slice_pages",
     "stamp_schema_version",

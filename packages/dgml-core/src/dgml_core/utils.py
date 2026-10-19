@@ -94,18 +94,36 @@ def gather_file_pages(workspace: Workspace, file_id: str, max_pages: int) -> lis
     return [workspace.blobs.get_blob(k) for k in keys]
 
 
+_PAGE_IMAGE_PROBE_ORDER = (layout.PNG_PAGE_IMAGE_EXT, layout.JPEG_PAGE_IMAGE_EXT)
+
+
 def page_image_key(workspace: Workspace, file_id: str, page: int) -> str | None:
     """The key of page ``page``'s stored image, or ``None`` when there is none.
 
     A page is stored as a JPEG or a PNG, whichever was smaller, so this probes
     both extensions. PNG is probed first: text pages (the common case) encode
     smaller as PNG, and a file added before that change is all PNG, so most
-    lookups cost one existence check — a round trip on a remote store.
+    lookups cost one existence check — a round trip on a remote store. A caller
+    that goes on to read the image should use :func:`read_page_image` instead.
     """
-    for ext in (layout.PNG_PAGE_IMAGE_EXT, layout.JPEG_PAGE_IMAGE_EXT):
+    for ext in _PAGE_IMAGE_PROBE_ORDER:
         key = layout.file_page_image_key(file_id, page, ext)
         if workspace.blobs.blob_exists(key):
             return key
+    return None
+
+
+def read_page_image(workspace: Workspace, file_id: str, page: int) -> tuple[str, bytes] | None:
+    """``(key, bytes)`` of page ``page``'s stored image, or ``None`` when there
+    is none. Probes in :func:`page_image_key`'s order, but by reading each
+    candidate rather than checking that it exists first, so a caller that needs
+    the bytes saves a round trip per lookup on a remote store."""
+    for ext in _PAGE_IMAGE_PROBE_ORDER:
+        key = layout.file_page_image_key(file_id, page, ext)
+        try:
+            return key, workspace.blobs.get_blob(key)
+        except FileNotFoundError:
+            continue
     return None
 
 

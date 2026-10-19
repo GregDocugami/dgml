@@ -952,7 +952,7 @@ converted to the engine's `extracted_value` JSON Schema, whose leaf values
 carry `{ "text", "value"?, "locations": [{ "page_number", "bounding_box":
 [left, top, right, bottom] }] }` — verbatim text, optional normalized value
 (enum token, ISO date, plain number), and locations in integer image pixels
-(top-left origin, 300 dpi, relative to `page_images/page_N.jpg`) — so every
+(top-left origin, relative to `page_images/page_N.jpg`) — so every
 extracted value traces back to one or more regions of the source PDF.
 
 When present, `extraction-schema.rnc` is one of the artifacts captured in a
@@ -1146,8 +1146,8 @@ rendered tree is aligned against the file's `page_text/` OCR and a
 onto every element whose subtree grounded — so `<stem>.dgml.xml`
 carries page positions directly, with no separate grounded artifact. Each
 attribute is a `"; "`-separated box list, each box `<page> <x1> <y1> <x2>
-<y2>` (space-separated) in integer image pixels (top-left origin, 300
-dpi, relative to `page_images/page_N.jpg`). Elements with text-node
+<y2>` (space-separated) in integer image pixels (top-left origin,
+relative to `page_images/page_N.jpg`). Elements with text-node
 children (leaves and mixed-content parents) carry one box per visual
 line on each page (a parent's lines cover its whole subtree); pure
 containers (all-element children — sections, lists, tables, rows, the

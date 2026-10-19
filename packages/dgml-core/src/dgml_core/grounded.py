@@ -146,7 +146,7 @@ from .usage import (
     with_tier,
 )
 from .usage import record_usage as _append_usage_event
-from .utils import page_image_key
+from .utils import page_image_key, read_page_image
 
 logger = logging.getLogger(__name__)
 
@@ -2521,18 +2521,18 @@ def phase3_page_steps(
     the minimum cacheable prefix. Marking it only risks paying the cache-write
     premium for a read that cannot arrive — the same reasoning that keeps the
     PDF and image blocks untagged."""
-    image_key = page_image_key(workspace, file_id, page_number)
-    if image_key is None:
+    page_image = read_page_image(workspace, file_id, page_number)
+    if page_image is None:
         raise ValuesExtractionFailed(
             f"phase 3: no page image for file '{file_id}' page {page_number}"
         )
+    _, image_bytes = page_image
 
     try:
         page_words = get_page_words(workspace, file_id, page_number)
     except FileNotFound:
         page_words = {"page": page_number, "total_words": 0, "words": []}
 
-    image_bytes = workspace.blobs.get_blob(image_key)
     image_size = _page_pixel_size(workspace, file_id, page_number, image_bytes)
     # A page with no words (a scan added in digital mode, say) gives the model
     # nothing to measure pixels against. Asked for pixels anyway it spends its

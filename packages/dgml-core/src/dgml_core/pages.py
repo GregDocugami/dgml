@@ -252,7 +252,7 @@ _PAGE_IMAGE_NAME_RE = re.compile(
 
 
 def page_number_from_image_name(name: str) -> int | None:
-    """Parse ``page_<N>.jpg`` (or a legacy ``.png``) → ``N``; ``None`` otherwise."""
+    """Parse ``page_<N>.jpg`` or ``page_<N>.png`` → ``N``; ``None`` otherwise."""
     match = _PAGE_IMAGE_NAME_RE.match(name)
     return int(match.group(1)) if match else None
 
@@ -556,7 +556,6 @@ def _store_page(raw: Path, output_dir: Path, page: int, image_spec: PageImageSpe
         stored: Image.Image = rendered
         if resized:
             stored = rendered.resize(size, Image.Resampling.LANCZOS, reducing_gap=3.0)
-        if resized:
             buf = io.BytesIO()
             stored.save(buf, format="PNG")
             png = buf.getvalue()

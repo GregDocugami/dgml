@@ -255,3 +255,15 @@ def test_page_image_key_prefers_jpeg_and_falls_back_to_a_legacy_png(workspace: W
     assert page_image_key(workspace, "new", 1) == "files/new/page_images/page_1.jpg"
     assert page_image_key(workspace, "old", 1) == "files/old/page_images/page_1.png"
     assert page_image_key(workspace, "old", 2) is None
+
+
+def test_read_page_image_returns_the_key_and_bytes_of_either_extension(
+    workspace: Workspace,
+) -> None:
+    from dgml_core.utils import read_page_image
+
+    workspace.blobs.put_blob(layout.file_page_image_key("f", 1), b"jpeg")
+    workspace.blobs.put_blob(layout.file_page_image_key("f", 2, "png"), b"png")
+    assert read_page_image(workspace, "f", 1) == ("files/f/page_images/page_1.jpg", b"jpeg")
+    assert read_page_image(workspace, "f", 2) == ("files/f/page_images/page_2.png", b"png")
+    assert read_page_image(workspace, "f", 3) is None
