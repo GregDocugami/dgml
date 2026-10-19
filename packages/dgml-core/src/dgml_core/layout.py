@@ -26,7 +26,7 @@ collections, the blob key builders, and the mapping from a document
   blobs from documents.
 
 Keys are **workspace-root-relative POSIX strings** and deliberately do not
-depend on a workspace root: ``files/<id>/page_images/page_1.png`` names the same
+depend on a workspace root: ``files/<id>/page_images/page_1.jpg`` names the same
 thing whether it lives on disk or in a bucket. That is why these are module
 functions rather than :class:`~dgml_core.storage.Workspace` methods.
 
@@ -89,7 +89,13 @@ FULL_SCHEMA_FILE = "full-schema.rnc"
 # The optional word-coverage report, written directly under the docset dir only
 # under ``dgml --debug docset generate``.
 COVERAGE_REPORT_FILE = "coverage_report.json"
-PAGE_IMAGE_TEMPLATE = "page_%d.png"
+PAGE_IMAGE_TEMPLATE = "page_%d.%s"
+# Page images are stored as JPEG. Files added before that change carry PNG
+# renders, which stay valid (their ``page_text/`` boxes are in those images'
+# pixels), so readers accept either extension.
+PAGE_IMAGE_EXT = "jpg"
+LEGACY_PAGE_IMAGE_EXT = "png"
+PAGE_IMAGE_EXTS: tuple[str, ...] = (PAGE_IMAGE_EXT, LEGACY_PAGE_IMAGE_EXT)
 PAGE_TEXT_TEMPLATE = "page_%d.json"
 DGML_XML_SUFFIX = ".dgml.xml"
 
@@ -166,8 +172,11 @@ def file_pages_prefix(file_id: str) -> str:
     return f"{file_prefix(file_id)}{PAGE_IMAGES_DIR}/"
 
 
-def file_page_image_key(file_id: str, page: int) -> str:
-    return f"{file_pages_prefix(file_id)}{PAGE_IMAGE_TEMPLATE % page}"
+def file_page_image_key(file_id: str, page: int, ext: str = PAGE_IMAGE_EXT) -> str:
+    """Key of page ``page``'s image. ``ext`` defaults to today's format; a
+    reader that must also find a legacy render goes through
+    :func:`dgml_core.utils.page_image_key`."""
+    return f"{file_pages_prefix(file_id)}{PAGE_IMAGE_TEMPLATE % (page, ext)}"
 
 
 def file_text_prefix(file_id: str) -> str:

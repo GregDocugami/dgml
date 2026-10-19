@@ -20,7 +20,7 @@ has today — no migration, and everything that reads the tree directly
 (``dgml check``, attestation, DGMLX bundles, external tooling) keeps working.
 
 - **Blob keys are the on-disk relative paths** themselves: a blob is stored at
-  ``<root>/<key>`` — ``files/<id>/page_images/page_1.png``, ``files/<id>/<name>``,
+  ``<root>/<key>`` — ``files/<id>/page_images/page_1.jpg``, ``files/<id>/<name>``,
   ``files/<id>/page_text/page_1.json`` (bulky per-page word boxes, a blob like the
   page images despite the ``.json`` name), ``docsets/<did>/files/<fid>/<stem>.dgml.xml``,
   ``docsets/<did>/full-schema.rnc``.
@@ -303,7 +303,7 @@ class LocalStore(BlobStore, DocStore):
         # let the tool write in place":
         #
         #   * the contract yields an *empty* directory and replaces the prefix,
-        #     which writing in place cannot honour — a stale page_7.png from a
+        #     which writing in place cannot honour — a stale page_7.jpg from a
         #     longer previous render would survive unless the tool happened to
         #     delete it, and the store would disagree with a remote backend
         #     about what the file's page images are;

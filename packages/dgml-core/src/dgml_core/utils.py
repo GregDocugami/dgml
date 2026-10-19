@@ -75,7 +75,8 @@ def xml_safe(text: str) -> str:
 
 
 def gather_file_pages(workspace: Workspace, file_id: str, max_pages: int) -> list[bytes]:
-    """Read up to ``max_pages`` rendered page-image PNG bytes for ``file_id``.
+    """Read up to ``max_pages`` rendered page-image bytes (JPEG, or PNG for a
+    file rendered before page images moved to JPEG) for ``file_id``.
 
     Returns an empty list when the page-images directory is missing or empty.
     Callers decide what that means in their context (e.g. classification
@@ -84,6 +85,21 @@ def gather_file_pages(workspace: Workspace, file_id: str, max_pages: int) -> lis
     prefix = layout.file_pages_prefix(file_id)
     keys = workspace.blobs.list_blobs(prefix)[:max_pages]
     return [workspace.blobs.get_blob(k) for k in keys]
+
+
+def page_image_key(workspace: Workspace, file_id: str, page: int) -> str | None:
+    """The key of page ``page``'s stored image, or ``None`` when there is none.
+
+    Probes today's extension first, then the legacy PNG one, so a file added
+    before page images moved to JPEG keeps resolving without a migration. Its
+    PNGs stay authoritative for it: they are the pixel space its ``page_text/``
+    boxes were written in.
+    """
+    for ext in layout.PAGE_IMAGE_EXTS:
+        key = layout.file_page_image_key(file_id, page, ext)
+        if workspace.blobs.blob_exists(key):
+            return key
+    return None
 
 
 def page_text_keys(workspace: Workspace, file_id: str, text_view: str) -> list[str]:

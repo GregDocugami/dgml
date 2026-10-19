@@ -34,7 +34,7 @@ This module powers two CLI surfaces:
 
 Coordinate space contract:
 - Bounding boxes are integer image pixels ``[left, top, right, bottom]``
-  (top-left origin) at 300 dpi, relative to ``page_images/page_N.png`` —
+  (top-left origin), relative to ``page_images/page_N.jpg`` —
   one convention end-to-end. This is what ``page_text/page_N.json``
   stores, what the ``extracted_value`` form uses in schemas and values,
   and what the ``get_page_words`` tool hands the model. The model reads
@@ -124,7 +124,7 @@ from .matching import (
     walk_unprinted_leaves,
 )
 from .models_config import ConfigSection, Tier, resolve_tiered_model
-from .ocr import _image_dimensions as _png_dimensions
+from .ocr import _image_dimensions
 from .pages import PdfConfig, load_pdf_config, pdf_page_count_bytes, slice_pages
 from .prompts import PromptKey
 from .prompts import get as prompt
@@ -146,6 +146,7 @@ from .usage import (
     with_tier,
 )
 from .usage import record_usage as _append_usage_event
+from .utils import page_image_key
 
 logger = logging.getLogger(__name__)
 
@@ -2441,11 +2442,7 @@ def _drop_out_of_range_pages(
     if page_count is None or page_count <= 0:
         return unmatched, 0
     outside = {item.page_number for item in unmatched if not 1 <= item.page_number <= page_count}
-    missing = {
-        page
-        for page in outside
-        if not workspace.blobs.blob_exists(layout.file_page_image_key(file_id, page))
-    }
+    missing = {page for page in outside if page_image_key(workspace, file_id, page) is None}
     kept = [item for item in unmatched if item.page_number not in missing]
     return kept, len(missing)
 
@@ -2524,8 +2521,8 @@ def phase3_page_steps(
     the minimum cacheable prefix. Marking it only risks paying the cache-write
     premium for a read that cannot arrive — the same reasoning that keeps the
     PDF and image blocks untagged."""
-    image_key = layout.file_page_image_key(file_id, page_number)
-    if not workspace.blobs.blob_exists(image_key):
+    image_key = page_image_key(workspace, file_id, page_number)
+    if image_key is None:
         raise ValuesExtractionFailed(
             f"phase 3: no page image for file '{file_id}' page {page_number}"
         )
@@ -2823,11 +2820,11 @@ def _page_pixel_size(
     workspace: Workspace, file_id: str, page_number: int, image_bytes: bytes
 ) -> tuple[int, int] | None:
     """``(width, height)`` of the page image the model is shown: read from the
-    PNG header, else from ``page_text`` (which records the same size), else
+    image header, else from ``page_text`` (which records the same size), else
     ``None``, in which case phase 3 keeps the plain pixel prompt."""
     size: tuple[Any, Any]
     try:
-        size = _png_dimensions(image_bytes)
+        size = _image_dimensions(image_bytes)
     except ValueError:
         payload = workspace.read_page_text(file_id, page_number) or {}
         size = (payload.get("width"), payload.get("height"))

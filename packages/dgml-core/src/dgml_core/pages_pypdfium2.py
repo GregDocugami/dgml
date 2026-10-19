@@ -96,15 +96,6 @@ class Pypdfium2Renderer(PageRenderer):
 
     def __init__(self, config: PdfConfig) -> None:
         self._pdfium = _import_pdfium()
-        # Pillow writes the PNGs (pypdfium2's to_pil()); it ships with the same
-        # extra, so its absence means a partial/hand-rolled install.
-        try:
-            import PIL.Image  # noqa: F401
-        except ImportError as exc:
-            raise EngineNotAvailable(
-                "pdf.provider is 'pypdfium2' but Pillow is not installed — "
-                "install it with: pip install dgml[pdfium]"
-            ) from exc
 
     def render(self, pdf_path: Path, output_dir: Path, *, dpi: int) -> None:
         scale = dpi / _PDF_POINTS_PER_INCH

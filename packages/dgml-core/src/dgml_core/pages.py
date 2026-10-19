@@ -17,8 +17,9 @@ slicing a page range into a new PDF — and takes both from one **engine**.
 Loads the ``[pdf]`` section of ``<workspace>/config.toml`` (via
 :func:`load_pdf_config`), dispatches :func:`render_pages` and
 :func:`slice_pages` to the configured engine, and owns everything
-engine-independent: the page filename contract (``page_N.png``), the optional
-content-addressed render cache, page counting, and slice bounds-checking.
+engine-independent: fitting and encoding the stored page images
+(:class:`PageImageSpec`), their filenames, the optional content-addressed render
+cache, page counting, and slice bounds-checking.
 
 Engine implementations live in sibling modules so this file stays focused on
 the abstraction (mirroring :mod:`dgml_core.ocr`):
@@ -55,8 +56,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import sys
+import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -64,6 +67,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
 
+from . import layout
 from .errors import GhostscriptNotFound, PdfConfigInvalid
 from .models_config import ConfigSection
 
@@ -71,8 +75,27 @@ if TYPE_CHECKING:
     from .storage import Workspace
 
 DEFAULT_DPI = 300
+# What an engine writes: one lossless PNG per page at exactly the requested dpi,
+# into a scratch directory. :func:`render_pages` then fits each to the
+# :class:`PageImageSpec` and stores it under the layout's page-image name.
 PAGE_FILENAME_TEMPLATE = "page_%d.png"
-PAGE_GLOB = "page_*.png"
+_ENGINE_PAGE_GLOB = "page_*.png"
+
+# Bounds on the longest edge of a stored page image, in pixels. The max is A4's
+# long edge at 300 dpi (Letter's is 3300), so both common page sizes are stored
+# as rendered while a large-format sheet (a 4959 x 7017 drawing, say) is scaled
+# down to fit: such a page otherwise produces an image too large for vision
+# models (Anthropic rejects one over 8000 px, or over 10 MiB of base64) and too
+# heavy for every consumer that loads it whole. The min scales a small page (a
+# receipt, a label) up so OCR and vision models get legible glyphs; it
+# interpolates the render rather than rasterizing at a higher resolution.
+PAGE_MAX_EDGE = 3508
+PAGE_MIN_EDGE = 1000
+# JPEG quality for stored page images. A text-only page is several times
+# larger as a JPEG than as a PNG (~0.8-1.1 MB vs ~0.1 MB for Letter at 300
+# dpi), but a photo-heavy page drops from ~17 MB to ~3 MB, and it is the
+# heavy pages that break consumers. 90 keeps small glyphs clean for OCR.
+PAGE_JPEG_QUALITY = 90
 
 # Optional content-addressed render cache. When ``$DGML_PAGE_CACHE`` names a
 # directory, :func:`render_pages` copies its output there keyed by the PDF's
@@ -171,6 +194,76 @@ def _check_no_extra_fields(engine: EngineName, section: dict[str, Any]) -> None:
         )
 
 
+@dataclass(frozen=True)
+class PageImageSpec:
+    """The longest-edge bounds each rendered page is fit into before it is
+    stored as a JPEG.
+
+    This decides the page images' *pixel space*, which ``page_text/`` word
+    boxes and every ``dg:origin`` attribute are expressed in, so digital text
+    extraction takes the same spec as the render (see :meth:`fit`). ``None``
+    for an edge means unbounded on that side.
+    """
+
+    min_edge: int | None = PAGE_MIN_EDGE
+    max_edge: int | None = PAGE_MAX_EDGE
+
+    def __post_init__(self) -> None:
+        for name in ("min_edge", "max_edge"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be a positive integer; got {value!r}")
+        if self.min_edge is not None and self.max_edge is not None:
+            if self.min_edge > self.max_edge:
+                raise ValueError(
+                    f"min_edge ({self.min_edge}) must not exceed max_edge ({self.max_edge})"
+                )
+
+    def fit(self, width: int, height: int) -> tuple[int, int]:
+        """The stored size of a page rendered at ``width`` x ``height`` pixels.
+
+        Scales uniformly so the longest edge lands in ``[min_edge,
+        max_edge]``; a page already inside the range keeps its exact size.
+        Both the render and digital text extraction call this on the same
+        ``round(pts * dpi / 72)`` size, which is what keeps their pixel spaces
+        identical.
+        """
+        longest = max(width, height)
+        if longest <= 0:
+            return width, height
+        if self.max_edge is not None and longest > self.max_edge:
+            target = self.max_edge
+        elif self.min_edge is not None and longest < self.min_edge:
+            target = self.min_edge
+        else:
+            return width, height
+        return max(1, round(width * target / longest)), max(1, round(height * target / longest))
+
+
+DEFAULT_PAGE_IMAGE_SPEC = PageImageSpec()
+
+_PAGE_IMAGE_NAME_RE = re.compile(
+    rf"^page_(\d+)\.(?:{'|'.join(re.escape(e) for e in layout.PAGE_IMAGE_EXTS)})$"
+)
+
+
+def page_number_from_image_name(name: str) -> int | None:
+    """Parse ``page_<N>.jpg`` (or a legacy ``.png``) → ``N``; ``None`` otherwise."""
+    match = _PAGE_IMAGE_NAME_RE.match(name)
+    return int(match.group(1)) if match else None
+
+
+def list_page_images(directory: Path) -> list[Path]:
+    """The page images in ``directory``, in page order (``page_2`` before
+    ``page_10``), whichever extension each was stored with."""
+    found = [
+        (number, path)
+        for path in directory.glob("page_*.*")
+        if (number := page_number_from_image_name(path.name)) is not None
+    ]
+    return [path for _, path in sorted(found)]
+
+
 # ---------------------------------------------------------------------------
 # Renderer interface
 # ---------------------------------------------------------------------------
@@ -182,8 +275,9 @@ class PageRenderer(ABC):
     Implementations are constructed from a :class:`PdfConfig` (which is where
     lazy package imports / binary probes live) and implement :meth:`render` for
     a whole PDF. The shared wrapper :func:`render_pages` handles the render
-    cache, clearing stale page images, and counting the output — renderers only
-    need to write ``page_N.png`` files.
+    cache, clearing stale page images, fitting and encoding the stored images
+    (:class:`PageImageSpec`), and counting the output — renderers only need to
+    write ``page_N.png`` files.
     """
 
     @abstractmethod
@@ -199,14 +293,15 @@ class PageRenderer(ABC):
 
         Write one PNG per page named per :data:`PAGE_FILENAME_TEMPLATE`
         (``page_1.png`` …, 1-based, ghostscript's own numbering).
-        ``output_dir`` exists and holds no stale page images when called.
+        ``output_dir`` is an empty scratch directory; :func:`render_pages`
+        fits and encodes what is written there into the stored images.
 
         The image written for a page MUST be exactly
         ``round(pts * dpi / 72)`` pixels on each axis, measured from the
-        **MediaBox** and after applying ``/Rotate`` — that is the coordinate
-        space ``page_text/`` word boxes and every ``dg:origin`` attribute are
-        expressed in. A backend whose natural output differs (a different page
-        box, or its own rounding) must correct for it.
+        **MediaBox** and after applying ``/Rotate`` — :meth:`PageImageSpec.fit`
+        of that size is the coordinate space ``page_text/`` word boxes and every
+        ``dg:origin`` attribute are expressed in. A backend whose natural output
+        differs (a different page box, or its own rounding) must correct for it.
 
         Raise :class:`PageRenderFailed` for backend errors. Renderers may be
         called for many PDFs from one process but are not called concurrently
@@ -368,30 +463,88 @@ def _page_cache_root() -> Path | None:
     return Path(root) if root else None
 
 
-def _pdf_cache_key(pdf_path: Path, dpi: int, renderer: EngineName = DEFAULT_ENGINE) -> str:
-    """Content hash keying the render cache: renderer + dpi + the PDF bytes.
+def _pdf_cache_key(
+    pdf_path: Path,
+    dpi: int,
+    renderer: EngineName = DEFAULT_ENGINE,
+    image_spec: PageImageSpec = DEFAULT_PAGE_IMAGE_SPEC,
+) -> str:
+    """Content hash keying the render cache: renderer + dpi + edge bounds +
+    JPEG quality + the PDF bytes.
 
-    Renderer and dpi are folded in so a change to either invalidates entries
-    rather than serving mismatched renders for the same bytes — a 150-dpi
-    render and a 300-dpi render of the same PDF get distinct entries, and so
-    do a ghostscript render and a pypdfium2 render (their pixels differ).
+    Everything that shapes the stored pixels is folded in so a change to any
+    of it invalidates entries rather than serving mismatched renders for the
+    same bytes — a 150-dpi render and a 300-dpi render of the same PDF get
+    distinct entries, and so do a ghostscript render and a pypdfium2 render
+    (their pixels differ), or two edge bounds.
     """
-    digest = hashlib.sha256(f"{renderer.value}:{dpi}\n".encode())
+    spec = image_spec
+    digest = hashlib.sha256(
+        f"{renderer.value}:{dpi}:{spec.min_edge}:{spec.max_edge}:{PAGE_JPEG_QUALITY}\n".encode()
+    )
     with pdf_path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
 
-def _replace_pages_from(src_dir: Path, output_dir: Path) -> int:
-    """Clear ``output_dir``'s page PNGs and copy ``src_dir``'s in; return count."""
+def _clear_page_images(output_dir: Path) -> None:
+    """Create ``output_dir`` if needed and remove every stored page image in it,
+    of either extension, so a retry or a format change leaves no orphans."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    for existing in output_dir.glob(PAGE_GLOB):
+    for existing in list_page_images(output_dir):
         existing.unlink()
-    pages = sorted(src_dir.glob(PAGE_GLOB))
-    for png in pages:
-        shutil.copy2(png, output_dir / png.name)
+
+
+def _replace_pages_from(src_dir: Path, output_dir: Path) -> int:
+    """Clear ``output_dir``'s page images and copy ``src_dir``'s in; return count."""
+    _clear_page_images(output_dir)
+    pages = list_page_images(src_dir)
+    for image in pages:
+        shutil.copy2(image, output_dir / image.name)
     return len(pages)
+
+
+def _store_pages(raw_dir: Path, output_dir: Path, image_spec: PageImageSpec) -> int:
+    """Fit each engine PNG in ``raw_dir`` to ``image_spec`` and store it in
+    ``output_dir`` as a JPEG, resizing with Lanczos when the page falls outside
+    the bounds. Returns the page count.
+
+    Raises :class:`PageRenderFailed` for an engine image Pillow cannot read.
+    """
+    from .errors import PageRenderFailed
+
+    stored = 0
+    for raw in sorted(raw_dir.glob(_ENGINE_PAGE_GLOB)):
+        page = page_number_from_image_name(raw.name)
+        if page is None:
+            continue
+        target = output_dir / (layout.PAGE_IMAGE_TEMPLATE % (page, layout.PAGE_IMAGE_EXT))
+        try:
+            _store_page(raw, target, image_spec)
+        except (OSError, SyntaxError, ValueError) as exc:
+            # SyntaxError is how Pillow's PNG plugin reports a malformed file.
+            raise PageRenderFailed(f"could not store the render of page {page}: {exc}") from exc
+        stored += 1
+    return stored
+
+
+def _store_page(raw: Path, target: Path, image_spec: PageImageSpec) -> None:
+    """Fit one engine PNG and store it as a JPEG at ``target`` (see :func:`_store_pages`)."""
+    from PIL import Image, PngImagePlugin
+
+    # The engine's own output, so Image.open's decompression-bomb guard
+    # (aimed at untrusted input) would only refuse a legitimately huge
+    # sheet — the very page this step exists to shrink. Opening through
+    # the PNG plugin directly skips that guard.
+    with PngImagePlugin.PngImageFile(raw) as rendered:
+        size = image_spec.fit(rendered.width, rendered.height)
+        stored: Image.Image = rendered
+        if size != rendered.size:
+            stored = rendered.resize(size, Image.Resampling.LANCZOS, reducing_gap=3.0)
+        if stored.mode not in ("RGB", "L"):
+            stored = stored.convert("RGB")
+        stored.save(target, format="JPEG", quality=PAGE_JPEG_QUALITY, optimize=True)
 
 
 def render_pages(
@@ -400,8 +553,10 @@ def render_pages(
     *,
     dpi: int = DEFAULT_DPI,
     config: PdfConfig | None = None,
+    image_spec: PageImageSpec = DEFAULT_PAGE_IMAGE_SPEC,
 ) -> int:
-    """Render each PDF page to a PNG at ``dpi``. Returns the number of pages written.
+    """Render each PDF page at ``dpi`` and store it per ``image_spec``. Returns
+    the number of pages written.
 
     ``config`` selects the backend; ``None`` means the ghostscript default
     (callers with a workspace at hand should pass
@@ -414,16 +569,19 @@ def render_pages(
     is used here also has to reach digital text extraction, since ``page_text/``
     word boxes are expressed in *this* render's pixel space.
 
+    ``image_spec`` bounds each page's longest edge (:class:`PageImageSpec`;
+    ``[PAGE_MIN_EDGE, PAGE_MAX_EDGE]`` by default) and the page is stored as a
+    JPEG. A page outside the bounds is stored at :meth:`PageImageSpec.fit`
+    of its rendered size, so its effective resolution differs from ``dpi`` —
+    digital text extraction must be given the same spec to land in the same
+    pixel space. JPEG, not PNG, because a photo-heavy or scanned page can be
+    an order of magnitude larger as a PNG (tens of megabytes), past what vision
+    models accept, while a JPEG of a text page stays around a megabyte.
+
     When ``$DGML_PAGE_CACHE`` is set, an identical PDF (same bytes, renderer,
-    and dpi) rendered before is served from that cache without invoking
+    dpi, and edge bounds) rendered before is served from that cache without invoking
     the backend (which then need not even be installed); otherwise the render
     is populated into the cache on success.
-
-    PNG (not JPEG) is the canonical format: pixel-perfect for text-on-white
-    document scans, ~5-10x smaller on disk than JPEG q92 for these
-    workloads, and the same format the generation pipeline already
-    consumes for LLM input — so workspace renders can be reused directly
-    rather than re-rasterized through a second renderer.
     """
     if config is None:
         config = PdfConfig()
@@ -431,18 +589,17 @@ def render_pages(
     cache_entry: Path | None = None
     cache_root = _page_cache_root()
     if cache_root is not None:
-        cache_entry = cache_root / _pdf_cache_key(pdf_path, dpi, config.provider)
+        cache_entry = cache_root / _pdf_cache_key(pdf_path, dpi, config.provider, image_spec)
         if (cache_entry / _CACHE_COMPLETE_MARKER).exists():
             return _replace_pages_from(cache_entry, output_dir)
 
     renderer = make_renderer(config)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for existing in output_dir.glob(PAGE_GLOB):
-        existing.unlink()
+    _clear_page_images(output_dir)
 
-    renderer.render(pdf_path, output_dir, dpi=dpi)
+    with tempfile.TemporaryDirectory(prefix="dgml-render-") as raw_dir:
+        renderer.render(pdf_path, Path(raw_dir), dpi=dpi)
+        count = _store_pages(Path(raw_dir), output_dir, image_spec)
 
-    count = len(list(output_dir.glob(PAGE_GLOB)))
     if cache_entry is not None:
         _populate_cache(cache_entry, output_dir)
     return count
@@ -451,14 +608,14 @@ def render_pages(
 def _populate_cache(cache_entry: Path, output_dir: Path) -> None:
     """Best-effort copy of the fresh render into the cache, marked complete last.
 
-    Writing the ``.complete`` marker only after every PNG is copied means a
+    Writing the ``.complete`` marker only after every image is copied means a
     reader either sees a fully populated entry or treats it as a miss — never a
     partial one. Cache I/O failures are swallowed: the render already succeeded.
     """
     try:
         cache_entry.mkdir(parents=True, exist_ok=True)
-        for png in output_dir.glob(PAGE_GLOB):
-            shutil.copy2(png, cache_entry / png.name)
+        for image in list_page_images(output_dir):
+            shutil.copy2(image, cache_entry / image.name)
         (cache_entry / _CACHE_COMPLETE_MARKER).write_text("", encoding="utf-8")
     except OSError:
         pass

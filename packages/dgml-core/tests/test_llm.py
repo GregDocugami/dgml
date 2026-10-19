@@ -1078,3 +1078,14 @@ def test_call_continued_raises_when_every_round_is_textless(
             system_prompt="s",
             user_content=[{"type": "text", "text": "u"}],
         )
+
+
+def test_build_user_content_labels_each_image_by_its_own_format() -> None:
+    """Page images are JPEG, and a file rendered before that has PNGs; each
+    image block must carry the MIME type of the bytes it holds."""
+    jpeg = b"\xff\xd8\xff\xe0 jpeg body"
+    png = b"\x89PNG\r\n\x1a\n png body"
+    content = llm.build_user_content(instruction_text="x", images=[jpeg, png])
+    urls = [block["image_url"]["url"] for block in content if block["type"] == "image_url"]
+    assert urls[0].startswith("data:image/jpeg;base64,")
+    assert urls[1].startswith("data:image/png;base64,")

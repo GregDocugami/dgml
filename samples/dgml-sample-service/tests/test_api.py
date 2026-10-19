@@ -138,7 +138,8 @@ def test_upload_view_and_storage_lock(
     assert files[0]["page_count"] == 1 and files[0]["page_image_renderer"] == "pypdfium2"
 
     page = client.get(f"/api/orgs/{org_id}/files/{file_id}/pages/1")
-    assert page.status_code == 200 and page.content.startswith(b"\x89PNG")
+    assert page.status_code == 200 and page.content.startswith(b"\xff\xd8\xff")
+    assert page.headers["content-type"] == "image/jpeg"
     assert client.get(f"/api/orgs/{org_id}/files/{file_id}/pages/9").status_code == 404
     source = client.get(f"/api/orgs/{org_id}/files/{file_id}/source")
     assert source.status_code == 200 and source.content.startswith(b"%PDF")
