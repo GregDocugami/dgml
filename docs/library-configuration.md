@@ -69,8 +69,9 @@ own credentials, by value. It renders flat — `Generation(label_model=Model("x"
 is `label_model = "x"` / `label_api_key = "k"` in TOML terms. A `Model` is one group: a task's
 `Model` uses exactly the credentials it carries, a tier's likewise, and nothing is borrowed from
 another tier or section. The provider keys on `Models` (`anthropic_api_key` / `google_api_key` /
-`openai_api_key`) are written onto the tiers that `Models` sets or expands from `family` for
-that provider, unless a tier has its own key or an `api_base`. A model with no credentials
+`openai_api_key`) are written onto every model of that provider in the `Configuration` — the
+tiers `Models` sets or expands from `family`, and the section models — unless the model has its
+own key or an `api_base`. A model with no credentials
 leaves litellm its own env var — so at a custom `api_base`, an `openai/`, `anthropic/` or
 `gemini/` model needs `api_key` set beside it (a real key, or a placeholder such as `"EMPTY"`),
 or litellm sends the provider's env-var key to that host; `ollama/` needs none. See
@@ -78,7 +79,7 @@ or litellm sends the provider's env-var key to that host; `ollama/` needs none. 
 
 | Section | TOML table | Notes |
 |---|---|---|
-| `Models(family, light, standard, advanced, expert, anthropic_api_key, google_api_key, openai_api_key)` | `[models]` | `family` expands into the four tiers; an explicit tier (a `Model`) wins. A provider key is written onto this `Models`' tiers of that provider that carry neither their own key nor an `api_base`; one with no such tier is simply unused. |
+| `Models(family, light, standard, advanced, expert, anthropic_api_key, google_api_key, openai_api_key)` | `[models]` | `family` expands into the four tiers; an explicit tier (a `Model`) wins. A provider key is written onto the tiers and section models of that provider that carry neither their own key nor an `api_base`; one with no such model is simply unused. |
 | `Grounded(schema_model, values_model, max_tool_iters, values_reasoning_effort, locations_reasoning_effort)` | `[grounded]` | Extraction (`values_model`, advanced tier) and schema generation (`schema_model`, expert tier). |
 | `Classification(model, max_pages, naming_attempts)` | `[classification]` | Light tier. |
 | `Ocr(provider, max_concurrency, options)` | `[ocr]` | `options` are the provider's own fields, validated by its `parse_config`. |

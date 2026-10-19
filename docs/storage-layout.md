@@ -562,13 +562,15 @@ expert_api_base = "https://proxy.example"     # … and endpoint
   there too — `DGML_MODELS__FAMILY=anthropic` with
   `DGML_MODELS__ANTHROPIC_API_KEY_ENV=…` is the one-layer form.
 - **Per provider**: `anthropic_api_key`, `google_api_key`, `openai_api_key` (or
-  the `_env` form) is shorthand within one layer. It is written onto every tier of
-  that provider (by model-id prefix: `anthropic/`, `gemini/`, `openai/`) that the
-  same layer sets or expands from `family`, unless the tier has its own key or an
-  `api_base`. One key per provider covers a mixed family such as
-  `anthropic_google`; a tier pointed at a custom `api_base` never receives it, and
-  neither does a task section's model or a tier set in another layer. A provider
-  key with no tier of its provider in the layer is simply unused — not an error.
+  the `_env` form) is shorthand within one layer. It is written onto every tier and
+  every task-section model of that provider (by model-id prefix: `anthropic/`,
+  `gemini/`, `openai/`) that the same layer sets or expands from `family`, unless
+  the model has its own key or an `api_base`. One key per provider covers a mixed
+  family such as `anthropic_google`; a model pointed at a custom `api_base` never
+  receives it, and neither does a model set in another layer. A provider key with
+  no model of its provider in the layer is unused — not an error — but when a model
+  of that provider from another layer ends up with no key, dgml logs a warning,
+  since litellm will read its own env var for it instead.
 
 A model with no credentials falls back to litellm's per-provider env var — the one
 fallback there is. A tier that is unset borrows its fallback tier's model and

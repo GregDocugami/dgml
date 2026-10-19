@@ -65,6 +65,8 @@ from .models_config import (
     ConfigSection,
     normalize_models_layer,
     normalize_task_layer,
+    provider_keys,
+    warn_provider_keys_not_applied,
 )
 from .storage import user_config_path
 
@@ -77,11 +79,19 @@ ENV_PREFIX = "DGML_"
 ENV_NESTED_DELIMITER = "__"
 
 
-def _build_settings_class(user_path: Path, ws_config: dict[str, Any] | None) -> type[BaseSettings]:
+#: What each layer is called in a message, highest precedence first (the order
+#: ``settings_customise_sources`` returns them in).
+_LAYER_NAMES = ("command-line overrides", "environment", "workspace config", "user config")
+
+
+def _build_settings_class(
+    user_path: Path, ws_config: dict[str, Any] | None, keys_found: dict[str, str]
+) -> type[BaseSettings]:
     """A ``BaseSettings`` subclass sourcing layer 2 from the TOML file at *user_path*
     and layer 3 from *ws_config*, the workspace's already-parsed config (``None`` when
     it has none). Defined per call so the classmethod source hook closes over the
-    runtime values — no module-level state, so it stays thread-safe.
+    runtime values — no module-level state, so it stays thread-safe. Each layer's
+    provider keys are recorded in *keys_found* (see :func:`_normalize_layer`).
 
     Layer 3 arrives **parsed** rather than as a path because a workspace's config is not
     necessarily a file: one held in the machine's store of workspaces may be a row in a
@@ -132,25 +142,37 @@ def _build_settings_class(user_path: Path, ws_config: dict[str, Any] | None) -> 
                 ws_config or {},
                 TomlConfigSettingsSource(settings_cls, toml_file=user_path)(),
             )
-            return tuple(InitSettingsSource(settings_cls, _normalize_layer(lyr)) for lyr in layers)
+            return tuple(
+                InitSettingsSource(settings_cls, _normalize_layer(lyr, name, keys_found))
+                for lyr, name in zip(layers, _LAYER_NAMES, strict=True)
+            )
 
     return _DgmlSettings
 
 
-def _normalize_layer(layer: dict[str, Any]) -> dict[str, Any]:
+def _normalize_layer(
+    layer: dict[str, Any], name: str = "", keys_found: dict[str, str] | None = None
+) -> dict[str, Any]:
     """One config layer with its model groups made atomic (see
     :func:`~dgml_core.models_config.normalize_models_layer`): ``family`` expanded,
-    this layer's provider keys written onto this layer's tiers, and every model the
-    layer sets carrying ``None`` for the credentials it leaves unset — so the merge
-    replaces a model's group as a unit instead of pairing it with a lower layer's key."""
+    this layer's provider keys written onto this layer's tiers and task-section models,
+    and every model the layer sets carrying ``None`` for the credentials it leaves
+    unset — so the merge replaces a model's group as a unit instead of pairing it with
+    a lower layer's key. *keys_found* records where each provider's key was set (the
+    first layer to call wins, so call highest first), for the post-merge warning."""
     out = dict(layer)
     models = layer.get(ConfigSection.MODELS)
+    providers = provider_keys(models) if isinstance(models, dict) else {}
+    if keys_found is not None:
+        for provider, (api_key, _env) in providers.items():
+            form = "api_key" if api_key is not None else "api_key_env"
+            keys_found.setdefault(provider, f"'models.{provider}_{form}' in the {name}")
     if isinstance(models, dict):
         out[ConfigSection.MODELS.value] = normalize_models_layer(models)
     for section in LLM_SECTIONS:
         table = layer.get(section)
         if isinstance(table, dict):
-            out[section.value] = normalize_task_layer(table, section)
+            out[section.value] = normalize_task_layer(table, section, providers)
     return out
 
 
@@ -242,7 +264,8 @@ def _merge_layers(
         # backing it came from.
         ws_text = workspace.config_text
         ws_config = tomllib.loads(ws_text) if ws_text else None
-        settings_cls = _build_settings_class(user_path, ws_config)
+        keys_found: dict[str, str] = {}
+        settings_cls = _build_settings_class(user_path, ws_config, keys_found)
         settings = settings_cls(**(cli_overrides or {}))
     except tomllib.TOMLDecodeError as exc:
         raise CorruptMetadata(f"invalid TOML in a config file: {exc}") from exc
@@ -252,4 +275,6 @@ def _merge_layers(
         raise CorruptMetadata(f"malformed config: {exc}") from exc
     dump: dict[str, Any] = settings.model_dump(exclude_unset=True)
     # Field names are exactly the section names, so every key is a ConfigSection.
-    return _drop_none_values({ConfigSection(section): value for section, value in dump.items()})
+    merged = _drop_none_values({ConfigSection(section): value for section, value in dump.items()})
+    warn_provider_keys_not_applied(merged, keys_found)
+    return merged

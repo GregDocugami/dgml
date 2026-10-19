@@ -22,6 +22,7 @@ precedence order, and what a malformed file does.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -371,3 +372,62 @@ def test_one_provider_key_form_per_layer_is_not_a_clash(workspace: Workspace) ->
     # tier of its provider in its layer, was simply unused.
     assert merged["advanced_api_key"] == "ant"
     assert "advanced_api_key_env" not in merged
+
+
+def test_provider_key_lands_on_its_own_layers_section_model(workspace: Workspace) -> None:
+    write_config(
+        workspace,
+        {"models": {"anthropic_api_key_env": "ANT"}, "generation": {"model": "anthropic/w"}},
+    )
+    generation = load_merged_config(workspace)[ConfigSection.GENERATION]
+    assert generation == {"model": "anthropic/w", "api_key_env": "ANT"}
+
+
+def test_provider_key_another_layer_holds_is_a_warning(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The key stays in its layer, but a keyless model of its provider would silently
+    take litellm's own env var instead — so that is said, once."""
+    monkeypatch.setenv("DGML_MODELS__ANTHROPIC_API_KEY_ENV", "CORP_ANT")
+    write_config(workspace, {"models": {"family": "anthropic"}})
+    merged = load_merged_config(workspace)[ConfigSection.MODELS]
+    assert "standard_api_key_env" not in merged
+    load_merged_config(workspace)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "'models.anthropic_api_key_env' in the environment does not reach" in warnings[0]
+    assert "models.standard" in warnings[0]
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        # Keys for a provider the config does not use.
+        {"family": "anthropic", "anthropic_api_key": "ant", "openai_api_key": "oai"},
+        # A key whose provider's models all have keys from their own layer.
+        {"anthropic_api_key_env": "ANT"},
+    ],
+)
+def test_provider_key_with_no_keyless_model_of_its_provider_is_quiet(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture, user: dict[str, str]
+) -> None:
+    _write_user_config({"models": user})
+    write_config(workspace, {"models": {"family": "anthropic", "anthropic_api_key": "ws"}})
+    load_merged_config(workspace)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_provider_key_skips_a_model_behind_a_custom_endpoint_without_warning(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A keyless model at an `api_base` is deliberate, not a missed provider key."""
+    _write_user_config({"models": {"openai_api_key": "sk-real"}})
+    write_config(
+        workspace,
+        {"classification": {"model": "openai/llama3", "api_base": "http://vllm:8000"}},
+    )
+    assert load_merged_config(workspace)[ConfigSection.CLASSIFICATION] == {
+        "model": "openai/llama3",
+        "api_base": "http://vllm:8000",
+    }
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

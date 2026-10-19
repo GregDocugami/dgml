@@ -30,6 +30,7 @@ from dgml_core.models_config import (
     expand_family,
     load_models_config,
     normalize_models_layer,
+    normalize_task_layer,
     provider_of,
     resolve_tiered_model,
 )
@@ -277,33 +278,47 @@ def test_section_takes_the_tier_model_whole() -> None:
     assert _resolve(merged, Tier.STANDARD, "label_") == Model("s", api_key="t", api_base="tb")
 
 
-def test_section_model_takes_no_provider_key() -> None:
-    merged = {
-        ConfigSection.MODELS: {"openai_api_key": "oai", "anthropic_api_key": "ant"},
-        ConfigSection.GENERATION: {"model": "openai/gpt", "label_model": "ollama/llama"},
-    }
-    assert _resolve(merged) == Model("openai/gpt")
-    assert _resolve(merged, prefix="label_") == Model("ollama/llama")
+def _section_layer(section: ConfigSection, table: dict[str, Any], **providers: Any) -> Model:
+    """One layer's task section given that layer's provider keys, merged and resolved."""
+    layer = normalize_task_layer(table, section, providers)
+    merged = {section: {k: v for k, v in layer.items() if v is not None}}
+    return resolve_tiered_model(
+        merged,
+        section_name=section,
+        tier=Tier.LIGHT,
+        invalid=ModelsConfigInvalid,
+        missing=ModelsConfigInvalid,
+    )
+
+
+def test_section_model_takes_its_layers_provider_key() -> None:
+    model = _section_layer(ConfigSection.GENERATION, {"model": "openai/gpt"}, openai=("oai", None))
+    assert model == Model("openai/gpt", api_key="oai")
+    # A model of another provider takes nothing.
+    model = _section_layer(
+        ConfigSection.GENERATION, {"model": "ollama/llama"}, openai=("oai", None)
+    )
+    assert model == Model("ollama/llama")
+
+
+def test_section_model_with_its_own_key_takes_no_provider_key() -> None:
+    model = _section_layer(
+        ConfigSection.GENERATION,
+        {"model": "anthropic/x", "api_key_env": "OWN"},
+        anthropic=("prov", None),
+    )
+    assert model == Model("anthropic/x", api_key_env="OWN")
 
 
 def test_section_model_behind_a_custom_endpoint_gets_no_provider_key() -> None:
     """The leak this rule exists for: `openai/llama3` at a vLLM `api_base` is a
     third-party server, and `openai_api_key` must not be sent to it."""
-    merged = {
-        ConfigSection.MODELS: {"openai_api_key": "sk-real-openai"},
-        ConfigSection.CLASSIFICATION: {
-            "model": "openai/llama3",
-            "api_base": "http://vllm.internal:8000",
-        },
-    }
-    rm = resolve_tiered_model(
-        merged,
-        section_name=ConfigSection.CLASSIFICATION,
-        tier=Tier.LIGHT,
-        invalid=ModelsConfigInvalid,
-        missing=ModelsConfigInvalid,
+    model = _section_layer(
+        ConfigSection.CLASSIFICATION,
+        {"model": "openai/llama3", "api_base": "http://vllm.internal:8000"},
+        openai=("sk-real-openai", None),
     )
-    assert rm == Model("openai/llama3", api_base="http://vllm.internal:8000")
+    assert model == Model("openai/llama3", api_base="http://vllm.internal:8000")
 
 
 def test_malformed_models_table_does_not_break_a_section_that_names_its_model() -> None:

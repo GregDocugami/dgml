@@ -176,8 +176,8 @@ class Models:
     """``[models]``: the four tiers, or a provider ``family`` that expands into them
     (an explicit tier wins over its family default). A tier is a :class:`Model`, so it
     may carry its own credentials; ``<provider>_api_key`` is written onto every tier
-    of that provider this ``Models`` sets or expands from ``family`` that carries
-    neither its own key nor an ``api_base``. Task sections carry their own."""
+    and section model of that provider in the same :class:`Configuration` that carries
+    neither its own key nor an ``api_base``."""
 
     family: str | None = None
     light: Model | None = None

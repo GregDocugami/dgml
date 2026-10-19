@@ -450,6 +450,33 @@ def test_resolve_overlay_replaces_the_models_credentials_with_them(workspace: Wo
     assert source == "profile:fast"
 
 
+def test_resolve_flag_drops_the_files_credentials_for_the_model_it_replaces(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    # The file's key and proxy were written beside the file's models; a flag's model
+    # must not inherit them. A model no flag replaces keeps its own.
+    path = tmp_path / "gen.json"
+    path.write_text(
+        json.dumps(
+            {
+                "model": MODEL,
+                "api_key_env": "ANT_KEY",
+                "api_base": "https://anthropic-proxy",
+                "label_model": LABEL_MODEL,
+                "label_api_key_env": "ANT_KEY2",
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg, _ = resolve_generation_config(workspace, config=str(path), model="openai/gpt-5")
+    assert (cfg.model, cfg.api_key_env, cfg.api_base) == ("openai/gpt-5", None, None)
+    assert (cfg.label_model, cfg.label_api_key_env) == (LABEL_MODEL, "ANT_KEY2")
+
+    cfg, _ = resolve_generation_config(workspace, config=str(path), label_model="openai/gpt-5")
+    assert (cfg.model, cfg.api_key_env) == (MODEL, "ANT_KEY")
+    assert (cfg.label_model, cfg.label_api_key_env) == ("openai/gpt-5", None)
+
+
 # ── [generation] thinking ───────────────────────────────────────────────────
 
 

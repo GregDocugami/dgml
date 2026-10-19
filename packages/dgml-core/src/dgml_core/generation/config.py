@@ -66,7 +66,7 @@ from dgml_core.errors import (
     GenerationConfigMissing,
     short_error_message,
 )
-from dgml_core.models_config import ConfigSection, Tier, resolve_tiered_model
+from dgml_core.models_config import GROUP_SUFFIXES, ConfigSection, Tier, resolve_tiered_model
 from dgml_core.storage import Workspace
 
 # Extended thinking is OFF for generation unless the config says otherwise.
@@ -277,7 +277,8 @@ def resolve_generation_config(
     still falls back to its tier, and keys outside a model group (``thinking``)
     survive. A model's credentials move with it, so a model the overlay names
     takes only the credentials the overlay sets — a workspace ``api_key_env``
-    does not follow it — else litellm reads its per-provider env var. Passing
+    does not follow it, nor does a file's or profile's follow a flag's model —
+    else litellm reads its per-provider env var. Passing
     both ``--model`` and ``--label-model`` therefore fully specifies the models
     and works with no ``[generation]`` section at all.
 
@@ -302,10 +303,12 @@ def resolve_generation_config(
         overlay = dict(load_generation_config_file(Path(config)))
         base_source = "file"
 
-    if model is not None:
-        overlay["model"] = model
-    if label_model is not None:
-        overlay["label_model"] = label_model
+    # A flag replaces the file's / profile's model and the credentials written beside it.
+    for prefix, flag in (("", model), ("label_", label_model)):
+        if flag is not None:
+            overlay[f"{prefix}model"] = flag
+            for suffix in GROUP_SUFFIXES:
+                overlay.pop(f"{prefix}{suffix}", None)
 
     overridden = model is not None or label_model is not None
     if base_source == "config":

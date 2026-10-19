@@ -190,15 +190,22 @@ def test_section_key_wins_over_tier_and_provider_keys() -> None:
     assert _resolve(cfg).api_key == "task"
 
 
-def test_section_models_never_take_a_provider_key() -> None:
-    """A task's `Model` is one group. The provider key on `Models` serves the tiers
-    `Models` sets — not a section's model, even one of that very provider."""
+def test_section_models_take_the_provider_key_of_their_provider() -> None:
+    """One `Configuration` is one layer: the provider key on `Models` serves its section
+    models as it serves its tiers — not a model of another provider, and not one at a
+    custom `api_base`. Otherwise a keyless section model would read the server's own
+    `ANTHROPIC_API_KEY`, not the one this configuration was given."""
     cfg = _build(
-        models=Models(family="anthropic", anthropic_api_key="ant"),
+        models=Models(anthropic_api_key="ant"),
         grounded=Grounded(schema_model=Model("anthropic/y"), values_model=Model("openai/gpt-4o")),
+        classification=Classification(model=Model("anthropic/z", api_base="https://proxy")),
     )
-    assert _resolve(cfg, Tier.EXPERT, "schema_") == Model("anthropic/y")
+    assert _resolve(cfg, Tier.EXPERT, "schema_") == Model("anthropic/y", api_key="ant")
     assert _resolve(cfg) == Model("openai/gpt-4o")
+    assert cfg.sections[ConfigSection.CLASSIFICATION] == {
+        "model": "anthropic/z",
+        "api_base": "https://proxy",
+    }
 
 
 def test_no_key_anywhere_leaves_litellm_its_env_var() -> None:
