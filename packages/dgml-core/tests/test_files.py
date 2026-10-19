@@ -114,7 +114,6 @@ def test_add_pdf(store: FileStore, sample_pdf: Path) -> None:
     assert result.record.pdf_converter is None
     pages = _page_images(store.ws, result.record.id)
     assert len(pages) == 2
-    assert store.ws.blobs.get_blob(pages[0]).startswith(b"\xff\xd8\xff")
 
 
 def test_add_pdf_with_pypdfium2_renderer(store: FileStore, sample_pdf: Path) -> None:
@@ -149,9 +148,11 @@ def test_add_pdf_custom_dpi_is_rendered_and_recorded(store: FileStore, sample_pd
 
 def _page_images(ws: Workspace, file_id: str) -> list[str]:
     """Sorted page-image blob keys for ``file_id`` (store analogue of globbing
-    page_*.jpg in the page-images dir)."""
+    page_*.{jpg,png} in the page-images dir)."""
     return sorted(
-        k for k in ws.blobs.list_blobs(layout.file_pages_prefix(file_id)) if k.endswith(".jpg")
+        k
+        for k in ws.blobs.list_blobs(layout.file_pages_prefix(file_id))
+        if k.endswith((".jpg", ".png"))
     )
 
 

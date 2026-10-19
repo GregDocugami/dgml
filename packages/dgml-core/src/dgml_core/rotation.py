@@ -66,7 +66,7 @@ def deskew_page(
     clockwise skew) and every box rotated by the matching transform. Boxes
     that rotate entirely out of the (possibly re-sized) frame are dropped.
     The image is re-encoded in its own format (a JPEG page stays a JPEG, a
-    legacy PNG a PNG), since it is written back under the same name.
+    PNG page a PNG), since it is written back under the same name.
     """
     from PIL import Image
 

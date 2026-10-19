@@ -55,6 +55,7 @@ before implementing one.
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 import shutil
@@ -91,10 +92,13 @@ _ENGINE_PAGE_GLOB = "page_*.png"
 # interpolates the render rather than rasterizing at a higher resolution.
 PAGE_MAX_EDGE = 3508
 PAGE_MIN_EDGE = 1000
-# JPEG quality for stored page images. A text-only page is several times
-# larger as a JPEG than as a PNG (~0.8-1.1 MB vs ~0.1 MB for Letter at 300
-# dpi), but a photo-heavy page drops from ~17 MB to ~3 MB, and it is the
-# heavy pages that break consumers. 90 keeps small glyphs clean for OCR.
+# JPEG quality for stored page images. 90 keeps small glyphs clean for OCR.
+#
+# Each page is stored as whichever of PNG and JPEG is smaller. Neither wins
+# everywhere: a ghostscript text page (crisp, unantialiased glyphs on white) is
+# ~0.1 MB as a PNG and ~1 MB as a JPEG, while a photo-heavy or scanned page is
+# ~15 MB as a PNG and ~2 MB as a JPEG — and it is the heavy pages that break
+# consumers. A page's extension says which it is.
 PAGE_JPEG_QUALITY = 90
 
 # Optional content-addressed render cache. When ``$DGML_PAGE_CACHE`` names a
@@ -197,7 +201,7 @@ def _check_no_extra_fields(engine: EngineName, section: dict[str, Any]) -> None:
 @dataclass(frozen=True)
 class PageImageSpec:
     """The longest-edge bounds each rendered page is fit into before it is
-    stored as a JPEG.
+    stored.
 
     This decides the page images' *pixel space*, which ``page_text/`` word
     boxes and every ``dg:origin`` attribute are expressed in, so digital text
@@ -480,7 +484,8 @@ def _pdf_cache_key(
     """
     spec = image_spec
     digest = hashlib.sha256(
-        f"{renderer.value}:{dpi}:{spec.min_edge}:{spec.max_edge}:{PAGE_JPEG_QUALITY}\n".encode()
+        f"{renderer.value}:{dpi}:{spec.min_edge}:{spec.max_edge}:{PAGE_JPEG_QUALITY}:"
+        f"smaller-of-png-jpeg\n".encode()
     )
     with pdf_path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
@@ -507,8 +512,8 @@ def _replace_pages_from(src_dir: Path, output_dir: Path) -> int:
 
 def _store_pages(raw_dir: Path, output_dir: Path, image_spec: PageImageSpec) -> int:
     """Fit each engine PNG in ``raw_dir`` to ``image_spec`` and store it in
-    ``output_dir`` as a JPEG, resizing with Lanczos when the page falls outside
-    the bounds. Returns the page count.
+    ``output_dir`` as the smaller of PNG and JPEG, resizing with Lanczos when
+    the page falls outside the bounds. Returns the page count.
 
     Raises :class:`PageRenderFailed` for an engine image Pillow cannot read.
     """
@@ -519,9 +524,8 @@ def _store_pages(raw_dir: Path, output_dir: Path, image_spec: PageImageSpec) -> 
         page = page_number_from_image_name(raw.name)
         if page is None:
             continue
-        target = output_dir / (layout.PAGE_IMAGE_TEMPLATE % (page, layout.PAGE_IMAGE_EXT))
         try:
-            _store_page(raw, target, image_spec)
+            _store_page(raw, output_dir, page, image_spec)
         except (OSError, SyntaxError, ValueError) as exc:
             # SyntaxError is how Pillow's PNG plugin reports a malformed file.
             raise PageRenderFailed(f"could not store the render of page {page}: {exc}") from exc
@@ -529,10 +533,19 @@ def _store_pages(raw_dir: Path, output_dir: Path, image_spec: PageImageSpec) -> 
     return stored
 
 
-def _store_page(raw: Path, target: Path, image_spec: PageImageSpec) -> None:
-    """Fit one engine PNG and store it as a JPEG at ``target`` (see :func:`_store_pages`)."""
+def _store_page(raw: Path, output_dir: Path, page: int, image_spec: PageImageSpec) -> None:
+    """Fit one engine PNG and store page ``page`` in ``output_dir`` as
+    ``page_<page>.png`` or ``page_<page>.jpg``, whichever encoding is smaller
+    (see :func:`_store_pages`). A tie keeps the lossless PNG.
+
+    A page the fit leaves at its rendered size keeps the engine's own PNG
+    bytes as the PNG candidate, so only the JPEG is encoded; a resized page
+    encodes both.
+    """
     from PIL import Image, PngImagePlugin
 
+    jpeg = io.BytesIO()
+    png: bytes | None = None
     # The engine's own output, so Image.open's decompression-bomb guard
     # (aimed at untrusted input) would only refuse a legitimately huge
     # sheet — the very page this step exists to shrink. Opening through
@@ -544,7 +557,23 @@ def _store_page(raw: Path, target: Path, image_spec: PageImageSpec) -> None:
             stored = rendered.resize(size, Image.Resampling.LANCZOS, reducing_gap=3.0)
         if stored.mode not in ("RGB", "L"):
             stored = stored.convert("RGB")
-        stored.save(target, format="JPEG", quality=PAGE_JPEG_QUALITY, optimize=True)
+        stored.save(jpeg, format="JPEG", quality=PAGE_JPEG_QUALITY, optimize=True)
+        if stored is not rendered:
+            buf = io.BytesIO()
+            stored.save(buf, format="PNG")
+            png = buf.getvalue()
+    png_size = len(png) if png is not None else raw.stat().st_size
+
+    def target(ext: str) -> Path:
+        return output_dir / (layout.PAGE_IMAGE_TEMPLATE % (page, ext))
+
+    if png_size <= jpeg.getbuffer().nbytes:
+        if png is None:
+            shutil.move(raw, target(layout.PNG_PAGE_IMAGE_EXT))
+        else:
+            target(layout.PNG_PAGE_IMAGE_EXT).write_bytes(png)
+    else:
+        target(layout.JPEG_PAGE_IMAGE_EXT).write_bytes(jpeg.getvalue())
 
 
 def render_pages(
@@ -570,13 +599,12 @@ def render_pages(
     word boxes are expressed in *this* render's pixel space.
 
     ``image_spec`` bounds each page's longest edge (:class:`PageImageSpec`;
-    ``[PAGE_MIN_EDGE, PAGE_MAX_EDGE]`` by default) and the page is stored as a
-    JPEG. A page outside the bounds is stored at :meth:`PageImageSpec.fit`
-    of its rendered size, so its effective resolution differs from ``dpi`` —
-    digital text extraction must be given the same spec to land in the same
-    pixel space. JPEG, not PNG, because a photo-heavy or scanned page can be
-    an order of magnitude larger as a PNG (tens of megabytes), past what vision
-    models accept, while a JPEG of a text page stays around a megabyte.
+    ``[PAGE_MIN_EDGE, PAGE_MAX_EDGE]`` by default), and each page is stored as
+    whichever of PNG and JPEG is smaller (see :data:`PAGE_JPEG_QUALITY`). A
+    page outside the bounds is stored at :meth:`PageImageSpec.fit` of its
+    rendered size, so its effective resolution differs from ``dpi`` — digital
+    text extraction must be given the same spec to land in the same pixel
+    space.
 
     When ``$DGML_PAGE_CACHE`` is set, an identical PDF (same bytes, renderer,
     dpi, and edge bounds) rendered before is served from that cache without invoking

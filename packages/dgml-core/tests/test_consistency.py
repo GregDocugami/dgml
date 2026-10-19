@@ -33,9 +33,9 @@ from .conftest import local_tree_path, needs_gs
 
 def _page_images(ws: Workspace, file_id: str) -> list[str]:
     """Rendered page-image blob keys for ``file_id`` — the store analogue of
-    globbing ``page_*.jpg`` in the workspace's page-images dir."""
+    globbing ``page_*.{jpg,png}`` in the workspace's page-images dir."""
     prefix = layout.file_pages_prefix(file_id)
-    return [k for k in ws.blobs.list_blobs(prefix) if k.endswith(".jpg")]
+    return [k for k in ws.blobs.list_blobs(prefix) if k.endswith((".jpg", ".png"))]
 
 
 @needs_gs

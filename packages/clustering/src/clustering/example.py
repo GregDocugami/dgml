@@ -99,8 +99,8 @@ class WorkspaceDataset(DocumentDataset):
 def _page_one_image(file_dir: Path) -> Path | None:
     """Return the page-1 image for a workspace file, or None if absent.
 
-    The DGML renderer emits ``page_images/page_<n>.jpg``; files added before
-    it moved to JPEG carry ``.png``. Resolve by extension-agnostic glob rather
+    The DGML renderer emits ``page_images/page_<n>.jpg`` or ``.png``, whichever
+    encoding was smaller for that page. Resolve by extension-agnostic glob rather
     than hardcoding a suffix so this tracks the renderer's format.
     """
     matches = sorted((file_dir / "page_images").glob("page_1.*"))

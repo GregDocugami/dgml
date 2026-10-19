@@ -17,7 +17,7 @@ together, constitute everything DGML knows about that file at a moment
 in time. Five artifact categories participate:
 
 1. Source document (binary) — the original ``.pdf``/``.docx``/… (slot ``source``)
-2. Page images, one JPEG per page (a PNG for a file rendered before JPEG) (binary)
+2. Page images, one JPEG or PNG per page (binary)
 3. The DocSet's ``full-schema.rnc`` generation tag schema (binary — raw RNC
    bytes; docset-scoped). The RNC render is lossless over ``schema.json``
    (every field survives as ``# Field: value`` comments), so attesting it
@@ -221,7 +221,7 @@ def _page_num(path: Path) -> int:
     loudly beats silently sorting alphabetically.
     """
     # The render pipeline's own parser, so attestation accepts exactly the
-    # extensions it stores (JPEG, and legacy PNG) rather than a guess.
+    # extensions it stores (JPEG and PNG) rather than a guess.
     number = page_number_from_image_name(path.name)
     if number is None:
         raise ValueError(f"unexpected file name '{path.name}' (expected 'page_N.<ext>')")

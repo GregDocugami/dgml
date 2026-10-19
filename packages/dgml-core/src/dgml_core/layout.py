@@ -90,12 +90,12 @@ FULL_SCHEMA_FILE = "full-schema.rnc"
 # under ``dgml --debug docset generate``.
 COVERAGE_REPORT_FILE = "coverage_report.json"
 PAGE_IMAGE_TEMPLATE = "page_%d.%s"
-# Page images are stored as JPEG. Files added before that change carry PNG
-# renders, which stay valid (their ``page_text/`` boxes are in those images'
-# pixels), so readers accept either extension.
-PAGE_IMAGE_EXT = "jpg"
-LEGACY_PAGE_IMAGE_EXT = "png"
-PAGE_IMAGE_EXTS: tuple[str, ...] = (PAGE_IMAGE_EXT, LEGACY_PAGE_IMAGE_EXT)
+# Each page image is stored as whichever of JPEG and PNG is smaller (see
+# ``dgml_core.pages``), so one file's pages can mix the two, and files added
+# before that change are all PNG. Readers accept either extension.
+JPEG_PAGE_IMAGE_EXT = "jpg"
+PNG_PAGE_IMAGE_EXT = "png"
+PAGE_IMAGE_EXTS: tuple[str, ...] = (JPEG_PAGE_IMAGE_EXT, PNG_PAGE_IMAGE_EXT)
 PAGE_TEXT_TEMPLATE = "page_%d.json"
 DGML_XML_SUFFIX = ".dgml.xml"
 
@@ -172,10 +172,10 @@ def file_pages_prefix(file_id: str) -> str:
     return f"{file_prefix(file_id)}{PAGE_IMAGES_DIR}/"
 
 
-def file_page_image_key(file_id: str, page: int, ext: str = PAGE_IMAGE_EXT) -> str:
-    """Key of page ``page``'s image. ``ext`` defaults to today's format; a
-    reader that must also find a legacy render goes through
-    :func:`dgml_core.utils.page_image_key`."""
+def file_page_image_key(file_id: str, page: int, ext: str = JPEG_PAGE_IMAGE_EXT) -> str:
+    """Key of page ``page``'s image stored with extension ``ext``. A page's
+    extension depends on which encoding was smaller, so a reader resolves it
+    through :func:`dgml_core.utils.page_image_key` rather than assuming one."""
     return f"{file_pages_prefix(file_id)}{PAGE_IMAGE_TEMPLATE % (page, ext)}"
 
 

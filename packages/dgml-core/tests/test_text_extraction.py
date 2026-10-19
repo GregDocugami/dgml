@@ -115,6 +115,7 @@ def test_extract_text_digital_lands_in_the_stored_image_of_a_refit_page(
         PAGE_CACHE_ENV,
         PageImageSpec,
         PdfConfig,
+        list_page_images,
         render_pages,
     )
 
@@ -126,7 +127,8 @@ def test_extract_text_digital_lands_in_the_stored_image_of_a_refit_page(
 
     images = tmp_path / "images"
     render_pages(pdf, images, config=PdfConfig(provider=EngineName.PYPDFIUM2))
-    stored = _image_dimensions((images / "page_1.jpg").read_bytes())
+    (image,) = list_page_images(images)
+    stored = _image_dimensions(image.read_bytes())
 
     extract_text_digital(pdf, tmp_path / "fit", file_id="f")
     fit = json.loads((tmp_path / "fit" / "page_1.json").read_text())

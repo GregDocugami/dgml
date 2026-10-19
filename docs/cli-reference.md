@@ -1833,8 +1833,9 @@ failed at `file add` (the message repeats the converter's error).
 ### `dgml file add <path> [--id FILE_ID] [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--dpi N] [--auto-classify [MODE]] [--batch]`
 
 Add a File. The source is copied into the workspace, hashed, its pages
-are rendered via `gs` (300 dpi by default — see `--dpi`) and stored as JPEGs
-whose longest edge is fit between 1000 and 3508 pixels (see
+are rendered via `gs` (300 dpi by default — see `--dpi`) and stored, each as
+the smaller of PNG and JPEG, with the longest edge fit between 1000 and 3508
+pixels (see
 [Page images](storage-layout.md#page-images-jpeg-edge-bounds)), and per-page
 word boxes are written to `page_text/` according to `--text-mode`.
 

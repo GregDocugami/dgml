@@ -551,7 +551,7 @@ def _routes(app: FastAPI) -> None:
             data = ws.blobs.get_blob(key)
         except FileNotFoundError:
             raise HTTPException(404, f"no page image {page} for file {file_id!r}") from None
-        # JPEG today; a file added before page images moved to JPEG has PNGs.
+        # A page image is a JPEG or a PNG, whichever encoding was smaller.
         media_type = "image/png" if key.endswith(".png") else "image/jpeg"
         return Response(data, media_type=media_type, headers={"Cache-Control": "max-age=3600"})
 

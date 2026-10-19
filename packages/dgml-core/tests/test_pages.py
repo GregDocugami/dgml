@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from dgml_core import pages, pages_ghostscript
@@ -69,6 +70,19 @@ def _image(path: Path) -> tuple[str, tuple[int, int]]:
 
     with Image.open(path) as im:
         return str(im.format), im.size
+
+
+def _stored(out: Path, page: int = 1) -> tuple[str, tuple[int, int]]:
+    """``(format, size)`` of page ``page`` in ``out``, whichever encoding it
+    was stored with; the extension must agree with the format."""
+    (path,) = [p for p in list_page_images(out) if page_number_from_image_name(p.name) == page]
+    fmt, size = _image(path)
+    assert {"JPEG": ".jpg", "PNG": ".png"}[fmt] == path.suffix, path
+    return fmt, size
+
+
+def _stems(out: Path) -> list[str]:
+    return [p.stem for p in list_page_images(out)]
 
 
 def _engine_png(width: int = 1275, height: int = 1650) -> bytes:
@@ -136,11 +150,7 @@ def test_cache_miss_populates_then_hit_skips_ghostscript(
     out1 = tmp_path / "out1"
     assert render_pages(pdf, out1) == 3
     assert len(calls) == 1  # miss -> one render
-    assert [p.name for p in list_page_images(out1)] == [
-        "page_1.jpg",
-        "page_2.jpg",
-        "page_3.jpg",
-    ]
+    assert _stems(out1) == ["page_1", "page_2", "page_3"]
 
     # A later render of identical bytes into a fresh dir is served from cache;
     # ghostscript must not be invoked again — assert by making it fail loudly.
@@ -152,11 +162,7 @@ def test_cache_miss_populates_then_hit_skips_ghostscript(
     out2 = tmp_path / "out2"
     assert render_pages(pdf, out2) == 3
     assert len(calls) == 1  # still one — the hit copied from cache
-    assert [p.name for p in list_page_images(out2)] == [
-        "page_1.jpg",
-        "page_2.jpg",
-        "page_3.jpg",
-    ]
+    assert _stems(out2) == ["page_1", "page_2", "page_3"]
 
 
 def test_cache_key_differs_by_content(
@@ -280,15 +286,13 @@ def test_pypdfium2_renders_all_pages(tmp_path: Path, monkeypatch: pytest.MonkeyP
     out = tmp_path / "out"
     config = PdfConfig(provider=EngineName.PYPDFIUM2)
     assert render_pages(pdf_path, out, dpi=72, config=config) == 2
-    images = [p.name for p in list_page_images(out)]
-    assert images == ["page_1.jpg", "page_2.jpg"]
-    for name in images:
-        assert (out / name).read_bytes().startswith(b"\xff\xd8\xff")
+    assert _stems(out) == ["page_1", "page_2"]
+    for page in (1, 2):
+        _stored(out, page)
 
 
 def test_pypdfium2_dpi_scales_pixel_dimensions(tmp_path: Path) -> None:
     # US Letter is 612x792 pt; at 72 dpi that's 612x792 px, at 144 dpi doubled.
-    from dgml_core.ocr import _image_dimensions
 
     pdf_path = tmp_path / "doc.pdf"
     _write_text_pdf(pdf_path, pages_text=["Hello"])
@@ -297,11 +301,11 @@ def test_pypdfium2_dpi_scales_pixel_dimensions(tmp_path: Path) -> None:
     out72 = tmp_path / "out72"
     unbounded = PageImageSpec(min_edge=None, max_edge=None)
     render_pages(pdf_path, out72, dpi=72, config=config, image_spec=unbounded)
-    assert _image_dimensions((out72 / "page_1.jpg").read_bytes()) == (612, 792)
+    assert _stored(out72)[1] == (612, 792)
 
     out144 = tmp_path / "out144"
     render_pages(pdf_path, out144, dpi=144, config=config)
-    assert _image_dimensions((out144 / "page_1.jpg").read_bytes()) == (1224, 1584)
+    assert _stored(out144)[1] == (1224, 1584)
 
 
 def test_pypdfium2_unreadable_pdf_raises_page_render_failed(tmp_path: Path) -> None:
@@ -399,7 +403,7 @@ def test_render_dimensions_are_exactly_mediabox_times_dpi(
 
     out = tmp_path / f"out{dpi}"
     render_pages(pdf_path, out, dpi=dpi, config=PdfConfig(provider=provider))
-    assert _image(out / "page_1.jpg") == ("JPEG", DEFAULT_PAGE_IMAGE_SPEC.fit(*expected))
+    assert _stored(out)[1] == DEFAULT_PAGE_IMAGE_SPEC.fit(*expected)
 
 
 @pytest.mark.parametrize("provider", [EngineName.GHOSTSCRIPT, EngineName.PYPDFIUM2])
@@ -418,7 +422,7 @@ def test_render_uses_mediabox_not_cropbox(
     out = tmp_path / "out"
     render_pages(pdf_path, out, dpi=300, config=PdfConfig(provider=provider))
     # MediaBox is US Letter, so the raster is the full 2550x3300 regardless.
-    assert _image(out / "page_1.jpg") == ("JPEG", (2550, 3300))
+    assert _stored(out)[1] == (2550, 3300)
 
 
 @pytest.mark.parametrize("provider", [EngineName.GHOSTSCRIPT, EngineName.PYPDFIUM2])
@@ -436,7 +440,7 @@ def test_render_ignores_overstated_page_count(
     _write_pdf_with_bad_count(pdf_path, real_pages=2, declared=5)
     out = tmp_path / "out"
     assert render_pages(pdf_path, out, dpi=72, config=PdfConfig(provider=provider)) == 2
-    assert [p.name for p in list_page_images(out)] == ["page_1.jpg", "page_2.jpg"]
+    assert _stems(out) == ["page_1", "page_2"]
 
 
 @pytest.mark.parametrize("provider", [EngineName.GHOSTSCRIPT, EngineName.PYPDFIUM2])
@@ -533,7 +537,7 @@ def test_render_scales_a_large_sheet_to_the_max_edge(
     tmp_path: Path, provider: EngineName, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A large-format page is stored with its longest edge at the cap, aspect
-    kept, as a JPEG — however big the engine's own render was."""
+    kept — however big the engine's own render was."""
     monkeypatch.delenv(PAGE_CACHE_ENV, raising=False)
     pdf_path = tmp_path / "sheet.pdf"
     # A2 portrait: 1190.55 x 1683.78 pt, 4961 x 7016 px at 300 dpi.
@@ -541,8 +545,7 @@ def test_render_scales_a_large_sheet_to_the_max_edge(
     out = tmp_path / "out"
     render_pages(pdf_path, out, dpi=300, config=PdfConfig(provider=provider))
     rendered = (round(1190.55 * 300 / 72), round(1683.78 * 300 / 72))
-    fmt, size = _image(out / "page_1.jpg")
-    assert fmt == "JPEG"
+    _, size = _stored(out)
     assert size == DEFAULT_PAGE_IMAGE_SPEC.fit(*rendered)
     assert max(size) == PAGE_MAX_EDGE
 
@@ -561,7 +564,7 @@ def test_render_skips_the_decompression_bomb_guard_for_its_own_output(
     with monkeypatch.context() as m:
         m.setattr(Image, "MAX_IMAGE_PIXELS", 1_000_000)
         render_pages(pdf, tmp_path / "out")
-    assert _image(tmp_path / "out" / "page_1.jpg") == ("JPEG", (2806, PAGE_MAX_EDGE))
+    assert _stored(tmp_path / "out")[1] == (2806, PAGE_MAX_EDGE)
 
 
 def test_render_clears_stale_images_of_either_extension(
@@ -575,7 +578,7 @@ def test_render_clears_stale_images_of_either_extension(
     (out / "page_1.png").write_bytes(b"old legacy render")
     (out / "page_7.jpg").write_bytes(b"old longer render")
     assert render_pages(pdf, out) == 1
-    assert [p.name for p in list_page_images(out)] == ["page_1.jpg"]
+    assert _stems(out) == ["page_1"]
 
 
 def test_render_reports_an_unreadable_engine_image(
@@ -592,3 +595,81 @@ def test_render_reports_an_unreadable_engine_image(
     monkeypatch.setattr(subprocess, "run", broken)
     with pytest.raises(PageRenderFailed, match="page 1"):
         render_pages(pdf, tmp_path / "out")
+
+
+# ---------------------------------------------------------------------------
+# Format choice — each page is stored as the smaller of PNG and JPEG
+# ---------------------------------------------------------------------------
+
+
+def _noise_png(width: int, height: int) -> bytes:
+    """A photo-like (incompressible) PNG, which a JPEG beats by far."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.effect_noise((width, height), 64).convert("RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _fake_gs_writing(monkeypatch: pytest.MonkeyPatch, png: bytes) -> None:
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        template = next(a.split("=", 1)[1] for a in cmd if a.startswith("-sOutputFile="))
+        Path(template.replace("%d", "1")).write_bytes(png)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.delenv(PAGE_CACHE_ENV, raising=False)
+    monkeypatch.setattr(pages_ghostscript, "ghostscript_path", lambda: "gs")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def test_a_flat_page_inside_the_bounds_keeps_the_engine_png(
+    tmp_path: Path, pdf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A text-like page compresses far better losslessly; unresized, the
+    engine's own PNG bytes are stored as they are, with no re-encode."""
+    engine = _engine_png(1275, 1650)
+    _fake_gs_writing(monkeypatch, engine)
+    render_pages(pdf, tmp_path / "out")
+    assert (tmp_path / "out" / "page_1.png").read_bytes() == engine
+    assert _stems(tmp_path / "out") == ["page_1"]
+
+
+def test_a_photo_like_page_is_stored_as_jpeg(
+    tmp_path: Path, pdf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_gs_writing(monkeypatch, _noise_png(1275, 1650))
+    render_pages(pdf, tmp_path / "out")
+    assert _stored(tmp_path / "out") == ("JPEG", (1275, 1650))
+
+
+@pytest.mark.parametrize(("make", "fmt"), [(_engine_png, "PNG"), (_noise_png, "JPEG")])
+def test_a_resized_page_is_stored_as_the_smaller_encoding(
+    tmp_path: Path, pdf: Path, monkeypatch: pytest.MonkeyPatch, make: Any, fmt: str
+) -> None:
+    """A refit page has no engine bytes to reuse, so both encodings are made
+    from the resized image and the smaller kept."""
+    _fake_gs_writing(monkeypatch, make(600, 400))
+    render_pages(pdf, tmp_path / "out")
+    assert _stored(tmp_path / "out") == (fmt, (PAGE_MIN_EDGE, 667))
+
+
+def test_one_file_can_mix_formats(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The choice is per page: a text page and a photo page of one PDF land as
+    a PNG and a JPEG, and both are listed in page order."""
+    monkeypatch.delenv(PAGE_CACHE_ENV, raising=False)
+    monkeypatch.setattr(pages_ghostscript, "ghostscript_path", lambda: "gs")
+    pngs = {1: _engine_png(1275, 1650), 2: _noise_png(1275, 1650)}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        template = next(a.split("=", 1)[1] for a in cmd if a.startswith("-sOutputFile="))
+        for n, png in pngs.items():
+            Path(template.replace("%d", str(n))).write_bytes(png)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    doc = tmp_path / "doc.pdf"
+    doc.write_bytes(b"%PDF-1.4 two pages")
+    assert render_pages(doc, tmp_path / "out") == 2
+    assert [p.name for p in list_page_images(tmp_path / "out")] == ["page_1.png", "page_2.jpg"]

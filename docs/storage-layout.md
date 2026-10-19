@@ -99,7 +99,7 @@ at all — see [storage services](#storage-services-storage).
         │                             #   not already a PDF; what pages/text and
         │                             #   generation use (see docs/conversion.md)
         ├── file.json                 # metadata (see schema below)
-        ├── page_images/              # JPEG page renders at page_image_dpi
+        ├── page_images/              # JPEG/PNG page renders at page_image_dpi
         │                             #   (300 by default), fit to the page-edge
         │                             #   bounds (see below; cacheable)
         │   ├── page_1.jpg
@@ -124,8 +124,10 @@ DocSet IDs are always generated today.
 ## Page images (JPEG, edge bounds)
 
 Each page is rendered at the file's dpi (`page_image_dpi`, 300 by default) and
-then stored as a JPEG (quality 90) whose **longest edge is between 1000 and
-3508 pixels**. A page whose render already falls in that range — Letter (2550 ×
+then stored with its **longest edge between 1000 and 3508 pixels**, as a PNG
+(`page_N.png`) or a JPEG at quality 90 (`page_N.jpg`), whichever is smaller for
+that page — a crisp text page is usually far smaller as a PNG, a photo or scan
+far smaller as a JPEG, so one file's pages can mix the two. A page whose render already falls in that range — Letter (2550 ×
 3300) and A4 (2480 × 3508) at 300 dpi — is stored at exactly its render size; a
 large-format sheet is scaled down to a 3508-pixel long edge, and a small page
 (or a low `--dpi`) is scaled up to a 1000-pixel one. The scale is uniform, so
@@ -136,10 +138,10 @@ applies the same fit, so `page_text/` and `dg:origin` boxes always match the
 stored image, refit or not. The bounds are not recorded per file; `dgml check`
 repairs with the current ones.
 
-Files added before page images moved to JPEG have **full-size PNG** renders
+Files added before the edge bounds have **full-size PNG** renders
 (`page_N.png`). They stay valid — their boxes are in those PNGs' pixels — and
 every reader accepts either extension. If `dgml check` has to re-render such a
-file's pages, it writes bounded JPEGs: identical geometry for a page already
+file's pages, it writes bounded images: identical geometry for a page already
 inside the bounds, but a page outside them (a large-format sheet, or a
 `--dpi` low enough to fall under the min edge) no longer matches its stored
 `page_text/` boxes. Delete and re-add such a file instead, which re-extracts
@@ -165,7 +167,7 @@ The cache is **off by default**; unset, rendering is unchanged. It is keyed by
 content, not by workspace — so it pays off when the same PDFs are ingested into
 many workspaces (e.g. the clustering sweep's per-cell workspaces in
 [evaluation/clustering/](../evaluation/clustering/), which sets it automatically;
-`--no-page-cache` opts out). Entries are plain `<hash>/page_*.jpg` directories
+`--no-page-cache` opts out). Entries are plain `<hash>/page_*.{jpg,png}` directories
 and are safe to delete at any time.
 
 ## Staging scratch space (`$TMPDIR`)
