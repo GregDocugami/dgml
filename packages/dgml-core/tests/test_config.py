@@ -229,6 +229,17 @@ def test_unknown_family_is_not_expanded(workspace: Workspace) -> None:
     assert load_merged_config(workspace)[ConfigSection.MODELS] == {"family": "nope"}
 
 
+def test_unknown_family_under_a_valid_one_still_checks_its_layer(workspace: Workspace) -> None:
+    """The workspace's valid family would hide the user layer's typo, so that layer's
+    own checks must still run: its stray tier key reports the misspelled family."""
+    _write_user_config(
+        {"models": {"family": "antropic", "openai_api_key": "sk", "light_api_key": "k"}}
+    )
+    write_config(workspace, {"models": {"family": "openai"}})
+    with pytest.raises(ModelsConfigInvalid, match=r"got 'antropic'"):
+        load_merged_config(workspace)
+
+
 def test_env_var_sets_family(workspace: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DGML_MODELS__FAMILY", "openai")
     assert load_merged_config(workspace)[ConfigSection.MODELS]["family"] == "openai"

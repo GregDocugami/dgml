@@ -262,6 +262,12 @@ def _complete_group(table: dict[str, Any], prefix: str) -> None:
         table.setdefault(f"{prefix}{suffix}", None)
 
 
+def _unknown_family(family: str) -> ModelsConfigInvalid:
+    return ModelsConfigInvalid(
+        f"'models.family' must be one of {', '.join(sorted(PROVIDER_MODELS))}; got {family!r}"
+    )
+
+
 def provider_keys(models: dict[str, Any]) -> dict[str, Credentials]:
     """One layer's ``<provider>_api_key`` / ``_env`` pairs, validated; a provider with
     neither is left out."""
@@ -300,10 +306,13 @@ def normalize_models_layer(models: dict[str, Any]) -> dict[str, Any]:
     The provider keys are validated and **consumed** here — written onto this layer's
     tiers, then dropped — so they never reach the merged table. Two layers may each
     hold one form of a provider's key; only both forms in one layer is a clash. The
-    layer's task-section models take them too (:func:`normalize_task_layer`)."""
+    layer's task-section models take them too (:func:`normalize_task_layer`).
+
+    An unknown ``family`` is not expanded but skips none of the rest; it stays in the
+    table for :func:`load_models_config` to report. A stray tier credential beside it
+    reports the family, the likelier mistake, rather than the credential."""
     family = models.get("family")
-    if isinstance(family, str) and family not in PROVIDER_MODELS:
-        return dict(models)  # the family is the error; load_models_config reports it
+    unknown_family = isinstance(family, str) and family not in PROVIDER_MODELS
     out = dict(expand_family(models))
     providers = provider_keys(out)
     for p in PROVIDERS:
@@ -314,6 +323,8 @@ def normalize_models_layer(models: dict[str, Any]) -> dict[str, Any]:
         model = out.get(t.value)
         if model is None:
             stray = [s for s in GROUP_SUFFIXES if out.get(f"{prefix}{s}") is not None]
+            if stray and unknown_family:
+                raise _unknown_family(str(family))
             if stray:
                 raise ModelsConfigInvalid(
                     f"'models.{prefix}{stray[0]}' is set but 'models.{t}' is not in this config "
@@ -424,9 +435,7 @@ def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
     invalid = ModelsConfigInvalid
     family = _opt_str(section.get("family"), "models.family", invalid)
     if family is not None and family not in PROVIDER_MODELS:
-        raise invalid(
-            f"'models.family' must be one of {', '.join(sorted(PROVIDER_MODELS))}; got {family!r}"
-        )
+        raise _unknown_family(family)
     tiers: dict[str, Model] = {}
     for t in TIERS:
         model = _opt_str(section.get(t.value), f"models.{t}", invalid)

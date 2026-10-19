@@ -345,12 +345,27 @@ def test_normalize_rejects_a_tier_credential_without_its_tier_in_the_layer() -> 
     assert out["light_api_key"] == "k"
 
 
-def test_normalize_leaves_an_unknown_family_for_load_to_report() -> None:
+def test_normalize_reports_a_stray_tier_key_beside_an_unknown_family_as_the_family() -> None:
     """A misspelled family with a tier key is the family's error, not the key's."""
-    layer = {"family": "antropic", "light_api_key": "k"}
-    assert normalize_models_layer(layer) == layer
     with pytest.raises(ModelsConfigInvalid, match=r"'models\.family' must be one of"):
-        load_models_config(_merged(layer))
+        normalize_models_layer({"family": "antropic", "light_api_key": "k"})
+
+
+def test_normalize_runs_the_layer_checks_despite_an_unknown_family() -> None:
+    """Only the expansion is skipped: provider keys are still applied and consumed, and
+    explicit tiers still have their groups completed. The family is left for load."""
+    out = normalize_models_layer(
+        {"family": "antropic", "standard": "anthropic/x", "anthropic_api_key": "k"}
+    )
+    assert out == {
+        "family": "antropic",
+        "standard": "anthropic/x",
+        "standard_api_key": "k",
+        "standard_api_key_env": None,
+        "standard_api_base": None,
+    }
+    with pytest.raises(ModelsConfigInvalid, match=r"'models\.family' must be one of"):
+        load_models_config(_merged(out))
 
 
 def test_normalize_rejects_a_section_credential_without_its_model_in_the_layer() -> None:
