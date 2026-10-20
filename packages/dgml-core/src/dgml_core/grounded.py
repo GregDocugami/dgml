@@ -34,7 +34,7 @@ This module powers two CLI surfaces:
 
 Coordinate space contract:
 - Bounding boxes are integer image pixels ``[left, top, right, bottom]``
-  (top-left origin) at 300 dpi, relative to ``page_images/page_N.png`` —
+  (top-left origin), relative to ``page_images/page_N.{png,jpg}`` —
   one convention end-to-end. This is what ``page_text/page_N.json``
   stores, what the ``extracted_value`` form uses in schemas and values,
   and what the ``get_page_words`` tool hands the model. The model reads
@@ -57,6 +57,7 @@ import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -125,8 +126,14 @@ from .matching import (
     walk_unprinted_leaves,
 )
 from .models_config import ConfigSection, Tier, resolve_tiered_model
-from .ocr import _image_dimensions as _png_dimensions
-from .pages import PdfConfig, load_pdf_config, pdf_page_count_bytes, slice_pages
+from .ocr import _image_dimensions
+from .pages import (
+    PdfConfig,
+    load_pdf_config,
+    pdf_page_count_bytes,
+    pinned_slice,
+    slice_pages,
+)
 from .prompts import PromptKey
 from .prompts import get as prompt
 from .storage import Workspace
@@ -147,6 +154,7 @@ from .usage import (
     with_tier,
 )
 from .usage import record_usage as _append_usage_event
+from .utils import page_image_key, read_page_image
 
 logger = logging.getLogger(__name__)
 
@@ -849,7 +857,14 @@ def _leading_pages(
     pages = max(1, min(count - 1, count * share // whole))
     while True:
         try:
-            sliced = slice_pages(pdf, range(1, pages + 1), config=pdf_config, total_pages=count)
+            sliced = pinned_slice(
+                pdf,
+                range(1, pages + 1),
+                config=pdf_config,
+                make=partial(
+                    slice_pages, pdf, range(1, pages + 1), config=pdf_config, total_pages=count
+                ),
+            )
         except Exception as exc:
             raise SchemaGenerationFailed(
                 f"could not cut file '{file_id}' to its first {pages} pages to fit the "
@@ -900,11 +915,13 @@ def schema_batch_executor(
     ``schema_api_key_env`` and :class:`~dgml_core.errors.BatchUnavailable` when
     the provider has no batch backend. Imports the batch package lazily."""
     from .batch import make_executor
+    from .batch.jobs import credential_ref
 
     return make_executor(
         config.schema_model,
         api_key=_resolve_api_key(config.schema_api_key, config.schema_api_key_env),
         api_base=config.schema_api_base,
+        credential=credential_ref("grounded", "schema", config.schema_api_key_env),
         poll_interval_s=poll_interval_s,
         max_poll_s=max_poll_s,
         min_wave_size=min_wave_size,
@@ -2094,10 +2111,17 @@ def extract_values_batch_pairs(
                 continue
             _succeed(pair, result)
     except BaseException as exc:
-        # Only an interrupt gets here: every Exception above is caught per
-        # pair. It records every open pair before propagating.
+        # Only an interrupt — or a paused batch job — gets here: every
+        # Exception above is caught per pair. An interrupt records every open
+        # pair before propagating. A paused job records nothing: the run that
+        # completes the job replays these pairs and writes their rows and stats.
+        from .errors import BatchPending
+
+        paused = isinstance(exc, BatchPending)
         for pair in list(runs):
             run = runs.pop(pair)
+            if paused:
+                continue
             run.fail(exc)
             with contextlib.suppress(Exception):
                 run.record()
@@ -2130,11 +2154,13 @@ def values_batch_executor(
     extraction raises) and :class:`~dgml_core.errors.BatchUnavailable` when the
     provider has no batch backend. Imports the batch package lazily."""
     from .batch import make_executor
+    from .batch.jobs import credential_ref
 
     return make_executor(
         config.values_model,
         api_key=_resolve_api_key(config.values_api_key, config.values_api_key_env),
         api_base=config.values_api_base,
+        credential=credential_ref("grounded", "values", config.values_api_key_env),
         poll_interval_s=poll_interval_s,
         max_poll_s=max_poll_s,
         min_wave_size=min_wave_size,
@@ -2527,11 +2553,7 @@ def _drop_out_of_range_pages(
     if page_count is None or page_count <= 0:
         return unmatched, 0
     outside = {item.page_number for item in unmatched if not 1 <= item.page_number <= page_count}
-    missing = {
-        page
-        for page in outside
-        if not workspace.blobs.blob_exists(layout.file_page_image_key(file_id, page))
-    }
+    missing = {page for page in outside if page_image_key(workspace, file_id, page) is None}
     kept = [item for item in unmatched if item.page_number not in missing]
     return kept, len(missing)
 
@@ -2611,18 +2633,18 @@ def phase3_page_steps(
     the minimum cacheable prefix. Marking it only risks paying the cache-write
     premium for a read that cannot arrive — the same reasoning that keeps the
     PDF and image blocks untagged."""
-    image_key = layout.file_page_image_key(file_id, page_number)
-    if not workspace.blobs.blob_exists(image_key):
+    page_image = read_page_image(workspace, file_id, page_number)
+    if page_image is None:
         raise ValuesExtractionFailed(
             f"phase 3: no page image for file '{file_id}' page {page_number}"
         )
+    _, image_bytes = page_image
 
     try:
         page_words = get_page_words(workspace, file_id, page_number)
     except FileNotFound:
         page_words = {"page": page_number, "total_words": 0, "words": []}
 
-    image_bytes = workspace.blobs.get_blob(image_key)
     image_size = _page_pixel_size(workspace, file_id, page_number, image_bytes)
     # A page with no words (a scan added in digital mode, say) gives the model
     # nothing to measure pixels against. Asked for pixels anyway it spends its
@@ -2910,11 +2932,11 @@ def _page_pixel_size(
     workspace: Workspace, file_id: str, page_number: int, image_bytes: bytes
 ) -> tuple[int, int] | None:
     """``(width, height)`` of the page image the model is shown: read from the
-    PNG header, else from ``page_text`` (which records the same size), else
+    image header, else from ``page_text`` (which records the same size), else
     ``None``, in which case phase 3 keeps the plain pixel prompt."""
     size: tuple[Any, Any]
     try:
-        size = _png_dimensions(image_bytes)
+        size = _image_dimensions(image_bytes)
     except ValueError:
         payload = workspace.read_page_text(file_id, page_number) or {}
         size = (payload.get("width"), payload.get("height"))
@@ -3213,8 +3235,13 @@ def _phase1_in_parts(
 
     def attempt(first: int, last: int) -> LLMSteps[list[tuple[_PdfPart, _Phase1Run]]]:
         try:
-            sliced = slice_pages(
-                pdf_bytes, range(first, last + 1), config=pdf_config, total_pages=page_count
+            sliced = pinned_slice(
+                pdf_bytes,
+                range(first, last + 1),
+                config=pdf_config,
+                make=lambda: slice_pages(
+                    pdf_bytes, range(first, last + 1), config=pdf_config, total_pages=page_count
+                ),
             )
         except Exception as exc:
             raise ValuesExtractionFailed(

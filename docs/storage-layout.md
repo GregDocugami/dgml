@@ -9,8 +9,9 @@ Every bounding box DGML stores — in `page_text/page_N.json` and in the
 `dg:origin` attributes of `<stem>.dgml.xml` (both the generated document tree
 and the `dg:extraction` element) — uses **one**
 convention: integer **image pixels** `[left, top, right, bottom]`,
-top-left origin, at 300 dpi relative to the page's
-`page_images/page_N.png`. Page is carried in a sibling `page_number`
+top-left origin, relative to the page's `page_images/page_N.{png,jpg}` (rendered
+at 300 dpi by default, then fit to the page-edge bounds; see
+[Page images](#page-images-jpeg-edge-bounds)). Page is carried in a sibling `page_number`
 field for structured forms, or as a leading integer inside each
 `dg:origin` box (`<page> <x1> <y1> <x2> <y2>`, space-separated) since one
 element can span pages.
@@ -74,6 +75,12 @@ at all — see [storage services](#storage-services-storage).
 ├── workspace.json                    # { name, organization, workspace_id, schema_version } — written by `workspace create`
 ├── config.toml                       # storage binding + settings — REQUIRED
 ├── usage.jsonl                       # LLM call event log (optional)
+├── batches/                          # batch job state (optional; any --batch run; removed once empty)
+│   └── <job_id>/                     #   bj_<12 hex>
+│       ├── job.json                  #   manifest (see "batches/<job_id>/" below)
+│       ├── lease.json                #   which process holds the job right now
+│       ├── responses/<key>.json      #   one received response per request key
+│       └── inputs/<name>             #   inputs a resumed run restores
 ├── docsets/
 │   └── <docset_id>/                  # generated: 12-char base-36 ID
 │       ├── docset.json               # { id, name, description, key_questions }
@@ -98,8 +105,9 @@ at all — see [storage services](#storage-services-storage).
         │                             #   not already a PDF; what pages/text and
         │                             #   generation use (see docs/conversion.md)
         ├── file.json                 # metadata (see schema below)
-        ├── page_images/              # PNG page renders at page_image_dpi
-        │                             #   (300 by default; cacheable, see below)
+        ├── page_images/              # JPEG/PNG page renders at page_image_dpi
+        │                             #   (300 by default), fit to the page-edge
+        │                             #   bounds (see below; cacheable)
         │   ├── page_1.png
         │   └── page_2.png
         ├── page_text/                # one JSON of word boxes per page
@@ -119,14 +127,41 @@ everywhere an ID appears.
 
 DocSet IDs are always generated today.
 
+## Page images (JPEG, edge bounds)
+
+Each page is rendered at the file's dpi (`page_image_dpi`, 300 by default) and
+then stored with its **longest edge between 1000 and 3508 pixels**, as a PNG
+(`page_N.png`) or a JPEG at quality 90 (`page_N.jpg`), whichever is smaller for
+that page — a crisp text page is usually far smaller as a PNG, a photo or scan
+far smaller as a JPEG, so one file's pages can mix the two. A page whose render already falls in that range — Letter (2550 ×
+3300) and A4 (2480 × 3508) at 300 dpi — is stored at exactly its render size; a
+large-format sheet is scaled down to a 3508-pixel long edge, and a small page
+(or a low `--dpi`) is scaled up to a 1000-pixel one. The scale is uniform, so
+the aspect ratio is kept.
+
+The bounds decide the pixel space every box is in: digital text extraction
+applies the same fit, so `page_text/` and `dg:origin` boxes always match the
+stored image, refit or not. The bounds are not recorded per file; `dgml check`
+repairs with the current ones.
+
+Files added before the edge bounds have **full-size PNG** renders
+(`page_N.png`). They stay valid — their boxes are in those PNGs' pixels — and
+every reader accepts either extension. If `dgml check` has to re-render such a
+file's pages, it writes bounded images: identical geometry for a page already
+inside the bounds, but a page outside them (a large-format sheet, or a
+`--dpi` low enough to fall under the min edge) no longer matches its stored
+`page_text/` boxes. Delete and re-add such a file instead, which re-extracts
+its text against the new images.
+
 ## Page-image render cache (`$DGML_PAGE_CACHE`, optional)
 
 Rendering `page_images/` runs the configured renderer (the system
 ghostscript binary by default, or PDFium via `[pdf] provider =
 "pypdfium2"`), which dominates the cost of `dgml file add`. The render is a
-pure function of the PDF bytes, the renderer, and the dpi, so when the
-**`DGML_PAGE_CACHE`** environment variable names a directory, the renderer
-keys each render by a hash of all three and reuses it:
+pure function of the PDF bytes, the renderer, the dpi, and the stored-image
+format and edge bounds, so when the **`DGML_PAGE_CACHE`** environment
+variable names a directory, the renderer keys each render by a hash of them
+all and reuses it:
 
 - **Hit** — an identical PDF rendered before is copied from the cache and
   the render backend is not invoked (it need not even be installed).
@@ -138,7 +173,7 @@ The cache is **off by default**; unset, rendering is unchanged. It is keyed by
 content, not by workspace — so it pays off when the same PDFs are ingested into
 many workspaces (e.g. the clustering sweep's per-cell workspaces in
 [evaluation/clustering/](../evaluation/clustering/), which sets it automatically;
-`--no-page-cache` opts out). Entries are plain `<hash>/page_*.png` directories
+`--no-page-cache` opts out). Entries are plain `<hash>/page_*.{jpg,png}` directories
 and are safe to delete at any time.
 
 ## Staging scratch space (`$TMPDIR`)
@@ -983,7 +1018,7 @@ converted to the engine's `extracted_value` JSON Schema, whose leaf values
 carry `{ "text", "value"?, "locations": [{ "page_number", "bounding_box":
 [left, top, right, bottom] }] }` — verbatim text, optional normalized value
 (enum token, ISO date, plain number), and locations in integer image pixels
-(top-left origin, 300 dpi, relative to `page_images/page_N.png`) — so every
+(top-left origin, relative to `page_images/page_N.{png,jpg}`) — so every
 extracted value traces back to one or more regions of the source PDF.
 
 When present, `extraction-schema.rnc` is one of the artifacts captured in a
@@ -1105,7 +1140,7 @@ One record:
 ```jsonc
 {
   "at": "2026-05-15T17:42:00Z",
-  "operation": "extract_values",     // classify | schema_generate | extract_values | transcribe | label | links | hybrid_merge
+  "operation": "extract_values",     // classify | schema_generate | extract_values | transcribe | label | links | hybrid_merge | batch_unused
   "model": "gemini/gemini-3-flash-preview",
   "cost_usd": 0.0123,                // null when litellm doesn't price the model
   "prompt_tokens": 12345,
@@ -1126,6 +1161,103 @@ One record:
 required multiple internal turns; the per-call costs and token counts
 are summed before recording. Partial cost (LLM calls made before a
 later failure) is preserved on `outcome=error` rows.
+
+Under a [batch job](#batchesjob_id-optional) the rows of a run that ends
+paused (`--no-wait`) are not written; the run that completes the job writes
+the rows a blocking run would. A response a later run replays after an
+interrupted run already counted it contributes zero cost and tokens, so every
+response is billed exactly once across the job's rows. A response the job paid
+for that no run of it ever used (a superseded batch's results, a request the
+command stopped asking for, a batch collected only as the run ended) is still
+shown: when the job completes it writes one `batch_unused` row per such
+response, at the tier that served it, with `context`
+`{"unused": true, "batch_job": "<job id>"}`. No command's own row counts it.
+A job no run will finish writes them too: `dgml batch cancel` for every
+response its runs collected and no row counted yet (a paused run's included),
+and `dgml batch delete` / `prune` for any left before the job is removed. These
+rows follow the command's own setting: a job whose command records no usage
+(run without `--debug`) writes none.
+
+## `batches/<job_id>/` (optional)
+
+State of one batch job — see
+[Batch jobs](cli-reference.md#batch-jobs---no-wait-and-dgml-batch). Written by
+any `--batch` run (a plain blocking run keeps one silently, for crash
+recovery, deleted when that run finishes — unless it ends leaving the job
+`failed`, when the payload names it in `batch.job`). A completed job keeps only
+its summarized `job.json`; `dgml batch prune` and `dgml batch delete` remove
+jobs. Deleting the last job also removes the then-empty `batches/` directory
+itself, so a workspace whose batch runs all finished has no `batches/`.
+
+- **`job.json`** — the manifest:
+
+  ```jsonc
+  {
+    "job_id": "bj_3f9a1c07d2e4",
+    "command": "docset generate",          // docset generate | extraction extract |
+                                           // extraction generate-schema | file add
+    "argv": ["docset", "generate", "…", "--batch", "--no-wait"],  // replayed by `batch resume`
+    "cwd": "/home/me/project",              // replayed from here (relative paths)
+    "created_at": "…", "updated_at": "…",
+    "status": "pending",                   // pending | completed | failed (`batch status`
+                                           // derives `ready` when asked; never stored)
+    "error": null,
+    "runs": 3,                             // runs of the command under this job so far
+    "provider_batches": [                  // every provider batch the job submitted
+      {"job": {"provider": "anthropic", "job_id": "msgbatch_…", "custom_ids": ["…"],
+               "submitted_at": "…", "extra": {}},
+       "model": "anthropic/claude-haiku-4-5", "api_base": null,
+       "stage": "transcribe",               // the pipeline stage the batch served
+       "credential": {"section": "generation", "field": "transcribe",
+                      "env": "MY_ANTHROPIC_KEY"},   // where the key comes from; never the key
+       "key_fingerprint": "3f9a1c07d2e4",   // first 12 hex digits of sha256(key) the batch
+                                           // was created with (null if the backend cannot
+                                           // tell); a 404 under a different key is not
+                                           // "gone": the run stops, the record stays open
+       "keys": {"<custom_id>": "<request key>"},
+       "state": "collected",               // open | collected | dropped (canceled) |
+                                           // uncertain (create outcome unknown; has "error"
+                                           // and a placeholder "uncertain_…" job_id)
+       "last_status": {"state": "ended", "succeeded": 12, "errored": 0, "expired": 0,
+                       "canceled": 0, "processing": 0},
+       "cleanup": "done"}                   // dropped batches only: provider-side delete
+                                           // "pending" (cancel not settled) | "done"
+                                           // A record may also carry "gone": true — the
+                                           // provider answered 404 (batch deleted or never
+                                           // existed); closed out as collected (every
+                                           // response stored) or dropped, no cleanup owed
+    ],
+    "billed": ["<request key>", "…"],      // responses already counted on a usage row
+    "inputs": {"generate/schema.json": true, "presence:generate/blocks/a.pdf": false},
+    "state": {},                           // command-specific (file add: its ingest results)
+    "run_stats": {"e1:anthropic/claude-haiku-4-5": {"1": {"batches": 1, "…": 0}}},
+                                           // per executor, per run: summed for the payload
+    "record_usage": true                   // the command writes usage rows (`--debug`);
+                                           // the job's own `batch_unused` rows follow it
+  }
+  ```
+
+- **`lease.json`** — `{"owner", "expires"}` (epoch seconds): the process running
+  the job. Renewed every minute, expires 10 minutes after the last renewal;
+  `dgml batch unlock` removes it. A runner never re-creates a lease it finds
+  gone or held by another owner: it stops (`BATCH_JOB_BUSY`).
+- **`responses/<key>.json`** — one received response. The key is
+  `<sha256 of the request>-<occurrence>`: the digest is taken over the litellm
+  request as canonical JSON, leaving out the API key, the timeout and any
+  credential header, and the occurrence number keeps two identical requests in
+  one run apart. The file holds the litellm response and only the hidden fields
+  accounting needs (`response_cost`, `dgml_tier`) — no provider headers and never
+  a credential.
+- **`inputs/slices/<source sha>/<engine>/<first>-<last>-<pages sha>.pdf`** — each
+  PDF slice sent to a model (a transcription window, a schema sample trimmed to
+  fit, an extraction page range; page numbers 1-based), recorded the first time it is cut and
+  reused by every resume, because slicing is not byte-reproducible; and
+  `inputs/generate/converted/<name>.pdf` for a document converted on demand.
+  Deleted with the responses when the job completes.
+- **`inputs/<name>`** — the content an input had when the job started, restored
+  by every resumed run (`docset generate`'s `schema.json` and
+  `concept_roster.json`). Inputs recorded only by presence (a document's
+  `_blocks.json`) have no file here; their flag is in `job.json` `inputs`.
 
 ## `docsets/<id>/files/<file_id>/<stem>.dgml.xml` (optional)
 
@@ -1177,8 +1309,8 @@ rendered tree is aligned against the file's `page_text/` OCR and a
 onto every element whose subtree grounded — so `<stem>.dgml.xml`
 carries page positions directly, with no separate grounded artifact. Each
 attribute is a `"; "`-separated box list, each box `<page> <x1> <y1> <x2>
-<y2>` (space-separated) in integer image pixels (top-left origin, 300
-dpi, relative to `page_images/page_N.png`). Elements with text-node
+<y2>` (space-separated) in integer image pixels (top-left origin,
+relative to `page_images/page_N.{png,jpg}`). Elements with text-node
 children (leaves and mixed-content parents) carry one box per visual
 line on each page (a parent's lines cover its whole subtree); pure
 containers (all-element children — sections, lists, tables, rows, the
@@ -1251,20 +1383,22 @@ source was already a PDF.
 
 One per page, written regardless of `text_mode` (`"digital"`, `"ocr"`,
 or `"hybrid"` all share this shape). Word locations are
-in **image-pixel space** matching the corresponding `page_images/page_N.png`
+in **image-pixel space** matching the corresponding `page_images/page_N.{png,jpg}`
 render — i.e. ints with the top-left origin, computed as
 `round(pdf_pts * dpi / 72)` where `dpi` is the file's `page_image_dpi` — the
-same value `render_pages` used, 300 unless `--dpi` said otherwise. Consumers
-of these coordinates should read `page_image_dpi` off `file.json` rather than
-assuming 300: the boxes in a File added with `--dpi 150` are half the size of
-the same File's at 300. Files are compact (one line, no pretty-printing) so a
+same value `render_pages` used, 300 unless `--dpi` said otherwise — and then
+scaled by the same fit to the edge bounds as the stored image, when the page
+falls outside them. Consumers of these coordinates should take the page's
+`width` / `height` here (or the image's own size) rather than assuming 300
+dpi: the boxes in a File added with `--dpi 150` are half the size of the same
+File's at 300, and a large-format sheet's are scaled to its 3508-pixel image. Files are compact (one line, no pretty-printing) so a
 workspace with many pages doesn't bloat on disk:
 
 ```json
 {"file_id":"ab55kdjs93kk","page":1,"width":2550,"height":3300,"words":[{"t":"Hello","l":[100,210,182,242],"s":{"b":1,"sz":24.0,"c":"red"}},{"t":"world","l":[190,210,290,242],"s":{"sz":12.0}}]}
 ```
 
-- `width` / `height` — dimensions of the matching `page_images/page_N.png`.
+- `width` / `height` — dimensions of the matching `page_images/page_N.{png,jpg}`.
 - `words[*].t` — word text (whitespace-separated run of non-whitespace chars).
 - `words[*].l` — `[left, top, right, bottom]` ints (top-left origin, pixels).
 - `words[*].s` — observed style facts, present only on the digital path (and

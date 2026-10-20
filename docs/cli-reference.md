@@ -438,7 +438,7 @@ Walk the workspace and report inconsistencies. Issue kinds emitted today:
 | `hash_mismatch` | file | Stored sha256 doesn't match current PDF bytes |
 | `pdf_unreadable` | file | pypdf can't parse the PDF (records a permanent error so the next check skips re-parsing) |
 | `pdf_unreadable_permanent` | file | A previous parse recorded a permanent failure; not retried without `--retry-errors` |
-| `page_count_mismatch` | file | `page_images/` has the wrong number of PNGs (`repaired: true` if rerendered successfully) |
+| `page_count_mismatch` | file | `page_images/` has the wrong number of page images (`repaired: true` if rerendered successfully) |
 | `page_render_failed` | file | the configured page renderer failed during rerender |
 | `page_render_failed_permanent` | file | A previous render recorded a permanent failure; not retried without `--retry-errors` |
 | `page_text_count_mismatch` | file | `page_text/` has the wrong number of per-page JSONs (`repaired: true` if re-extracted successfully) |
@@ -816,8 +816,8 @@ is written but left ungrounded, with a warning — it does not fail the run.
 the `dg` prefix to (the open `dgml.io` scheme on generated DGML; plain
 `origin` on namespace-free XML). Its value is a `"; "`-separated list of
 boxes, each `<page> <x1> <y1> <x2> <y2>` (space-separated) in integer image
-pixels — top-left origin, 300 dpi, relative to the page's
-`page_images/page_N.png`:
+pixels — top-left origin, relative to the page's
+`page_images/page_N.{png,jpg}`:
 
 ```xml
 <docset:Body structure="h3"
@@ -872,7 +872,7 @@ with the deterministic digital/hybrid path. A malformed `style` section fails
 `generate` up front with `STYLE_CONFIG_INVALID`.
 
 Requires only the base `dgml` install — the generation pipeline reuses
-the workspace's pre-rendered `page_images/page_N.png` files at LLM
+the workspace's pre-rendered `page_images/page_N.{png,jpg}` files at LLM
 input time, so no extra rasterizer is needed at run time (and no
 GPL/poppler escape hatch). For non-workspace inputs (library callers
 passing arbitrary paths), the pipeline renders to a tempdir via the
@@ -1852,8 +1852,11 @@ failed at `file add` (the message repeats the converter's error).
 ### `dgml file add <path> [--id FILE_ID] [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--dpi N] [--auto-classify [MODE]] [--batch]`
 
 Add a File. The source is copied into the workspace, hashed, its pages
-are rendered to PNGs via `gs` (300 dpi by default — see `--dpi`), and
-per-page word boxes are written to `page_text/` according to `--text-mode`.
+are rendered via `gs` (300 dpi by default — see `--dpi`) and stored, each as
+the smaller of PNG and JPEG, with the longest edge fit between 1000 and 3508
+pixels (see
+[Page images](storage-layout.md#page-images-jpeg-edge-bounds)), and per-page
+word boxes are written to `page_text/` according to `--text-mode`.
 
 `<path>` is a `.pdf`, or a convertible source (`.docx`/`.doc`/`.xlsx`/`.xls`)
 when a converter is configured for its format family in the workspace
@@ -1907,10 +1910,15 @@ rather than the current default, so a repair reproduces the file's existing
 geometry.
 
 Note that `--dpi` also governs `page_text/` word boxes, which are expressed
-in **page-image pixel space** (`round(pdf_pts * dpi / 72)`) rather than PDF
-points — so the coordinates in a File added with `--dpi 150` are half those
-of the same File added at 300. Anything consuming `dg:origin` boxes should
-read `page_image_dpi` off the File record rather than assuming 300.
+in **page-image pixel space** (`round(pdf_pts * dpi / 72)`, refit with the
+image when the page falls outside the edge bounds) rather than PDF points — so
+the coordinates in a File added with `--dpi 150` are half those of the same
+File added at 300. Anything consuming `dg:origin` boxes should take the page's
+size from its `page_text/` `width` / `height` (or the image itself) rather
+than assuming 300 dpi. The edge bounds override `--dpi`: one low enough to put
+a page's long edge under 1000 pixels is brought back up to 1000, and one high
+enough to put it over 3508 is brought down (ghostscript resizes its render;
+the `pypdfium2` engine rasterizes such a page straight at the fitted size).
 
 Conflict types recorded in the success payload as `conflict_kind`:
 
@@ -2181,7 +2189,7 @@ Configure the model via the `classification` section in
 | Field | Required | Meaning |
 |---|---|---|
 | `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-flash-lite-latest`, `anthropic/claude-opus-5`, `openai/gpt-4o`. |
-| `max_pages` | no (default `3`) | How many rendered page images (`page_images/page_1.png` …) to send to the LLM. Cap is per-classification cost: 1 is the cheap setting, 4+ is the thorough one. |
+| `max_pages` | no (default `3`) | How many rendered page images (`page_images/page_1.{png,jpg}` …) to send to the LLM. Cap is per-classification cost: 1 is the cheap setting, 4+ is the thorough one. |
 | `naming_attempts` | no (default `1`) | How many independent proposals to request when naming a *newly clustered* DocSet (`dgml cluster`, not per-file `--auto-classify`). At `1` the single proposal is used as-is. At `2`+ the name the plurality of attempts agreed on wins, and that share is reported as the file's `naming_confidence` — a 3-of-3 agreement is safe to accept unreviewed, a 2-1 split is worth a look. Costs tokens linearly, so raise it only for runs where a wrong DocSet name is expensive to undo. |
 | `api_key` | no | Optional literal API key. Use only on per-developer workspaces (config.toml isn't checked in). Mutually exclusive with `api_key_env`. |
 | `api_key_env` | no | Optional name of the env var to read the API key from. Mutually exclusive with `api_key`. When neither is set, litellm uses its built-in per-provider lookup (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …). When `api_key_env` references an unset env var, `AUTH_ERROR` is raised. |
@@ -2979,7 +2987,11 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `WORKSPACE_MIGRATION_FAILED` | hard | An automatic in-place workspace upgrade could not complete; the workspace is left as it was, and the message names the migration that stopped. |
 | `EMPTY_MODEL_RESPONSE` | hard | An LLM call returned no content at all (as distinct from content that failed to parse). |
 | `BATCH_UNAVAILABLE` | hard | Batch mode was requested for a model it cannot serve: the model's provider (as litellm resolves it) has no batch backend, the backend's optional dependency is not installed, or the installed litellm is outside the range the batch backends support. Raised before any request is sent, naming the stage and model; batch mode never falls back to a full-price synchronous run. Every `--batch` command checks every stage it would batch up front. |
-| `BATCH_EXECUTION_FAILED` | hard | A submitted batch could not be brought to completion: the provider accepted none of a wave's batches, a batch create was refused at the account's rate limit or quota, a batch create's outcome was unknown (the batch may exist; it is never resubmitted), or a batch was still unfinished at the polling deadline (it is cancelled first). Per-request failures inside a delivered batch are retried or run synchronously instead. Within a `docset generate` stage, only the documents still in flight are affected (a document still transcribing is dropped, one still labeling gets a `label_error` with code `LABEL_MODEL_UNREACHABLE` and this failure as its message, a failed link stage gives each document a `link_error`); the command still exits 0. |
+| `BATCH_EXECUTION_FAILED` | hard | A submitted batch could not be brought to completion: the provider accepted none of a wave's batches, a batch create was refused at the account's rate limit or quota, a batch create's outcome was unknown (the batch may exist; it is never resubmitted), a batch was still unfinished at the polling deadline (it is cancelled first), or, under a batch job, a batch was not found (404) with an API key other than the one that created it (it may still exist under that key's account; nothing is resubmitted, and its record stays open for a run with the right key). Per-request failures inside a delivered batch are retried or run synchronously instead. Within a `docset generate` stage, only the documents still in flight are affected (a document still transcribing is dropped, one still labeling gets a `label_error` with code `LABEL_MODEL_UNREACHABLE` and this failure as its message, a failed link stage gives each document a `link_error`); the command still exits 0. |
+| `BATCH_JOB_NOT_FOUND` | hard | `--job` or a `dgml batch` subcommand named a job id with no job in this workspace. |
+| `BATCH_JOB_BUSY` | hard | Another process holds the batch job's lease (it is running, polling or canceling that job). Retry when it finishes, or once the lease expires 10 minutes after its last renewal; `dgml batch unlock <job_id>` breaks a lease left by a process that died. Also the outcome of a run that lost its lease mid-run (broken by `unlock`, or taken over): it stops before submitting anything more, with `details.lease_lost: true`. |
+| `BATCH_JOB_NONDETERMINISTIC` | hard | A resumed batch job's requests for a stage matched nothing it stored or has in flight while open provider batches still cover those positions: an input was rebuilt differently, and submitting would pay for the same wave again. Nothing was submitted and the open batches were kept. Fatal to the run: it is the run's only output (no success payload, exit 1) and nothing further is sent to the provider; `details.batch.job` names the job, left `failed`. If an input changed on purpose, `dgml batch cancel <job_id>` then `dgml batch resume <job_id>`. |
+| `BATCH_JOB_INVALID` | hard | A batch job cannot be used as asked: `--no-wait`/`--job` without batch mode, resuming a job that already completed, continuing a job with a different command than the one that created it, running a job again while it has an unacknowledged `uncertain` batch create (check the provider's console, then `dgml batch cancel <job_id>`), or resuming a job whose stored command line no longer parses or whose original working directory no longer exists. |
 | `INCREMENTAL_WITHOUT_CLUSTERS` | hard | `cluster --skip-existing` in a workspace that has no existing clusters to build on. |
 | `LINK_PLAN_FAILED` | soft | The semantic-link pass failed for a document during `docset generate`; the document still converts, unlinked. |
 | `GUIDANCE_NOT_FOUND` | hard | An `extraction` command needs DocSet guidance that has not been set. |
