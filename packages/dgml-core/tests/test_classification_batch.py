@@ -136,7 +136,11 @@ def test_failures_are_isolated_and_match_sync_messages(
     for fid in (bad, raising, "nopages"):
         assert type(batch[fid]) is type(sync[fid]) is ClassificationFailed
         assert str(batch[fid]) == str(sync[fid])
-    assert str(batch[raising]) == "LLM call failed: RuntimeError: provider down"
+    # The provider's message, then the call's tracing context (describe_call_failure).
+    assert str(batch[raising]) == (
+        "LLM call failed: RuntimeError: provider down "
+        f"(model {DEFAULT_TEST_MODEL!r}, api key not passed)"
+    )
 
 
 def _decoded(blob: str) -> str:

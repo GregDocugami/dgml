@@ -29,6 +29,7 @@ values-shape JSON, as ``dgml extraction get-values`` prints them.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +40,8 @@ from .storage import Workspace
 
 if TYPE_CHECKING:
     from .grounded import ExtractionResult, GroundedConfig
+
+logger = logging.getLogger(__name__)
 
 
 def auto_extract(
@@ -78,8 +81,11 @@ def auto_extract(
         config = load_grounded_config(ws)
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
+        _log_auto_extract_failed(file_id, docset_id, block["error"])
         return block
     block["model"] = config.values_model
+    # extract_values logs the run's start and finish; only the soft failure,
+    # which is this caller's call, is logged here.
     try:
         result = extract_values(
             ws,
@@ -92,18 +98,39 @@ def auto_extract(
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
         block["usage"] = exc.usage
+        _log_auto_extract_failed(file_id, docset_id, block["error"])
         return block
     except Exception as exc:
         # Bug-grade exception from extraction (e.g. IndexError in a phase).
         # The assignment is already persisted, and clustering/bulk callers
         # need to emit their summary for the *other* files, so we soft-fail
         # here too — the error type/message lands in `extraction.error` and
-        # the parent command exits 0.
+        # the parent command exits 0. The traceback goes to the log, since
+        # the block can only carry the message.
         block["error"] = f"{type(exc).__name__}: {exc}"
+        _log_auto_extract_failed(file_id, docset_id, block["error"], exc_info=True)
         return block
     block["tool_calls"] = result.tool_calls
     block["usage"] = result.usage or None
     return block
+
+
+def _log_auto_extract_failed(
+    file_id: str, docset_id: str, error: str, *, exc_info: bool = False
+) -> None:
+    """Log a soft-failed auto-extraction: the assignment stands, but the file has
+    no extracted values. INFO, not WARNING: the failure already reaches the caller
+    in the block's ``error``, and extraction was incidental to the assignment, so
+    the line (and any traceback) belongs under --verbose. A WARNING would also
+    repeat once per file in a bulk run."""
+    logger.info(
+        "extraction of file %s into docset %s failed; the file stays assigned "
+        "without extracted values: %s",
+        file_id,
+        docset_id,
+        error,
+        exc_info=exc_info,
+    )
 
 
 def add_file_and_extract(
@@ -127,8 +154,11 @@ def add_file_and_extract(
     ``--debug``).
     """
     store = DocSetStore(ws)
-    store.add_file(docset_id, file_id)
+    store.add_file(docset_id, file_id)  # logs the assignment itself
     if not store.has_schema(docset_id):
+        logger.info(
+            "docset %s has no extraction schema; not extracting file %s", docset_id, file_id
+        )
         return None
     return auto_extract(ws, docset_id, file_id, write_stats=write_stats, record_usage=record_usage)
 
@@ -175,14 +205,27 @@ def extract_file(
         values_effort=values_effort,
         locations_effort=locations_effort,
     )
-    return extract_values(
-        ws,
-        docset_id,
-        file_id,
-        config=config,
-        write_stats=write_stats,
-        record_usage=record_usage,
-    )
+    try:
+        return extract_values(
+            ws,
+            docset_id,
+            file_id,
+            config=config,
+            write_stats=write_stats,
+            record_usage=record_usage,
+        )
+    except DgmlError as exc:
+        # Raised to the caller, which decides how loud a failure is; INFO keeps
+        # the run's story complete under --verbose without doubling the CLI's
+        # error envelope by default.
+        logger.info(
+            "extraction of file %s into docset %s failed: %s: %s",
+            file_id,
+            docset_id,
+            exc.code,
+            exc,
+        )
+        raise
 
 
 def extraction_config(

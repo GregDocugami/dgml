@@ -84,7 +84,11 @@ def test_schema_provider_failure_keeps_its_message_and_error_row(
         generate_schema(
             workspace, ["f1aaaaaaaaaa"], config=schema_config(), docset_name="D", record_usage=True
         )
-    assert str(failed.value) == "schema generation call failed: RuntimeError: provider exploded"
+    # The provider's message, then what traces the call (see describe_call_failure).
+    assert str(failed.value) == (
+        "schema generation call failed: RuntimeError: provider exploded "
+        f"(model {DEFAULT_SCHEMA_MODEL!r}, api key not passed)"
+    )
     (row,) = read_events(workspace)
     assert (row["outcome"], row["error"]) == ("error", "RuntimeError: provider exploded")
     assert row["tier"] == "standard"

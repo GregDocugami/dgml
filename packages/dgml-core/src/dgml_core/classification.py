@@ -34,6 +34,7 @@ payload fields.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -49,7 +50,14 @@ from .errors import (
     ClassificationFailed,
     NoExistingDocSets,
 )
-from .llm import CallResult, LLMConfig, LLMSteps, drive, steps_with_tools
+from .llm import (
+    CallResult,
+    LLMConfig,
+    LLMSteps,
+    describe_call_failure,
+    drive,
+    steps_with_tools,
+)
 from .models import DocSet
 from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .storage import Workspace
@@ -60,6 +68,8 @@ if TYPE_CHECKING:
     # Type-only: the batch package imports litellm, which upstream keeps off
     # the deterministic import path; it is imported lazily where it is used.
     from .batch import BatchExecutor
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_PAGES = 3
 DEFAULT_NAMING_ATTEMPTS = 1
@@ -262,7 +272,9 @@ def classify_file(
             )
         if mode == ClassifyMode.EXISTING_FORCED and len(docsets) == 1:
             # Only one possible answer, so there is nothing to decide.
-            return ClassificationDecision(decision="existing", existing_docset_id=docsets[0].id)
+            decision = ClassificationDecision(decision="existing", existing_docset_id=docsets[0].id)
+            _log_decision(file_id, decision, docsets, mode=mode, by="the only docset, no LLM call")
+            return decision
     response = _vision_tool_call(
         workspace,
         [file_id],
@@ -271,7 +283,46 @@ def classify_file(
         tools=_build_tools(docsets, mode=mode),
         record_usage=record_usage,
     )
-    return _parse_response(response, docsets, mode=mode)
+    decision = _parse_response(response, docsets, mode=mode)
+    _log_decision(file_id, decision, docsets, mode=mode, by=config.model)
+    return decision
+
+
+def _log_decision(
+    file_id: str,
+    decision: ClassificationDecision,
+    docsets: list[DocSet],
+    *,
+    mode: ClassifyMode,
+    by: str,
+) -> None:
+    """One INFO line for what :func:`classify_file` decided, and why when the
+    model said.
+
+    Runs after the decision is made, so it must not raise; nothing here can.
+    It only reads string fields and builds f-strings, and the optional ones
+    (``reason``, the docset's name) are checked for ``None`` before use. The
+    rest is lazy ``%s`` arguments, which ``logging`` formats itself."""
+    reason = f": {decision.reason}" if decision.reason else ""
+    if decision.decision == "existing":
+        name = next((d.name for d in docsets if d.id == decision.existing_docset_id), None)
+        target = f"docset {decision.existing_docset_id}" + (f" ({name!r})" if name else "")
+        logger.info(
+            "file %s: classified into %s [mode %s, by %s]%s", file_id, target, mode, by, reason
+        )
+    elif decision.decision == "new":
+        logger.info(
+            "file %s: classification proposes a new docset %r [mode %s, by %s]%s",
+            file_id,
+            decision.new_name,
+            mode,
+            by,
+            reason,
+        )
+    else:
+        logger.info(
+            "file %s: no existing docset fits [mode %s, by %s]%s", file_id, mode, by, reason
+        )
 
 
 def propose_new_docset_for_files(
@@ -487,6 +538,7 @@ def classify_files_batch(
     tools = _build_tools(docsets, mode=mode)
     results: dict[str, ClassificationDecision | Exception] = {}
     units: list[Unit] = []
+    configs: dict[str, LLMConfig] = {}  # each file's, for its failure's context
     for fid in file_ids:
         try:
             llm_config, steps = classify_steps(
@@ -500,6 +552,7 @@ def classify_files_batch(
         except Exception as exc:  # no pages, unset key env: before any request
             results[fid] = exc
             continue
+        configs[fid] = llm_config
         units.append(Unit(fid, llm_config, steps))
 
     outcomes = run_stage(units, executor, stage="classification") if units else {}
@@ -512,7 +565,9 @@ def classify_files_batch(
         if outcome.error is not None:
             # Same wrapping _vision_tool_call applies to a failed request.
             err = outcome.error
-            wrapped = ClassificationFailed(f"LLM call failed: {type(err).__name__}: {err}")
+            wrapped = ClassificationFailed(
+                f"LLM call failed: {describe_call_failure(err, configs[fid])}"
+            )
             wrapped.__cause__ = err
             results[fid] = wrapped
             continue
@@ -572,7 +627,9 @@ def classify_file_batch(
             raise _as_exception(outcome.error)
         # Same wrapping _vision_tool_call applies to a failed request.
         err = outcome.error
-        raise ClassificationFailed(f"LLM call failed: {type(err).__name__}: {err}") from err
+        raise ClassificationFailed(
+            f"LLM call failed: {describe_call_failure(err, llm_config)}"
+        ) from err
     return _parse_response(outcome.result.response, docsets, mode=mode)
 
 
@@ -637,8 +694,11 @@ def _vision_tool_call(
     except Exception as exc:
         # litellm normalizes provider errors but we never want a raw
         # provider exception bubbling past — wrap unconditionally with
-        # the type name so the CLI's soft-fail message stays informative.
-        raise ClassificationFailed(f"LLM call failed: {type(exc).__name__}: {exc}") from exc
+        # the type name and the call's tracing context so the CLI's soft-fail
+        # message stays informative.
+        raise ClassificationFailed(
+            f"LLM call failed: {describe_call_failure(exc, llm_config)}"
+        ) from exc
     return result.response
 
 
