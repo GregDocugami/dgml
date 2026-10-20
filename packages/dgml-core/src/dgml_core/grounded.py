@@ -105,6 +105,7 @@ from .llm import (
     LLMSteps,
     _mark_document_cacheable,
     _no_text_detail,
+    describe_call_failure,
     is_anthropic_model,
     is_request_rejection,
     is_request_too_large,
@@ -589,7 +590,7 @@ def generate_schema(
     except SchemaGenerationFailed:
         raise
     except Exception as exc:
-        raise _schema_call_failed(exc) from exc
+        raise _schema_call_failed(exc, llm_config) from exc
     return schema_rnc_from_result(result, workspace=workspace, docset_name=docset_name)
 
 
@@ -617,7 +618,7 @@ def generate_schema_batch(
         [Unit(name="schema", config=llm_config, steps=steps)], executor, stage="schema"
     )["schema"]
     if outcome.error is not None:
-        raise _schema_call_failed(outcome.error) from outcome.error
+        raise _schema_call_failed(outcome.error, llm_config) from outcome.error
     return schema_rnc_from_result(outcome.result, workspace=workspace, docset_name=docset_name)
 
 
@@ -686,7 +687,7 @@ def _schema_request_steps(
 
     A failed request other than a too-large refusal raises its own exception,
     which the usage row records and :func:`generate_schema` wraps as
-    ``"schema generation call failed: <Type>: <message>"``; a failure to trim
+    ``"schema generation call failed: <Type>: <message> (<context>)"``; a failure to trim
     raises :class:`SchemaGenerationFailed` directly."""
     samples = [_SchemaSample(fid, pdf) for fid, pdf in originals]
     pdf_config: PdfConfig | None = None
@@ -731,9 +732,11 @@ def _schema_request_steps(
     return result
 
 
-def _schema_call_failed(exc: BaseException) -> SchemaGenerationFailed:
+def _schema_call_failed(exc: BaseException, config: LLMConfig) -> SchemaGenerationFailed:
     """The error a failed schema request surfaces as (sync and batch alike)."""
-    return SchemaGenerationFailed(f"schema generation call failed: {type(exc).__name__}: {exc}")
+    return SchemaGenerationFailed(
+        f"schema generation call failed: {describe_call_failure(exc, config)}"
+    )
 
 
 def schema_rnc_from_result(result: CallResult, *, workspace: Workspace, docset_name: str) -> str:
@@ -1099,6 +1102,15 @@ def extract_values(
         write_stats=write_stats,
         record_usage=record_usage,
     )
+    # Logged once the run is set up, so a refused file (no schema, not
+    # assigned) never reads as started. A failure is the caller's to report:
+    # only it knows whether one is soft (auto-extraction) or raised.
+    logger.info(
+        "file %s: extracting values into docset %s with %s",
+        file_id,
+        docset_id,
+        config.values_model,
+    )
     try:
         steps = run.phase1_steps()
         try:
@@ -1111,12 +1123,38 @@ def extract_values(
         per_page: list[_PageOutcome] = []
         if pages:
             per_page = _run_phase3_pages(run, pages)
-        return run.finish(per_page)
+        result = run.finish(per_page)
+        logger.info(
+            "file %s: extracted values into docset %s (%s)",
+            file_id,
+            docset_id,
+            _describe_run(result.tool_calls, result.usage),
+        )
+        return result
     except BaseException as exc:
         run.fail(exc)
         raise
     finally:
         run.record()
+
+
+def _describe_run(tool_calls: int, usage: dict[str, Any]) -> str:
+    """Summarize a finished run for its log line: tool calls, then duration and
+    cost when known.
+
+    It runs after the values are written, inside the run's ``try``, so it must
+    not raise. The one way it could is a numeric format applied to ``None``:
+    ``cost_usd`` is ``None`` when the provider reported no cost, and the whole
+    dict is ``{}`` when it could not be built. So each figure is formatted only
+    when it is a number."""
+    parts = [f"{tool_calls} tool calls"]
+    duration = usage.get("duration_s")
+    if isinstance(duration, int | float):
+        parts.append(f"{duration:.1f}s")
+    cost = usage.get("cost_usd")
+    if isinstance(cost, int | float):
+        parts.append(f"${cost:.4f}")
+    return ", ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -1259,6 +1297,7 @@ class _FileExtraction:
         """Build the phase-1 request and return its generator (text + page
         numbers, no bboxes)."""
         self.phase1_started = time.monotonic()
+        logger.info("file %s: phase 1 (values) starting", self.file_id)
         phase1_schema = _drop_bboxes_from_schema(self.schema)
         # The tool parameter gets the expanded schema with prose annotations
         # stripped — the identical keys remain in the user-prompt copy
@@ -1343,6 +1382,7 @@ class _FileExtraction:
         self.phase1_layout = self.phase1.layout
         self.tool_calls_total += self.phase1.tool_calls
         self.phase1_duration = round(time.monotonic() - self.phase1_started, 3)
+        logger.info("file %s: phase 1 (values) done in %.1fs", self.file_id, self.phase1_duration)
         # Recorded above, before this refusal raises, so a refused run's
         # usage row and stats sidecar still carry what phase 1 did.
         if self.phase1.refusal is not None:
@@ -1410,19 +1450,44 @@ class _FileExtraction:
         self.phase2_matched = phase2_result.stats.matched_locations
         self.total_locations = phase2_result.stats.total_locations
         self._phase2_unmatched_locations = phase2_result.stats.unmatched_locations
+        logger.info(
+            "file %s: phase 2 (OCR matching, no LLM) matched %d of %d locations in %.1fs",
+            self.file_id,
+            self.phase2_matched,
+            self.total_locations,
+            self.phase2_duration,
+        )
 
         # --- Phase 3 starts here: per-page LLM for remaining unmatched ---
         self.phase3_started = time.monotonic()
         self._phase2_values = phase2_result.values
         # Items on pages the file does not have are dropped before any call and
         # stay unmatched (#155); the count goes to the stats sidecar.
+        page_count = FileStore(self.workspace).get(self.file_id).page_count
         unmatched, self.phase3_pages_out_of_range = _drop_out_of_range_pages(
-            self.workspace,
-            self.file_id,
-            phase2_result.unmatched,
-            page_count=FileStore(self.workspace).get(self.file_id).page_count,
+            self.workspace, self.file_id, phase2_result.unmatched, page_count=page_count
         )
-        return sorted(_group_by_page(unmatched).items())
+        dropped = len(phase2_result.unmatched) - len(unmatched)
+        if dropped:
+            logger.info(
+                "file %s: phase 3 (locations) skipping %d items on %d pages the file "
+                "does not have (it has %s); they stay unmatched",
+                self.file_id,
+                dropped,
+                self.phase3_pages_out_of_range,
+                page_count,
+            )
+        pages = sorted(_group_by_page(unmatched).items())
+        if pages:
+            logger.info(
+                "file %s: phase 3 (locations) starting: %d items on %d pages",
+                self.file_id,
+                len(unmatched),
+                len(pages),
+            )
+        elif not dropped:
+            logger.info("file %s: phase 3 (locations) not needed", self.file_id)
+        return pages
 
     # ---- phase 3 ------------------------------------------------------
 
@@ -1473,6 +1538,15 @@ class _FileExtraction:
             ) = _fold_phase3(final_values, per_page, self.phase3_totals)
         self.unmatched_count = self._phase2_unmatched_locations - self.phase3_matched
         self.phase3_duration = round(time.monotonic() - self.phase3_started, 3)
+        if per_page:
+            logger.info(
+                "file %s: phase 3 (locations) matched %d more locations in %.1fs; "
+                "%d still unmatched",
+                self.file_id,
+                self.phase3_matched,
+                self.phase3_duration,
+                self.unmatched_count,
+            )
         # Phase 3's boxes are drawn by a model; where the page has a text
         # layer, a box whose words don't read as its value is wrong: it is
         # moved to the nearest exact match, or stripped before the drop below.
@@ -1722,10 +1796,15 @@ def _run_phase3_pages(
     here instead — every page's, the failing one's partial spend included —
     so the usage row, the stats and ``exc.usage`` count what phase 3 spent.
     """
+    import contextvars
     from concurrent.futures import ThreadPoolExecutor
 
     # Allocated up front so a page that raises still leaves its totals behind.
     page_totals = [_empty_totals() for _ in pages]
+    # One copy of the caller's context per page, taken here on the calling
+    # thread, so what a caller binds (a job id its log handler stamps) is on the
+    # lines the page workers log (see dgml_core.concurrency).
+    contexts = [contextvars.copy_context() for _ in pages]
 
     def _do_page(i: int) -> _PageOutcome:
         page, items = pages[i]
@@ -1738,7 +1817,7 @@ def _run_phase3_pages(
         # Leaving the ``with`` waits for the pages still in flight, so by the
         # time the ``except`` runs every page's totals are final.
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            return list(ex.map(_do_page, range(len(pages))))
+            return list(ex.map(lambda i: contexts[i].run(_do_page, i), range(len(pages))))
     except BaseException:
         run.fold_failed_phase3(page_totals)
         raise
@@ -2263,6 +2342,12 @@ def _phase3_call_failed(page_number: int) -> str:
     return f"phase 3 page {page_number} call failed"
 
 
+def _call_failed(failure: str, exc: Exception, config: LLMConfig) -> ValuesExtractionFailed:
+    """``"<failure>: <Type>: <message> (<context>)"`` (see
+    :func:`~dgml_core.llm.describe_call_failure`)."""
+    return ValuesExtractionFailed(f"{failure}: {describe_call_failure(exc, config)}")
+
+
 def _tool_call_step(
     config: LLMConfig,
     *,
@@ -2274,9 +2359,8 @@ def _tool_call_step(
 ) -> LLMSteps[CallResult]:
     """:func:`~dgml_core.llm.steps_with_tools`, with any error it raises while
     building the request or reading the response reported as
-    :class:`ValuesExtractionFailed` ``"<failure>: <Type>: <message>"`` — the
-    same wrapping the inline call site applied to the whole ``call_with_tools``
-    call.
+    :class:`ValuesExtractionFailed` by :func:`_call_failed` — the same wrapping
+    the inline call site applied to the whole ``call_with_tools`` call.
 
     Drivers deliver a failed request by throwing its exception in at the pending
     ``yield`` (see :data:`~dgml_core.llm.LLMSteps`), so executor failures land
@@ -2291,7 +2375,7 @@ def _tool_call_step(
             )
         )
     except Exception as exc:
-        raise ValuesExtractionFailed(f"{failure}: {type(exc).__name__}: {exc}") from exc
+        raise _call_failed(failure, exc, config) from exc
 
 
 def _phase1_llm_config(
@@ -2508,7 +2592,8 @@ def phase3_page_steps(
     driver puts them in one wave). Drive it with the config from
     :func:`_phase3_llm_config`; a failed request thrown in at the pending
     ``yield`` surfaces as :class:`ValuesExtractionFailed` ``"phase 3 page <n>
-    call failed: <Type>: <message>"``. Each response's usage is folded into
+    call failed: <Type>: <message> (<context>)"`` (see :func:`_call_failed`).
+    Each response's usage is folded into
     *totals* when given, so phase-3 cost survives in the caller's accounting.
     The page image and OCR words are read from *workspace* before the request
     is yielded.
@@ -3456,7 +3541,8 @@ def phase1_steps(
     Drive it with the config from :func:`_phase1_llm_config` (same effort);
     any failure it does not recover from surfaces as
     :class:`ValuesExtractionFailed` (``"extraction call failed: <Type>:
-    <message>"`` for a failed request). *run* may already carry latches from an
+    <message> (<context>)"`` for a failed request; see :func:`_call_failed`).
+    *run* may already carry latches from an
     earlier run and they are honored.
     """
 
@@ -3850,9 +3936,7 @@ def _phase1_attempt_steps(
                 _remember_required_tool_choice_rejected(endpoint, exc)
                 tool_choice = None
         except Exception as exc:
-            raise ValuesExtractionFailed(
-                f"{_PHASE1_CALL_FAILED}: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise _call_failed(_PHASE1_CALL_FAILED, exc, llm_config) from exc
 
         add_partial(totals, with_tier(result.usage, result.response, None))
 

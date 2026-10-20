@@ -525,7 +525,17 @@ def clustering(
                     decision = propose_new_docset_for_files(
                         workspace, sample, config=classification_config, record_usage=record_usage
                     )
-                except DgmlError:
+                except DgmlError as exc:
+                    # Soft-failed like the partitioner's failure above: INFO,
+                    # since failed_file_ids does not carry the reason.
+                    logger.info(
+                        "clustering: naming cluster %s failed; its %d files left "
+                        "unassigned: %s: %s",
+                        cluster_name,
+                        len(cluster_files),
+                        exc.code,
+                        exc,
+                    )
                     failed_file_ids.extend(cluster_files)
                     continue
             new_name = decision.new_name or ""
@@ -1009,9 +1019,23 @@ def _llm_cluster_internal(
         result = llm_cluster_files(
             workspace, usable, config=ccfg, docsets=proto_docsets, record_usage=record_usage
         )
-    except ClassificationFailed:
+    except ClassificationFailed as exc:
+        # Soft-failed (the run goes on), so INFO; but the error is logged since
+        # neither outcome below carries it — the files only land in
+        # ``failed_file_ids``, or the embedding pipeline takes over.
         if retry_on_embedding:
+            logger.info(
+                "clustering: the LLM partitioner failed on %d files; grouping them "
+                "with the embedding pipeline instead: %s",
+                len(usable),
+                exc,
+            )
             return None
+        logger.info(
+            "clustering: the LLM partitioner failed; %d files left unassigned: %s",
+            len(usable),
+            exc,
+        )
         return _InternalResult(
             clusters={},
             render_skipped=[*skipped, *usable],

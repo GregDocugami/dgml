@@ -146,6 +146,36 @@ def test_add_remove_file_reference(workspace: Workspace) -> None:
     assert store.list_files(ds.id) == []
 
 
+def test_add_file_logs_the_assignment(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = DocSetStore(workspace)
+    ds = store.create(name="X")
+    fid = "abcdefghijkl"
+    workspace.docs.put_doc("files", fid, {"id": fid})
+    caplog.set_level(logging.INFO, logger="dgml_core")
+
+    store.add_file(ds.id, fid)
+    store.add_file(ds.id, fid)  # re-adding refreshes the assignment, so it logs again
+
+    assert [
+        (r.levelno, r.getMessage()) for r in caplog.records if r.name == "dgml_core.docsets"
+    ] == [(logging.INFO, f"assigned file {fid} to docset {ds.id}")] * 2
+
+
+def test_add_file_refused_logs_nothing(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = DocSetStore(workspace)
+    ds = store.create(name="X")
+    caplog.set_level(logging.DEBUG, logger="dgml_core")
+
+    with pytest.raises(FileNotFound):
+        store.add_file(ds.id, "doesnotexist1")
+
+    assert [r for r in caplog.records if r.name == "dgml_core.docsets"] == []
+
+
 def test_add_file_to_missing_docset(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     fid = "abcdefghijkl"

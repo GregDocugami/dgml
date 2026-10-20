@@ -62,6 +62,7 @@ from .config import ServiceConfig
 from .db import create_schema, make_engine
 from .docstore import PostgresDocStore
 from .jobs import JobFn, JobRunner
+from .logcontext import WorkspaceLogContextMiddleware
 from .tenancy import TEXT_MODES, SettingsMissing, WorkspaceRegistry
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,9 @@ def create_app(config: ServiceConfig | None = None, *, engine: Engine | None = N
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # An organisation-scoped request's log lines, dgml-core's included, carry
+    # its workspace id (see logcontext).
+    app.add_middleware(WorkspaceLogContextMiddleware)
 
     @app.exception_handler(DgmlError)
     def _on_dgml(_: Request, exc: DgmlError) -> JSONResponse:
