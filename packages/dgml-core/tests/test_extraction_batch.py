@@ -452,7 +452,11 @@ def test_executor_failure_on_a_request_gets_the_sync_message(
         workspace, ds_id, [MATCHED, ONE_PAGE], config=_config(), executor=executor
     )
     assert str(batch[ONE_PAGE]) == str(sync[ONE_PAGE])
-    assert str(batch[ONE_PAGE]) == "extraction call failed: RuntimeError: provider down"
+    # The provider's message, then the call's tracing context (describe_call_failure).
+    assert str(batch[ONE_PAGE]) == (
+        "extraction call failed: RuntimeError: provider down "
+        f"(model {DEFAULT_VALUES_MODEL!r}, api key not passed)"
+    )
     assert isinstance(batch[MATCHED], ExtractionResult)
 
 

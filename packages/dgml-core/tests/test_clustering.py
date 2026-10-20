@@ -21,6 +21,7 @@ threading known categories).
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -975,3 +976,38 @@ def test_clustering_does_not_name_the_noise_bucket_into_a_docset(workspace: Work
     assert result["n_new_clusters"] == 1
     assert [d.name for d in DocSetStore(workspace).list_all()] == ["Invoices"]
     assert [call.args[1] for call in mock_propose.call_args_list] == [["real"]]
+
+
+def test_clustering_logs_a_failed_naming_call(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cluster whose naming call fails soft-fails into `failed_file_ids`,
+    which carries no reason — so the reason is logged, at INFO since the run
+    goes on."""
+    from dgml_core.errors import ClassificationFailed
+
+    write_classification_config(workspace, {"model": "gemini/gemini-3.1-flash-lite"})
+    for fid in ("a", "b"):
+        _seed_file(workspace, fid)
+        _seed_page_image(workspace, fid)
+    caplog.set_level(logging.DEBUG, logger="dgml_core.clustering")
+
+    with (
+        patch(
+            "dgml_core.clustering.run_clustering_detailed",
+            return_value={"a": _dp("unknown_0"), "b": _dp("unknown_0")},
+        ),
+        patch(
+            "dgml_core.clustering.propose_new_docset_for_files",
+            side_effect=ClassificationFailed("LLM call failed: RuntimeError: boom"),
+        ),
+    ):
+        result = clustering(workspace, method="embedding")
+
+    assert sorted(result["failed_file_ids"]) == ["a", "b"]
+    [record] = [r for r in caplog.records if r.name == "dgml_core.clustering"]
+    assert record.levelno == logging.INFO
+    assert record.getMessage() == (
+        "clustering: naming cluster unknown_0 failed; its 2 files left unassigned: "
+        "CLASSIFICATION_FAILED: LLM call failed: RuntimeError: boom"
+    )

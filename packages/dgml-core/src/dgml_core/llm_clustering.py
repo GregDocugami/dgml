@@ -51,7 +51,7 @@ from .classification import (
     _resolve_api_key,
 )
 from .errors import ClassificationFailed
-from .llm import LLMConfig, call_with_tools
+from .llm import LLMConfig, call_with_tools, describe_call_failure
 from .models import DocSet
 from .prompts import PromptKey
 from .prompts import get as prompt
@@ -208,7 +208,9 @@ def llm_cluster_files(
             tool_choice="required",
         )
     except Exception as exc:
-        raise ClassificationFailed(f"LLM call failed: {type(exc).__name__}: {exc}") from exc
+        raise ClassificationFailed(
+            f"LLM call failed: {describe_call_failure(exc, llm_config)}"
+        ) from exc
 
     groups = _extract_groups(result.response)
     return _assemble_result(groups, labels, usable, no_pages + overflow, docsets)

@@ -140,7 +140,12 @@ def test_batch_failure_has_the_sync_message(workspace: Workspace) -> None:
             executor=_executor(backend, sync_execute=sync_execute),
             record_usage=True,
         )
-    assert str(excinfo.value) == "schema generation call failed: RuntimeError: provider exploded"
+    # The provider's message, then the call's tracing context (describe_call_failure),
+    # as the sync path reports it.
+    assert str(excinfo.value) == (
+        "schema generation call failed: RuntimeError: provider exploded "
+        f"(model {DEFAULT_SCHEMA_MODEL!r}, api key not passed)"
+    )
     (row,) = read_events(workspace)
     assert row["outcome"] == "error" and row["error"] == "RuntimeError: provider exploded"
 

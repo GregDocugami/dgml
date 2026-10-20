@@ -275,7 +275,13 @@ def phase3(ws: Workspace) -> Any:
 def test_thrown_errors_keep_their_sync_messages(workspace: Workspace) -> None:
     gen = phase1(workspace, grounded.Phase1Result())
     next(gen)
-    with pytest.raises(ValuesExtractionFailed, match=r"^extraction call failed: RuntimeError: x$"):
+    with pytest.raises(
+        ValuesExtractionFailed,
+        match=(
+            rf"^extraction call failed: RuntimeError: x \(model '{DEFAULT_VALUES_MODEL}', "
+            r"api key not passed\)$"
+        ),
+    ):
         gen.throw(RuntimeError("x"))
 
     page = phase3(workspace)
