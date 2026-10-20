@@ -1896,10 +1896,10 @@ image when the page falls outside the edge bounds) rather than PDF points — so
 the coordinates in a File added with `--dpi 150` are half those of the same
 File added at 300. Anything consuming `dg:origin` boxes should take the page's
 size from its `page_text/` `width` / `height` (or the image itself) rather
-than assuming 300 dpi. Because the edge bounds apply after the render, a
-`--dpi` low enough to put a page's long edge under 1000 pixels is scaled back
-up to 1000 (interpolated, not re-rasterized), and one high enough to put it
-over 3508 is scaled down.
+than assuming 300 dpi. The edge bounds override `--dpi`: one low enough to put
+a page's long edge under 1000 pixels is brought back up to 1000, and one high
+enough to put it over 3508 is brought down (ghostscript resizes its render;
+the `pypdfium2` engine rasterizes such a page straight at the fitted size).
 
 Conflict types recorded in the success payload as `conflict_kind`:
 

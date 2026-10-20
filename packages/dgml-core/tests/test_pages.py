@@ -703,6 +703,49 @@ def test_pypdfium2_renders_out_of_bounds_pages_at_the_fitted_size(
     assert DEFAULT_PAGE_IMAGE_SPEC.fit(*nominal) != nominal
 
 
+def test_pypdfium2_fitted_render_keeps_the_far_edge_of_a_long_strip(tmp_path: Path) -> None:
+    """A 226 x 20000 pt receipt strip fits to 40 x 3508, where the narrow axis's
+    rounding (39.65 -> 40) makes the uniform render scale ~1% too large for the
+    long axis. That overshoot is page content, not a float pixel: it must be
+    squeezed to the target (as ghostscript's resize does), not cropped off the
+    bottom — a 100 pt black band at the foot of the page must still be there."""
+    from PIL import Image
+
+    width, height = 226, 20000
+    stream = b"0 0 226 100 re f\n"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] "
+        f"/Contents 4 0 R >>".encode(),
+        f"<< /Length {len(stream)} >>\nstream\n".encode() + stream + b"endstream",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    out += b"".join(f"{off:010d} 00000 n \n".encode() for off in offsets)
+    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n".encode()
+    out += f"startxref\n{xref}\n%%EOF\n".encode()
+    pdf_path = tmp_path / "strip.pdf"
+    pdf_path.write_bytes(bytes(out))
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    make_renderer(PdfConfig(provider=EngineName.PYPDFIUM2)).render(
+        pdf_path, raw, dpi=300, image_spec=DEFAULT_PAGE_IMAGE_SPEC
+    )
+    with Image.open(raw / "page_1.png") as im:
+        gray = im.convert("L")
+        assert gray.size == (40, PAGE_MAX_EDGE)
+        # The band spans the last 100 * 3508 / 20000 ~= 17.5 rows.
+        assert gray.getpixel((20, PAGE_MAX_EDGE - 5)) == 0
+        assert gray.getpixel((20, PAGE_MAX_EDGE - 30)) == 255
+
+
 def test_pypdfium2_pages_need_no_resize_in_the_store_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

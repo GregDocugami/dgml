@@ -177,8 +177,10 @@ class Pypdfium2Renderer(PageRenderer):
             # than at ``dpi`` and resizing — a large sheet costs a fraction of
             # the pixels, and a small page gains real detail instead of an
             # interpolated stretch. The larger per-axis scale keeps both axes
-            # at or over their target; the crop below trims the other's
-            # overshoot, which is about a pixel.
+            # at or over their target. The fit rounds each axis on its own, so
+            # the other axis can overshoot by more than the float pixel the
+            # crop below trims — a 40-pixel-wide receipt strip carries a 1%
+            # rounding error that is 30+ pixels down its 3508-pixel length.
             scale = max(target_w / width_pts, target_h / height_pts)
 
         # PDFium computes its canvas as ceil(pts * scale) in binary float, so an
@@ -192,18 +194,22 @@ class Pypdfium2Renderer(PageRenderer):
         over_w = math.ceil(width_pts * scale) - target_w
         over_h = math.ceil(height_pts * scale) - target_h
         # crop is (left, bottom, right, top); trimming right/bottom keeps the
-        # page anchored at the top-left, which is the page_text/ origin.
+        # page anchored at the top-left, which is the page_text/ origin. Only a
+        # one-pixel overshoot is cropped: anything larger is page content at a
+        # scale page_text/ does not use on that axis, so it is kept and the
+        # resize below squeezes it to the target, as ghostscript's path does.
         crop = (
             0.0,
-            over_h / scale if over_h > 0 else 0.0,
-            over_w / scale if over_w > 0 else 0.0,
+            over_h / scale if over_h == 1 else 0.0,
+            over_w / scale if over_w == 1 else 0.0,
             0.0,
         )
         image = page.render(scale=scale, crop=crop).to_pil()
         if image.size != (target_w, target_h):
-            # Float rounding left the canvas a pixel off. The store step cannot
-            # tell a page one pixel short of a bound from one already fitted,
-            # so the size has to be exact here.
+            # Float rounding left the canvas a pixel off, or an axis of a fitted
+            # page overshot by more than a pixel. The store step cannot tell a
+            # page one pixel short of a bound from one already fitted, so the
+            # size has to be exact here.
             from PIL import Image
 
             image = image.resize((target_w, target_h), Image.Resampling.LANCZOS)

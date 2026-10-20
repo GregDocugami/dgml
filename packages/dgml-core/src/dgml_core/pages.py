@@ -76,9 +76,10 @@ if TYPE_CHECKING:
     from .storage import Workspace
 
 DEFAULT_DPI = 300
-# What an engine writes: one lossless PNG per page at exactly the requested dpi,
-# into a scratch directory. :func:`render_pages` then fits each to the
-# :class:`PageImageSpec` and stores it under the layout's page-image name.
+# What an engine writes: one lossless PNG per page, at exactly the requested dpi
+# or already at its fitted size (see :meth:`PageRenderer.render`), into a scratch
+# directory. :func:`render_pages` then fits each to the :class:`PageImageSpec`
+# and stores it under the layout's page-image name.
 PAGE_FILENAME_TEMPLATE = "page_%d.png"
 _ENGINE_PAGE_GLOB = "page_*.png"
 
@@ -88,8 +89,9 @@ _ENGINE_PAGE_GLOB = "page_*.png"
 # down to fit: such a page otherwise produces an image too large for vision
 # models (Anthropic rejects one over 8000 px, or over 10 MiB of base64) and too
 # heavy for every consumer that loads it whole. The min scales a small page (a
-# receipt, a label) up so OCR and vision models get legible glyphs; it
-# interpolates the render rather than rasterizing at a higher resolution.
+# receipt, a label) up so OCR and vision models get legible glyphs. Ghostscript
+# reaches either bound by resizing its render; PDFium rasterizes the page
+# straight at the fitted size.
 PAGE_MAX_EDGE = 3508
 PAGE_MIN_EDGE = 1000
 # JPEG quality for stored page images. 90 keeps small glyphs clean for OCR.
@@ -520,8 +522,9 @@ def _replace_pages_from(src_dir: Path, output_dir: Path) -> int:
 
 def _store_pages(raw_dir: Path, output_dir: Path, image_spec: PageImageSpec) -> int:
     """Fit each engine PNG in ``raw_dir`` to ``image_spec`` and store it in
-    ``output_dir`` as the smaller of PNG and JPEG, resizing with Lanczos when
-    the page falls outside the bounds. Returns the page count.
+    ``output_dir`` as the smaller of PNG and JPEG, resizing with Lanczos a page
+    the engine wrote at its nominal size outside the bounds (one already
+    written at its fitted size is left as is). Returns the page count.
 
     Raises :class:`PageRenderFailed` for an engine image Pillow cannot read.
     """
