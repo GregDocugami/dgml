@@ -535,15 +535,16 @@ workspace, restate the family there.
 
 A model and its credentials are **one group, written together in one config
 layer**: a tier's are the `<tier>_*` keys beside it, a task's are the keys on its
-own section, and a credential in a layer that does not set its model is an error.
-So a group never borrows from another tier, another section or another layer, and
-a key can never be separated from the model it was written beside.
+own section, and a credential in a layer that does not set its model is ignored,
+with a warning saying where to put it. So a group never borrows from another tier,
+another section or another layer, and a key can never be separated from the model
+it was written beside.
 
 ```toml
 [models]
 family = "anthropic_google"
-anthropic_api_key_env = "ANTHROPIC_API_KEY"   # onto this layer's anthropic/… tiers
-google_api_key_env    = "GEMINI_API_KEY"      # … and its gemini/… tiers
+anthropic_api_key_env = "ANTHROPIC_API_KEY"   # onto every keyless anthropic/… model
+google_api_key_env    = "GEMINI_API_KEY"      # … and every keyless gemini/… one
 expert          = "anthropic/claude-opus-5"
 expert_api_key_env = "OPUS_KEY"               # this tier's own key …
 expert_api_base = "https://proxy.example"     # … and endpoint
@@ -551,16 +552,15 @@ expert_api_base = "https://proxy.example"     # … and endpoint
 
 - **Per task**, on the task's own section (`generation.api_key_env`,
   `grounded.schema_api_key`, `classification.api_base`, …) — for the model that
-  section names. Credentials on a section that names no model are an error: a key
-  beside no model has no model it was meant for.
+  section names in the same layer. Credentials in a layer whose section names no
+  model are ignored with a warning: a key beside no model has no model it was
+  meant for.
 - **Per tier**: `<tier>_api_key` / `<tier>_api_key_env` / `<tier>_api_base` next
   to the tier, taken whole by every task that gets its model from that tier. They
-  require the tier to be set **in the same layer** (a `family` there counts), and
-  they move with it: a layer that sets `expert` replaces `expert`'s whole group, so
-  a workspace `config.toml` that overrides `expert` does **not** inherit a
-  user-level `expert_api_key_env`. Keys kept in the environment name their model
-  there too — `DGML_MODELS__FAMILY=anthropic` with
-  `DGML_MODELS__ANTHROPIC_API_KEY_ENV=…` is the one-layer form.
+  require the tier to be set **in the same layer** (a `family` there counts) and
+  are ignored with a warning otherwise, and they move with it: a layer that sets
+  `expert` replaces `expert`'s whole group, so a workspace `config.toml` that
+  overrides `expert` does **not** inherit a user-level `expert_api_key_env`.
 
   Because a `family` sets every tier in its layer, a tier credential may sit
   beside the family alone, with no explicit tier:
@@ -577,19 +577,27 @@ expert_api_base = "https://proxy.example"     # … and endpoint
   there must be a Google key). To know which model a key is sent to, pin the tier
   beside it (`expert = "anthropic/claude-opus-5"`).
 - **Per provider**: `anthropic_api_key`, `google_api_key`, `openai_api_key` (or
-  the `_env` form) is shorthand within one layer. It is written onto every tier and
-  every task-section model of that provider (by model-id prefix: `anthropic/`,
-  `gemini/`, `openai/`) that the same layer sets or expands from `family`, unless
-  the model has its own key or an `api_base`. One key per provider covers a mixed
-  family such as `anthropic_google`; a model pointed at a custom `api_base` never
-  receives it, and neither does a model set in another config file or layer. A
-  provider key with no model of its provider in the layer is unused — not an error
-  — but when a model of that provider from another layer ends up with no key, dgml
-  logs a warning, since litellm will read its own env var for it instead. The
-  exception is a per-call override — `--model` / `--label-model`, a
-  `--generation-config` profile or file, `--values-model` / `--schema-model`: it
-  names a model but never a key, so a model it sets with no credentials of its own
-  takes the provider key from the highest layer that sets one.
+  the `_env` form) merges like any other setting — the highest layer that sets
+  either form wins, so a key in `DGML_MODELS__ANTHROPIC_API_KEY_ENV` overrides one
+  in a config file, and one form in the user config never clashes with the other in
+  the workspace config. After the merge it is written onto every model of that
+  provider (by model-id prefix: `anthropic/`, `gemini/`, `openai/`) that has no key
+  of its own and no `api_base`: tiers, task sections, and per-call overrides
+  (`--model` / `--label-model`, a `--generation-config` profile or file,
+  `--values-model` / `--schema-model`) alike, whichever layer set the model. One
+  key per provider covers a mixed family such as `anthropic_google`. A model
+  pointed at a custom `api_base` never receives it; dgml warns there, because
+  litellm would send its own env-var key to that host instead.
+
+**Secrets injected through the environment** follow the same rules. The
+environment is a layer like any other, so `DGML_GENERATION__API_KEY_ENV` alone is
+ignored (with a warning) — it names no model — and `DGML_GENERATION__MODEL` alone
+replaces the file's `generation` model group whole, `api_base` and key included.
+For an `anthropic/`, `gemini/` or `openai/` model, inject the provider key
+(`DGML_MODELS__ANTHROPIC_API_KEY_ENV=…`): it reaches every keyless model of that
+provider, whichever layer set the model. For any other model, or one at a custom
+`api_base`, set the whole group in the environment (`DGML_GENERATION__MODEL`,
+`DGML_GENERATION__API_BASE`, `DGML_GENERATION__API_KEY_ENV`).
 
 A model with no credentials falls back to litellm's per-provider env var — the one
 fallback there is. A tier that is unset borrows its fallback tier's model and
@@ -638,7 +646,7 @@ Field rules:
   classifier.
 - `api_key` / `api_key_env` / `api_base` — optional; mutually-exclusive key /
   env-var name, plus an optional endpoint, for the `model` set here. They require
-  `model` in the same config layer (else `CLASSIFICATION_CONFIG_INVALID`); a model
+  `model` in the same config layer (else they are ignored, with a warning); a model
   from the `light` tier takes the tier's own `light_api_key` and friends. When
   unset, litellm uses its per-provider env var.
 
@@ -707,8 +715,8 @@ Field rules:
 - `schema_api_key_env` / `values_api_key_env` — optional env var names per side.
 - `schema_api_base` / `values_api_base` — optional endpoint per side.
   These per-side credentials are for the model set here and require it in the
-  same config layer (else `GROUNDED_CONFIG_INVALID`); a model from its tier takes
-  the tier's credentials. When unset, litellm uses its per-provider env var.
+  same config layer (else they are ignored, with a warning); a model from its tier
+  takes the tier's credentials. When unset, litellm uses its per-provider env var.
 - `max_tool_iters` — optional positive int, default 20. Cap on
   `get_page_words` tool calls per extraction.
 - `values_reasoning_effort` — optional, default `"medium"`. The reasoning budget
@@ -761,7 +769,7 @@ Field rules:
   `label_api_base`. The two models carry **independent** credentials because
   they may name different providers (e.g. the `anthropic_google` family blends
   Gemini and Anthropic models). Each set is for the model set here and requires
-  it in the same config layer (else `GENERATION_CONFIG_INVALID`); a model from
+  it in the same config layer (else it is ignored, with a warning); a model from
   its tier takes the tier's credentials. When unset, litellm uses its
   per-provider env var.
 - `thinking` — optional; `"disabled"` (default), `"adaptive"`, or

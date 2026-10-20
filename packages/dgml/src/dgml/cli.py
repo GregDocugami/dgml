@@ -4235,6 +4235,8 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                     label_model=label_model,
                     api_key=gen_api_key,
                     api_base=gen_api_base,
+                    label_api_key=label_api_key,
+                    label_api_base=label_api_base,
                     window_size=args.window_size,
                     temperature=args.temperature,
                     max_tokens=args.max_tokens,

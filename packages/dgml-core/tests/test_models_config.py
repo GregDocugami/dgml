@@ -27,6 +27,7 @@ from dgml_core.models_config import (
     Model,
     ModelsConfig,
     Tier,
+    apply_provider_keys,
     expand_family,
     load_models_config,
     normalize_models_layer,
@@ -40,9 +41,19 @@ def _merged(models: Any) -> dict[ConfigSection, Any]:
     return {ConfigSection.MODELS: models}
 
 
-def _normalized(models: dict[str, Any]) -> ModelsConfig:
-    """One layer, as the merge sees it: family expanded, provider keys applied."""
-    return load_models_config(_merged(normalize_models_layer(models)))
+def _drop_none(table: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in table.items() if v is not None}
+
+
+def _normalized(*layers: dict[str, Any]) -> ModelsConfig:
+    """Layers (lowest first) as the merge sees them: each normalized, merged, its
+    `None`s dropped, then the provider keys applied."""
+    merged: dict[str, Any] = {}
+    for layer in layers:
+        merged.update(normalize_models_layer(layer))
+    sections = _merged(_drop_none(merged))
+    apply_provider_keys(sections)
+    return load_models_config(sections)
 
 
 def _warned(caplog: pytest.LogCaptureFixture) -> str:
@@ -238,16 +249,24 @@ def test_provider_key_never_reaches_a_tier_with_an_api_base() -> None:
     assert cfg.light == Model("openai/llama3", api_base="http://vllm:8000")
 
 
-def test_provider_key_does_not_cross_layers() -> None:
-    """A provider key is shorthand within its own layer. A tier another layer sets
-    arrives with its group replaced, so the key does not follow it — even to a model
-    of the same provider. That layer writes its own `expert_api_key` or relies on
-    litellm's env var."""
-    user = normalize_models_layer({"family": "anthropic", "anthropic_api_key": "ant"})
-    workspace = normalize_models_layer({"expert": "anthropic/other"})
-    cfg = load_models_config(_merged({**user, **workspace}))
-    assert cfg.expert == Model("anthropic/other")
+def test_provider_key_reaches_a_tier_another_layer_sets() -> None:
+    """A provider key is a setting like any other: applied after the merge, it
+    reaches every keyless model of its provider, whichever layer set the model."""
+    cfg = _normalized(
+        {"family": "anthropic", "anthropic_api_key": "ant"}, {"expert": "anthropic/other"}
+    )
+    assert cfg.expert == Model("anthropic/other", api_key="ant")
     assert cfg.standard == Model(PROVIDER_MODELS["anthropic"]["standard"], api_key="ant")
+
+
+def test_the_higher_layers_provider_key_pair_wins_whole() -> None:
+    """One form in the user config, the other in the workspace: the workspace's pair
+    replaces the user's, so the two never clash."""
+    cfg = _normalized(
+        {"family": "anthropic", "anthropic_api_key": "user-key"},
+        {"anthropic_api_key_env": "WS_KEY"},
+    )
+    assert cfg.standard == Model(PROVIDER_MODELS["anthropic"]["standard"], api_key_env="WS_KEY")
 
 
 def test_fallback_tier_brings_its_own_credentials() -> None:
@@ -279,9 +298,15 @@ def test_section_takes_the_tier_model_whole() -> None:
 
 
 def _section_layer(section: ConfigSection, table: dict[str, Any], **providers: Any) -> Model:
-    """One layer's task section given that layer's provider keys, merged and resolved."""
-    layer = normalize_task_layer(table, section, providers)
-    merged = {section: {k: v for k, v in layer.items() if v is not None}}
+    """A task section beside the given provider keys, merged, keys applied, resolved."""
+    models = {}
+    for p, (api_key, api_key_env) in providers.items():
+        models.update({f"{p}_api_key": api_key, f"{p}_api_key_env": api_key_env})
+    merged = {
+        section: _drop_none(normalize_task_layer(table, section)),
+        ConfigSection.MODELS: _drop_none(models),
+    }
+    apply_provider_keys(merged)
     return resolve_tiered_model(
         merged,
         section_name=section,
@@ -291,7 +316,7 @@ def _section_layer(section: ConfigSection, table: dict[str, Any], **providers: A
     )
 
 
-def test_section_model_takes_its_layers_provider_key() -> None:
+def test_section_model_takes_its_providers_key() -> None:
     model = _section_layer(ConfigSection.GENERATION, {"model": "openai/gpt"}, openai=("oai", None))
     assert model == Model("openai/gpt", api_key="oai")
     # A model of another provider takes nothing.
@@ -337,32 +362,41 @@ def test_malformed_section_credentials_are_the_sections_error() -> None:
         _resolve(merged)
 
 
-def test_normalize_rejects_a_tier_credential_without_its_tier_in_the_layer() -> None:
-    with pytest.raises(
-        ModelsConfigInvalid, match=r"'models\.light' is not: .*\(or 'models\.family'\)"
-    ):
-        normalize_models_layer({"light_api_key": "k"})
+def test_normalize_drops_a_tier_credential_without_its_tier_in_the_layer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    assert normalize_models_layer({"light_api_key": "k", "light_api_base": "b"}, "the env") == {}
+    warned = _warned(caplog)
+    assert "'models.light_api_key' in the env has no 'models.light' beside it" in warned
+    assert "Set 'models.light' (or 'models.family') in the env too" in warned
     # `family` sets the tier in this layer, so the key has its model.
     out = normalize_models_layer({"family": "anthropic", "light_api_key": "k"})
-    assert out["light_api_key"] == "k"
+    assert out["light_api_key"] == "k" and _warned(caplog) == ""
 
 
-def test_normalize_reports_a_stray_tier_key_beside_an_unknown_family_as_the_family() -> None:
-    """A misspelled family with a tier key is the family's error, not the key's."""
+def test_normalize_leaves_a_stray_tier_key_beside_an_unknown_family_to_the_family_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A misspelled family with a tier key is the family's error, not the key's: the
+    key is neither blamed nor dropped, and load reports the family first."""
+    out = normalize_models_layer({"family": "antropic", "light_api_key": "k"})
+    assert out["light_api_key"] == "k" and _warned(caplog) == ""
     with pytest.raises(ModelsConfigInvalid, match=r"'models\.family' must be one of"):
-        normalize_models_layer({"family": "antropic", "light_api_key": "k"})
+        load_models_config(_merged(out))
 
 
 def test_normalize_runs_the_layer_checks_despite_an_unknown_family() -> None:
-    """Only the expansion is skipped: provider keys are still applied and consumed, and
-    explicit tiers still have their groups completed. The family is left for load."""
+    """Only the expansion is skipped: the provider key pair and explicit tiers still
+    have their groups completed. The family is left for load to report."""
     out = normalize_models_layer(
         {"family": "antropic", "standard": "anthropic/x", "anthropic_api_key": "k"}
     )
     assert out == {
         "family": "antropic",
         "standard": "anthropic/x",
-        "standard_api_key": "k",
+        "anthropic_api_key": "k",
+        "anthropic_api_key_env": None,
+        "standard_api_key": None,
         "standard_api_key_env": None,
         "standard_api_base": None,
     }
@@ -370,31 +404,48 @@ def test_normalize_runs_the_layer_checks_despite_an_unknown_family() -> None:
         load_models_config(_merged(out))
 
 
-def test_normalize_rejects_a_section_credential_without_its_model_in_the_layer() -> None:
-    from dgml_core.errors import GroundedConfigInvalid
-    from dgml_core.models_config import normalize_task_layer
-
-    with pytest.raises(GroundedConfigInvalid, match=r"'grounded\.values_model' is not:"):
-        normalize_task_layer({"values_api_key_env": "K"}, ConfigSection.GROUNDED)
+def test_normalize_drops_a_section_credential_without_its_model_in_the_layer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    layer = {"values_api_key_env": "K", "schema_model": "s", "max_tool_iters": 3}
+    out = normalize_task_layer(layer, ConfigSection.GROUNDED, "the user config")
+    assert _drop_none(out) == {"schema_model": "s", "max_tool_iters": 3}
+    warned = _warned(caplog)
+    assert "'grounded.values_api_key_env' in the user config has no 'grounded.values_model'" in (
+        warned
+    )
+    assert "Set 'grounded.values_model' in the user config too" in warned
     out = normalize_task_layer(
         {"values_model": "m", "values_api_key_env": "K"}, ConfigSection.GROUNDED
     )
     assert out["values_api_key_env"] == "K" and out["values_api_base"] is None
+    assert _warned(caplog) == ""
 
 
-def test_normalize_drops_a_stray_credential_only_in_an_opt_in_section_it_leaves_off() -> None:
-    from dgml_core.errors import GenerationConfigInvalid, StyleConfigInvalid
-
-    out = normalize_task_layer({"enabled": False, "api_key_env": "K"}, ConfigSection.STYLE)
+def test_normalize_drops_a_stray_credential_whatever_the_sections_switch_says() -> None:
+    for enabled in (False, True):
+        out = normalize_task_layer({"enabled": enabled, "api_key_env": "K"}, ConfigSection.STYLE)
+        assert out == {"enabled": enabled}
+    out = normalize_task_layer({"enabled": False, "label_api_key": "k"}, ConfigSection.GENERATION)
     assert out == {"enabled": False}
-    with pytest.raises(StyleConfigInvalid, match=r"'style\.model' is not"):
-        normalize_task_layer({"enabled": True, "api_key_env": "K"}, ConfigSection.STYLE)
-    # A section with no switch has no off state to excuse the key.
-    with pytest.raises(GenerationConfigInvalid, match=r"'generation\.label_model' is not"):
-        normalize_task_layer({"enabled": False, "label_api_key": "k"}, ConfigSection.GENERATION)
 
 
-def test_provider_keys_are_consumed_and_dropped_by_the_layer() -> None:
+def test_provider_key_pair_is_one_group_in_its_layer() -> None:
+    """The layer keeps its key and blanks the other form, so a higher layer's pair
+    replaces it whole; tiers take it only after the merge."""
     out = normalize_models_layer({"family": "anthropic", "anthropic_api_key": "ant"})
-    assert "anthropic_api_key" not in out
-    assert out["advanced_api_key"] == "ant"
+    assert (out["anthropic_api_key"], out["anthropic_api_key_env"]) == ("ant", None)
+    assert out["advanced_api_key"] is None
+
+
+def test_a_null_model_key_unsets_its_whole_group() -> None:
+    """Null is a value the layer set, so the group goes with it: the merge then drops
+    a lower layer's credentials along with the model, instead of leaving them stray."""
+    nulls = {"api_key": None, "api_key_env": None, "api_base": None}
+    assert normalize_task_layer({"model": None}, ConfigSection.GENERATION) == {
+        "model": None,
+        **nulls,
+    }
+    out = normalize_models_layer({"family": "anthropic", "light": None})
+    assert out["light"] is None and all(out[f"light_{k}"] is None for k in nulls)
+    assert out["standard"] == PROVIDER_MODELS["anthropic"]["standard"]

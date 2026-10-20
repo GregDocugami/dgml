@@ -36,6 +36,10 @@ What this does and does not do:
   configuration. (One exception by design: a model side with *no* key configured still falls
   back to litellm's own per-provider environment lookup — so a multi-tenant host should keep
   provider keys out of its process environment and pass them in `cfg`.)
+- **Nothing leaks through a `repr`.** `Model.api_key` and the `Models` provider keys are left out
+  of their reprs, and `ProviderSpec`, `StorageConfig` and `Configuration` print every
+  credential-named option or section value (`*api_key`, `*secret*`, `*token*`, `*password*`,
+  `*_uri`) as `***`, so `cfg` can be logged. Env-var names, endpoints and model ids stay visible.
 - **Nothing is written back.** There is no `config.toml`, no storage seal, no store row. The
   first `open` against a fresh backend writes the workspace's meta document (name,
   organization, id, schema version) to the docstore; later opens check it names the same
@@ -77,11 +81,12 @@ own credentials, by value. It renders flat — `Generation(label_model=Model("x"
 is `label_model = "x"` / `label_api_key = "k"` in TOML terms. A `Model` is one group: a task's
 `Model` uses exactly the credentials it carries, a tier's likewise, and nothing is borrowed from
 another tier or section. The provider keys on `Models` (`anthropic_api_key` / `google_api_key` /
-`openai_api_key`) are written onto every model of that provider in the `Configuration` — the
-tiers `Models` sets or expands from `family`, and the section models — unless the model has its
-own key or an `api_base`. The `Configuration` keeps them, so a per-call override of the same
-provider (`load_grounded_config(ws, values_model=…)`, a generation profile) runs on this
-configuration's key too, never the server's environment key. A model with no credentials
+`openai_api_key`) stay in the `Configuration`'s `[models]` section as written; each time a
+loader reads it, they are written onto every model of that provider — the tiers `Models` sets
+or expands from `family`, the section models, and a per-call override's model
+(`load_grounded_config(ws, values_model=…)`, a generation profile) — unless the model has its
+own key or an `api_base`. So an override runs on this configuration's key, never the server's
+environment key. A model with no credentials
 leaves litellm its own env var — so at a custom `api_base`, an `openai/`, `anthropic/` or
 `gemini/` model needs `api_key` set beside it (a real key, or a placeholder such as `"EMPTY"`),
 or litellm sends the provider's env-var key to that host; `ollama/` needs none. See

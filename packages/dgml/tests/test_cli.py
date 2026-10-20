@@ -2823,6 +2823,47 @@ def test_docset_generate_models_from_config(
 
 @needs_gs
 @pytest.mark.usefixtures("no_link_model")
+def test_docset_generate_threads_both_models_credentials(
+    tmp_path: Path,
+    text_pdf: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The labeling model's key and api_base reach ConvertOptions beside the
+    transcription model's — otherwise every labeling-side call (roster planning,
+    labeling, descriptions) silently runs on litellm's env-var key instead."""
+    ws = tmp_path / "ws"
+    did = _init_with_docset(ws, capsys)
+    monkeypatch.setenv("T_KEY", "t-key")
+    monkeypatch.setenv("L_KEY", "l-key")
+    Workspace(root=ws).config_path.write_text(
+        dump_toml(
+            {
+                "generation": {
+                    "model": "anthropic/claude-haiku-4-5",
+                    "api_key_env": "T_KEY",
+                    "label_model": "anthropic/claude-sonnet-4-6",
+                    "label_api_key_env": "L_KEY",
+                    "label_api_base": "https://proxy.example",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    main(_ws_args(ws) + ["file", "add", str(text_pdf)])
+    fid = _read_stdout(capsys)["file"]["id"]
+    main(_ws_args(ws) + ["docset", "add-file", fid, "--docset", did])
+    capsys.readouterr()
+
+    with patch("dgml_core.generation.convert_batch", return_value={}) as mock_batch:
+        assert main(_ws_args(ws) + ["docset", "generate", did, "--no-coverage"]) == 0
+    opts = mock_batch.call_args.kwargs["options"]
+    assert (opts.api_key, opts.api_base) == ("t-key", None)
+    assert (opts.label_api_key, opts.label_api_base) == ("l-key", "https://proxy.example")
+
+
+@needs_gs
+@pytest.mark.usefixtures("no_link_model")
 def test_docset_generate_model_flags_override_config(
     tmp_path: Path, text_pdf: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
