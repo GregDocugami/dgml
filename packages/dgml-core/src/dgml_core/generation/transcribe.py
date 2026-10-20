@@ -44,7 +44,7 @@ from dgml_core.generation.blocks import (
     xml_safe_block_dict,
 )
 from dgml_core.generation.prompts import get as prompt
-from dgml_core.pages import PdfConfig, pdf_page_count
+from dgml_core.pages import PdfConfig, pdf_page_count, pinned_slice
 from dgml_core.utils import xml_safe
 
 _UNSAFE_FNAME_RE = re.compile(r'[<>:"/\\|?*]')
@@ -94,6 +94,12 @@ def blocks_to_json(blocks: list[Block]) -> str:
     return json.dumps([dataclasses.asdict(b) for b in blocks], indent=2, ensure_ascii=False)
 
 
+def blocks_cache_path(cache_dir: Path | str, doc_name: str) -> Path:
+    """Where *doc_name*'s transcription cache (``<stem>_blocks.json``) lives in
+    *cache_dir* — present means the next run skips transcribing it."""
+    return Path(cache_dir) / _UNSAFE_FNAME_RE.sub("_", f"{Path(doc_name).stem}_blocks.json")
+
+
 def _load_cached_blocks(cache_dir: Path | str | None, doc_name: str) -> list[Block] | None:
     """Reload a document's transcription from ``<stem>_blocks.json`` if present.
 
@@ -105,8 +111,7 @@ def _load_cached_blocks(cache_dir: Path | str | None, doc_name: str) -> list[Blo
     """
     if cache_dir is None:
         return None
-    stem = _UNSAFE_FNAME_RE.sub("_", f"{Path(doc_name).stem}_blocks.json")
-    blocks_file = Path(cache_dir) / stem
+    blocks_file = blocks_cache_path(cache_dir, doc_name)
     if not blocks_file.exists():
         return None
     try:
@@ -594,6 +599,20 @@ def _merge_payloads(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     return {"continues": str(a.get("continues", "") or ""), "blocks": blocks_a + blocks_b}
 
 
+def _window_slice(
+    pdf_bytes: bytes, pages: list[int], *, pdf_config: PdfConfig | None, total: int
+) -> bytes:
+    """The PDF slice a window (or a split half, or a single page) sends to the
+    model, pinned to the running batch job (see :func:`pages.pinned_slice`).
+    Outside a job this is exactly ``document.slice_pdf``."""
+    return pinned_slice(
+        pdf_bytes,
+        [p + 1 for p in pages],
+        config=pdf_config,
+        make=lambda: document.slice_pdf(pdf_bytes, pages, config=pdf_config, total_pages=total),
+    )
+
+
 def transcribe_steps(
     pdf_bytes: bytes,
     *,
@@ -698,7 +717,7 @@ def transcribe_steps(
         """Gated attempt loop for one page range; best (recall, raw, payload)."""
         # `total` was counted once for this document above; passing it keeps
         # each window from re-walking the whole page tree.
-        pdf_slice = document.slice_pdf(pdf_bytes, pages, config=pdf_config, total_pages=total)
+        pdf_slice = _window_slice(pdf_bytes, pages, pdf_config=pdf_config, total=total)
         exp = [t for p in pages if p < len(page_tokens) for t in page_tokens[p]]
         # Lines mode for this window when a page has a text layer; a page
         # without one (a scan, a map) gets a text-format call of its own
@@ -875,7 +894,7 @@ def transcribe_steps(
                 # The page without a text layer, transcribed in the text
                 # format on its own and spliced in at its place.
                 p_instr = _window_instruction(p, p, total, _window_context(blocks))
-                p_slice = document.slice_pdf(pdf_bytes, [p], config=pdf_config, total_pages=total)
+                p_slice = _window_slice(pdf_bytes, [p], pdf_config=pdf_config, total=total)
                 p_raw = yield from llm.steps_continued(
                     config,
                     system_prompt=SYSTEM_PROMPT,

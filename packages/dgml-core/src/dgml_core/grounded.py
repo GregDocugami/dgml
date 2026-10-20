@@ -57,6 +57,7 @@ import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -126,7 +127,13 @@ from .matching import (
 )
 from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .ocr import _image_dimensions
-from .pages import PdfConfig, load_pdf_config, pdf_page_count_bytes, slice_pages
+from .pages import (
+    PdfConfig,
+    load_pdf_config,
+    pdf_page_count_bytes,
+    pinned_slice,
+    slice_pages,
+)
 from .prompts import PromptKey
 from .prompts import get as prompt
 from .storage import Workspace
@@ -848,7 +855,14 @@ def _leading_pages(
     pages = max(1, min(count - 1, count * share // whole))
     while True:
         try:
-            sliced = slice_pages(pdf, range(1, pages + 1), config=pdf_config, total_pages=count)
+            sliced = pinned_slice(
+                pdf,
+                range(1, pages + 1),
+                config=pdf_config,
+                make=partial(
+                    slice_pages, pdf, range(1, pages + 1), config=pdf_config, total_pages=count
+                ),
+            )
         except Exception as exc:
             raise SchemaGenerationFailed(
                 f"could not cut file '{file_id}' to its first {pages} pages to fit the "
@@ -899,11 +913,13 @@ def schema_batch_executor(
     ``schema_api_key_env`` and :class:`~dgml_core.errors.BatchUnavailable` when
     the provider has no batch backend. Imports the batch package lazily."""
     from .batch import make_executor
+    from .batch.jobs import credential_ref
 
     return make_executor(
         config.schema_model,
         api_key=_resolve_api_key(config.schema_api_key, config.schema_api_key_env),
         api_base=config.schema_api_base,
+        credential=credential_ref("grounded", "schema", config.schema_api_key_env),
         poll_interval_s=poll_interval_s,
         max_poll_s=max_poll_s,
         min_wave_size=min_wave_size,
@@ -2093,10 +2109,17 @@ def extract_values_batch_pairs(
                 continue
             _succeed(pair, result)
     except BaseException as exc:
-        # Only an interrupt gets here: every Exception above is caught per
-        # pair. It records every open pair before propagating.
+        # Only an interrupt — or a paused batch job — gets here: every
+        # Exception above is caught per pair. An interrupt records every open
+        # pair before propagating. A paused job records nothing: the run that
+        # completes the job replays these pairs and writes their rows and stats.
+        from .errors import BatchPending
+
+        paused = isinstance(exc, BatchPending)
         for pair in list(runs):
             run = runs.pop(pair)
+            if paused:
+                continue
             run.fail(exc)
             with contextlib.suppress(Exception):
                 run.record()
@@ -2129,11 +2152,13 @@ def values_batch_executor(
     extraction raises) and :class:`~dgml_core.errors.BatchUnavailable` when the
     provider has no batch backend. Imports the batch package lazily."""
     from .batch import make_executor
+    from .batch.jobs import credential_ref
 
     return make_executor(
         config.values_model,
         api_key=_resolve_api_key(config.values_api_key, config.values_api_key_env),
         api_base=config.values_api_base,
+        credential=credential_ref("grounded", "values", config.values_api_key_env),
         poll_interval_s=poll_interval_s,
         max_poll_s=max_poll_s,
         min_wave_size=min_wave_size,
@@ -3208,8 +3233,13 @@ def _phase1_in_parts(
 
     def attempt(first: int, last: int) -> LLMSteps[list[tuple[_PdfPart, _Phase1Run]]]:
         try:
-            sliced = slice_pages(
-                pdf_bytes, range(first, last + 1), config=pdf_config, total_pages=page_count
+            sliced = pinned_slice(
+                pdf_bytes,
+                range(first, last + 1),
+                config=pdf_config,
+                make=lambda: slice_pages(
+                    pdf_bytes, range(first, last + 1), config=pdf_config, total_pages=page_count
+                ),
             )
         except Exception as exc:
             raise ValuesExtractionFailed(
