@@ -338,7 +338,9 @@ def test_malformed_section_credentials_are_the_sections_error() -> None:
 
 
 def test_normalize_rejects_a_tier_credential_without_its_tier_in_the_layer() -> None:
-    with pytest.raises(ModelsConfigInvalid, match=r"'models\.light' is not in this config"):
+    with pytest.raises(
+        ModelsConfigInvalid, match=r"'models\.light' is not: .*\(or 'models\.family'\)"
+    ):
         normalize_models_layer({"light_api_key": "k"})
     # `family` sets the tier in this layer, so the key has its model.
     out = normalize_models_layer({"family": "anthropic", "light_api_key": "k"})
@@ -372,12 +374,24 @@ def test_normalize_rejects_a_section_credential_without_its_model_in_the_layer()
     from dgml_core.errors import GroundedConfigInvalid
     from dgml_core.models_config import normalize_task_layer
 
-    with pytest.raises(GroundedConfigInvalid, match=r"'grounded\.values_model' is not in this"):
+    with pytest.raises(GroundedConfigInvalid, match=r"'grounded\.values_model' is not:"):
         normalize_task_layer({"values_api_key_env": "K"}, ConfigSection.GROUNDED)
     out = normalize_task_layer(
         {"values_model": "m", "values_api_key_env": "K"}, ConfigSection.GROUNDED
     )
     assert out["values_api_key_env"] == "K" and out["values_api_base"] is None
+
+
+def test_normalize_drops_a_stray_credential_only_in_an_opt_in_section_it_leaves_off() -> None:
+    from dgml_core.errors import GenerationConfigInvalid, StyleConfigInvalid
+
+    out = normalize_task_layer({"enabled": False, "api_key_env": "K"}, ConfigSection.STYLE)
+    assert out == {"enabled": False}
+    with pytest.raises(StyleConfigInvalid, match=r"'style\.model' is not"):
+        normalize_task_layer({"enabled": True, "api_key_env": "K"}, ConfigSection.STYLE)
+    # A section with no switch has no off state to excuse the key.
+    with pytest.raises(GenerationConfigInvalid, match=r"'generation\.label_model' is not"):
+        normalize_task_layer({"enabled": False, "label_api_key": "k"}, ConfigSection.GENERATION)
 
 
 def test_provider_keys_are_consumed_and_dropped_by_the_layer() -> None:

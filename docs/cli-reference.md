@@ -892,12 +892,17 @@ and a tier model takes its tier's credentials.
 
 `--generation-config <profile|file>` and `--model` / `--label-model` override the
 models for one run (precedence: flags > `--generation-config` > the merged
-config). A model's credentials move with it, so a model a flag names takes **no**
-configured key or `api_base` — not the file's, the workspace's or a tier's — and
-reads LiteLLM's per-provider env var (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …).
-A model the file names takes only the file's credentials. To run a model with a
-configured key or a custom endpoint, write the model and its credentials together
-in `[generation]` or in the `--generation-config` file.
+config). A model's credentials move with it, so a model a flag names takes none
+of the file's, the workspace's or a tier's key or `api_base`, and a model the
+file names takes only the file's credentials.
+
+A profile's, flag's or file's model that carries no credentials of its own takes
+the `[models]` provider key for its provider (`anthropic_api_key_env`, …, from
+the highest config layer that sets one), as a tier does; a model at a custom
+`api_base` never does. With no such key it reads LiteLLM's per-provider env var
+(`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …). To run a model with a different key
+or a custom endpoint, write the model and its credentials together in
+`[generation]` or in the `--generation-config` file.
 
 Anthropic extended thinking is off for both passes
 unless `generation.thinking = "adaptive"` says otherwise — a Claude 4.6+/5 model
@@ -1464,13 +1469,14 @@ flag. Errors `SCHEMA_NOT_FOUND` if the DocSet has no schema, and
 this command needs both in place).
 
 `--values-model` overrides `grounded.values_model` for this call. A model's
-credentials move with it, so nothing configured carries over to the override:
-not `grounded.values_api_key` / `values_api_key_env` / `values_api_base`, and
-nothing from the `advanced` tier. There is no flag for credentials; the override
-reads LiteLLM's per-provider env var (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
-`OPENAI_API_KEY`, …). To run a model with a configured key or a custom endpoint,
-set it in `[grounded]` instead. `--schema-model` on `generate-schema` works the
-same way.
+credentials move with it, so the override takes none of
+`grounded.values_api_key` / `values_api_key_env` / `values_api_base` and nothing
+from the `advanced` tier. It takes the `[models]` provider key for its provider
+(`anthropic_api_key_env`, …), as a tier does; with none, it reads LiteLLM's
+per-provider env var (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`,
+…). There is no flag for credentials: to run a model with a different key or a
+custom endpoint, set it in `[grounded]` instead. `--schema-model` on
+`generate-schema` works the same way.
 
 `--values-effort` overrides `grounded.values_reasoning_effort` for this call:
 `none`, `minimal`, `low`, `medium` (the default), `high`, `xhigh`, or `default`

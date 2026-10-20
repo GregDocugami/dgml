@@ -2691,8 +2691,9 @@ def _add_extraction_subparsers(
         default=None,
         help=(
             "Override grounded.schema_model for this call (LiteLLM model string). "
-            "No configured key or api_base carries over to it; the model reads "
-            "LiteLLM's per-provider env var (e.g. ANTHROPIC_API_KEY)."
+            "It takes the configured [models] provider key for its provider, else "
+            "LiteLLM's per-provider env var (e.g. ANTHROPIC_API_KEY); no other "
+            "configured key or api_base carries over."
         ),
     )
     _add_batch_arguments(
@@ -2774,8 +2775,9 @@ def _add_extraction_subparsers(
         default=None,
         help=(
             "Override grounded.values_model for this call (LiteLLM model string). "
-            "No configured key or api_base carries over to it; the model reads "
-            "LiteLLM's per-provider env var (e.g. ANTHROPIC_API_KEY)."
+            "It takes the configured [models] provider key for its provider, else "
+            "LiteLLM's per-provider env var (e.g. ANTHROPIC_API_KEY); no other "
+            "configured key or api_base carries over."
         ),
     )
     ex_extract.add_argument(
@@ -3181,8 +3183,9 @@ def _add_generate_subparser(
         help=(
             "Override the per-page transcription model for this run (e.g. "
             "'anthropic/claude-haiku-4-5'). Layers on top of --generation-config / "
-            "the workspace config. No configured key or api_base carries over to it; "
-            "the model reads LiteLLM's per-provider env var (e.g. ANTHROPIC_API_KEY)."
+            "the workspace config. It takes the configured [models] provider key "
+            "for its provider, else LiteLLM's per-provider env var (e.g. "
+            "ANTHROPIC_API_KEY); no other configured key or api_base carries over."
         ),
     )
     gen.add_argument(
@@ -3192,8 +3195,9 @@ def _add_generate_subparser(
         help=(
             "Override the batch-wide semantic-labeling model for this run (e.g. "
             "'anthropic/claude-sonnet-4-6'). Layers on top of --generation-config / "
-            "the workspace config. No configured key or api_base carries over to it; "
-            "the model reads LiteLLM's per-provider env var (e.g. ANTHROPIC_API_KEY)."
+            "the workspace config. It takes the configured [models] provider key "
+            "for its provider, else LiteLLM's per-provider env var (e.g. "
+            "ANTHROPIC_API_KEY); no other configured key or api_base carries over."
         ),
     )
     gen.add_argument("--window-size", type=int, default=10, help="Pages per transcription window.")

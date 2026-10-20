@@ -561,16 +561,35 @@ expert_api_base = "https://proxy.example"     # … and endpoint
   user-level `expert_api_key_env`. Keys kept in the environment name their model
   there too — `DGML_MODELS__FAMILY=anthropic` with
   `DGML_MODELS__ANTHROPIC_API_KEY_ENV=…` is the one-layer form.
+
+  Because a `family` sets every tier in its layer, a tier credential may sit
+  beside the family alone, with no explicit tier:
+
+  ```toml
+  [models]
+  family = "anthropic"
+  expert_api_key_env = "OPUS_KEY"   # sent to whatever model the family picks for expert
+  ```
+
+  The key then goes to the family's default model for that tier, which **may
+  change across dgml upgrades** — and in a mixed family may belong to another
+  provider (in `anthropic_google`, `light` is a Gemini model, so `light_api_key`
+  there must be a Google key). To know which model a key is sent to, pin the tier
+  beside it (`expert = "anthropic/claude-opus-5"`).
 - **Per provider**: `anthropic_api_key`, `google_api_key`, `openai_api_key` (or
   the `_env` form) is shorthand within one layer. It is written onto every tier and
   every task-section model of that provider (by model-id prefix: `anthropic/`,
   `gemini/`, `openai/`) that the same layer sets or expands from `family`, unless
   the model has its own key or an `api_base`. One key per provider covers a mixed
   family such as `anthropic_google`; a model pointed at a custom `api_base` never
-  receives it, and neither does a model set in another layer. A provider key with
-  no model of its provider in the layer is unused — not an error — but when a model
-  of that provider from another layer ends up with no key, dgml logs a warning,
-  since litellm will read its own env var for it instead.
+  receives it, and neither does a model set in another config file or layer. A
+  provider key with no model of its provider in the layer is unused — not an error
+  — but when a model of that provider from another layer ends up with no key, dgml
+  logs a warning, since litellm will read its own env var for it instead. The
+  exception is a per-call override — `--model` / `--label-model`, a
+  `--generation-config` profile or file, `--values-model` / `--schema-model`: it
+  names a model but never a key, so a model it sets with no credentials of its own
+  takes the provider key from the highest layer that sets one.
 
 A model with no credentials falls back to litellm's per-provider env var — the one
 fallback there is. A tier that is unset borrows its fallback tier's model and

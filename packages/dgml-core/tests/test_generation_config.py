@@ -477,6 +477,65 @@ def test_resolve_flag_drops_the_files_credentials_for_the_model_it_replaces(
     assert (cfg.label_model, cfg.label_api_key_env) == ("openai/gpt-5", None)
 
 
+def test_override_models_take_the_configs_provider_key(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A profile or flag names only models; each takes the configured key of its own
+    provider, as a tier would, so the run does not fall back to the process env."""
+    write_config(workspace, {"models": {"family": "anthropic", "anthropic_api_key_env": "ORG"}})
+    cfg, _ = resolve_generation_config(workspace, config="fast")
+    assert (cfg.api_key_env, cfg.label_api_key_env) == ("ORG", "ORG")
+    cfg, _ = resolve_generation_config(workspace, label_model=LABEL_MODEL)
+    assert (cfg.api_key_env, cfg.label_api_key_env) == ("ORG", "ORG")
+    # Another provider's model takes none.
+    cfg, _ = resolve_generation_config(workspace, model="openai/gpt-5")
+    assert (cfg.api_key, cfg.api_key_env) == (None, None)
+    assert "does not reach" not in caplog.text
+
+
+def test_override_model_with_its_own_credentials_takes_no_provider_key(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """A file model's own key wins, and one at a custom endpoint gets no provider key:
+    `openai/llama3` behind vLLM is not OpenAI."""
+    write_config(workspace, {"models": {"anthropic_api_key": "org", "openai_api_key": "sk-real"}})
+    path = tmp_path / "gen.json"
+    path.write_text(
+        json.dumps(
+            {
+                "model": MODEL,
+                "api_key_env": "FILE_KEY",
+                "label_model": "openai/llama3",
+                "label_api_base": "http://vllm:8000",
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg, _ = resolve_generation_config(workspace, config=str(path))
+    assert (cfg.api_key, cfg.api_key_env) == (None, "FILE_KEY")
+    assert (cfg.label_api_key, cfg.label_api_base) == (None, "http://vllm:8000")
+    # A flag replacing the file's model drops the file's key but takes the provider's.
+    cfg, _ = resolve_generation_config(workspace, config=str(path), model=MODEL)
+    assert (cfg.api_key, cfg.api_key_env) == ("org", None)
+
+
+def test_override_takes_the_highest_layers_provider_key(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dgml_core.storage import user_config_path
+
+    up = user_config_path()
+    up.parent.mkdir(parents=True, exist_ok=True)
+    up.write_text(
+        dump_toml({"models": {"family": "anthropic", "anthropic_api_key_env": "USER"}}),
+        encoding="utf-8",
+    )
+    write_config(workspace, {"models": {"anthropic_api_key_env": "WS"}})
+    assert resolve_generation_config(workspace, model=MODEL)[0].api_key_env == "WS"
+    monkeypatch.setenv("DGML_MODELS__ANTHROPIC_API_KEY_ENV", "ENV")
+    assert resolve_generation_config(workspace, model=MODEL)[0].api_key_env == "ENV"
+
+
 # ── [generation] thinking ───────────────────────────────────────────────────
 
 

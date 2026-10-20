@@ -42,7 +42,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from typing import Any
 
-from .models_config import ConfigSection, Model, ModelsConfig
+from .models_config import (
+    ConfigSection,
+    Credentials,
+    Model,
+    ModelsConfig,
+    provider_keys,
+    warn_provider_keys_not_applied,
+)
 from .storage_service import StorageConfig
 from .workspace_id import ID_SHAPE, is_workspace_id
 
@@ -331,11 +338,17 @@ class Configuration:
 
     Equality covers everything; the hash covers identity and storage only (sections
     hold dicts), which is what a per-tenant cache of ``Workspace`` objects keys on.
+
+    ``provider_keys`` keeps the ``Models`` provider keys after ``build`` has written
+    them onto its own models, so a per-call model override (``values_model=``, a
+    generation flag) of the same provider gets this configuration's key rather than
+    the process environment's.
     """
 
     identity: Identity
     storage: Storage
     sections: Sections = field(default_factory=dict)
+    provider_keys: Mapping[str, Credentials] = field(default_factory=dict, repr=False)
 
     def __hash__(self) -> int:
         return hash((self.identity, self.storage.blobs._frozen(), self.storage.docs._frozen()))
@@ -380,12 +393,22 @@ class Configuration:
         # A single layer: normalized for the same provider-key and family rules as a
         # TOML layer, then its explicit ``None``s dropped — there is no lower layer to
         # override.
-        sections = _drop_none_values(_normalize_layer(layer))
-        return cls.from_merged(identity=identity, storage=storage, sections=sections)
+        sections = _drop_none_values(_normalize_layer(layer, "Configuration"))
+        models_table = layer.get(ConfigSection.MODELS.value)
+        keys = provider_keys(models_table) if isinstance(models_table, dict) else {}
+        warn_provider_keys_not_applied(sections, {p: f"'Models.{p}_api_key'" for p in keys})
+        return cls.from_merged(
+            identity=identity, storage=storage, sections=sections, provider_keys=keys
+        )
 
     @classmethod
     def from_merged(
-        cls, *, identity: Identity, storage: Storage, sections: Mapping[Any, Any]
+        cls,
+        *,
+        identity: Identity,
+        storage: Storage,
+        sections: Mapping[Any, Any],
+        provider_keys: Mapping[str, Credentials] | None = None,
     ) -> Configuration:
         """Wrap an already-merged section mapping (string or :class:`ConfigSection`
         keys). This is how ``Workspace.config`` is derived on the TOML path."""
@@ -393,6 +416,7 @@ class Configuration:
             identity=identity,
             storage=storage,
             sections={ConfigSection(str(k)): dict(v) for k, v in sections.items()},
+            provider_keys=dict(provider_keys or {}),
         )
 
     @property

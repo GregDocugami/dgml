@@ -36,7 +36,11 @@ of that provider the same layer sets (or expands from ``family``), provided the 
 carries neither its own key nor an ``api_base``. One key per provider thus covers a
 mixed family such as ``anthropic_google``, while a model pointed at a custom endpoint
 never receives a key meant for the provider's own service. A model set in another
-layer gets none; :func:`warn_provider_keys_not_applied` says so.
+config layer gets none; :func:`warn_provider_keys_not_applied` says so. The one
+exception is a per-call override (a flag, a ``--generation-config`` profile or file,
+``values_model=``): it names a model but never a key, so it takes the config's
+provider key on the same terms — the highest layer's, or the in-memory
+``Configuration``'s.
 
 ``family`` picks a whole provider family's defaults: one of the
 :data:`~dgml_core.default_config.PROVIDER_MODELS` keys. It is shorthand for that
@@ -123,6 +127,10 @@ _WARNED_DISABLED: set[ConfigSection] = set()
 # Provider keys another layer held for a keyless model (see
 # `warn_provider_keys_not_applied`), keyed by the message.
 _WARNED_PROVIDER_KEY_NOT_APPLIED: set[str] = set()
+
+# Stray credentials dropped from a layer that does not enable its opt-in section (see
+# `normalize_task_layer`), keyed by the message.
+_WARNED_DROPPED_CREDENTIAL: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -251,6 +259,9 @@ _SECTION_INVALID: dict[ConfigSection, type[DgmlError]] = {
 #: rather than inferred: ``ocr`` also carries an ``api_key``, but no model it belongs to.
 LLM_SECTIONS = frozenset(_SECTION_INVALID)
 
+#: Sections that are off unless ``enabled = true`` (see :func:`section_enabled`).
+OPT_IN_SECTIONS = frozenset({ConfigSection.STYLE, ConfigSection.TEXT_EXTRACTION})
+
 
 def _complete_group(table: dict[str, Any], prefix: str) -> None:
     """Write ``None`` for the credentials of one model group the layer leaves unset.
@@ -292,7 +303,9 @@ def _take_provider_key(
         table[f"{prefix}api_key_env"] = api_key_env
 
 
-def normalize_models_layer(models: dict[str, Any]) -> dict[str, Any]:
+def normalize_models_layer(
+    models: dict[str, Any], layer: str = "this config layer"
+) -> dict[str, Any]:
     """One config layer's ``[models]`` table with its groups made atomic.
 
     ``family`` is expanded (:func:`expand_family`); then each tier the layer sets or
@@ -310,7 +323,8 @@ def normalize_models_layer(models: dict[str, Any]) -> dict[str, Any]:
 
     An unknown ``family`` is not expanded but skips none of the rest; it stays in the
     table for :func:`load_models_config` to report. A stray tier credential beside it
-    reports the family, the likelier mistake, rather than the credential."""
+    reports the family, the likelier mistake, rather than the credential. *layer* names
+    the layer in errors (``the user config``)."""
     family = models.get("family")
     unknown_family = isinstance(family, str) and family not in PROVIDER_MODELS
     out = dict(expand_family(models))
@@ -327,9 +341,9 @@ def normalize_models_layer(models: dict[str, Any]) -> dict[str, Any]:
                 raise _unknown_family(str(family))
             if stray:
                 raise ModelsConfigInvalid(
-                    f"'models.{prefix}{stray[0]}' is set but 'models.{t}' is not in this config "
-                    f"layer: a tier's credentials are written beside its model. Set the tier "
-                    f"here, or 'family' with '<provider>_api_key' in this layer."
+                    f"'models.{prefix}{stray[0]}' is set in {layer} but 'models.{t}' is not: "
+                    f"a tier's credentials are written beside its model. Set 'models.{t}' "
+                    f"(or 'models.family') in {layer} too."
                 )
             continue
         if not isinstance(model, str):
@@ -343,24 +357,40 @@ def normalize_task_layer(
     section: dict[str, Any],
     section_name: ConfigSection,
     providers: Mapping[str, Credentials] | None = None,
+    layer: str = "this config layer",
 ) -> dict[str, Any]:
     """One layer of an LLM task section with its groups made atomic: every model key
     it sets (``model``, ``label_model``, ``schema_model``, …) takes the layer's
     ``providers`` key as a tier would, then has its credential group completed with
     explicit ``None``s. A credential whose model this layer does not set is an error —
-    the same rule as :func:`normalize_models_layer`."""
+    the same rule as :func:`normalize_models_layer` — except in an opt-in section
+    (:data:`OPT_IN_SECTIONS`) this layer does not enable: there it is dropped with a
+    warning. A disabled section never calls its model, and a dropped key cannot pair
+    with one if another layer enables it. A model key set to ``null`` sets no model."""
     out = dict(section)
     invalid = _SECTION_INVALID[section_name]
-    prefixes = {k[: -len("model")] for k in section if k == "model" or k.endswith("_model")}
+    prefixes = {
+        k[: -len("model")]
+        for k, v in section.items()
+        if (k == "model" or k.endswith("_model")) and v is not None
+    }
     for key, value in section.items():
         for suffix in GROUP_SUFFIXES:
             if key.endswith(suffix) and value is not None:
                 prefix = key[: -len(suffix)]
-                if prefix not in prefixes:
-                    raise invalid(
-                        f"'{section_name}.{key}' is set but '{section_name}.{prefix}model' is "
-                        f"not in this config layer: a model's credentials are written beside it"
-                    )
+                if prefix in prefixes:
+                    continue
+                if section_name in OPT_IN_SECTIONS and section.get("enabled") is not True:
+                    del out[key]
+                    _warn_dropped_credential(section_name, key, prefix, layer)
+                    continue
+                raise invalid(
+                    f"'{section_name}.{key}' is set in {layer} but "
+                    f"'{section_name}.{prefix}model' is not: a model's credentials are written "
+                    f"beside it. Set '{section_name}.{prefix}model' beside it, or move it to the "
+                    f"[models] tier this task uses, as '<tier>_{suffix}' (e.g. "
+                    f"'standard_{suffix}')."
+                )
     for prefix in prefixes:
         if isinstance(section.get(f"{prefix}model"), str):
             _take_provider_key(out, f"{prefix}model", prefix, providers or {})
@@ -368,10 +398,22 @@ def normalize_task_layer(
     return out
 
 
-def _keyless_models(merged: Mapping[ConfigSection, Any]) -> Iterator[tuple[str, str]]:
-    """``(config key, model id)`` for every model in the merged config that carries no
-    credentials and no ``api_base``. A disabled ``style`` / ``text_extraction`` never
-    calls its model, so it is skipped."""
+def _warn_dropped_credential(
+    section_name: ConfigSection, key: str, prefix: str, layer: str
+) -> None:
+    message = (
+        f"[dgml] '{section_name}.{key}' in {layer} has no '{section_name}.{prefix}model' "
+        f"beside it, and {layer} does not set '{section_name}.enabled = true'; it is ignored."
+    )
+    if message not in _WARNED_DROPPED_CREDENTIAL:
+        _WARNED_DROPPED_CREDENTIAL.add(message)
+        logger.warning(message)
+
+
+def _keyless_models(merged: Mapping[ConfigSection, Any]) -> Iterator[tuple[str, str, bool]]:
+    """``(config key, model id, has api_base)`` for every model in the merged config
+    that carries no key. A disabled ``style`` / ``text_extraction`` never calls its
+    model, so it is skipped."""
     groups: list[tuple[str, dict[str, Any], str, str]] = []
     models = merged.get(ConfigSection.MODELS)
     if isinstance(models, dict):
@@ -380,18 +422,16 @@ def _keyless_models(merged: Mapping[ConfigSection, Any]) -> Iterator[tuple[str, 
         table = merged.get(section)
         if not isinstance(table, dict):
             continue
-        if section in (ConfigSection.STYLE, ConfigSection.TEXT_EXTRACTION) and (
-            table.get("enabled") is not True
-        ):
+        if section in OPT_IN_SECTIONS and table.get("enabled") is not True:
             continue
         for key in sorted(k for k in table if k == "model" or k.endswith("_model")):
             groups.append((f"{section}.{key}", table, key, key[: -len("model")]))
     for label, table, model_key, prefix in groups:
         model = table.get(model_key)
         if isinstance(model, str) and all(
-            table.get(f"{prefix}{suffix}") is None for suffix in GROUP_SUFFIXES
+            table.get(f"{prefix}{suffix}") is None for suffix in ("api_key", "api_key_env")
         ):
-            yield label, model
+            yield label, model, table.get(f"{prefix}api_base") is not None
 
 
 def warn_provider_keys_not_applied(
@@ -400,21 +440,30 @@ def warn_provider_keys_not_applied(
     """Warn when a model resolves with no key although a layer held its provider's key.
 
     ``keys`` maps a provider to where its key was set (``models.anthropic_api_key_env
-    in the environment``). A provider key applies only to models set in its own layer,
-    so a model another layer set gets none and litellm reads its own env var — a
-    different key, chosen silently. Logged once per process per message."""
-    keyless: dict[str, list[str]] = {}
-    for label, model in _keyless_models(merged):
+    in the environment``). A model another layer set gets none, and one at a custom
+    ``api_base`` never does; either way litellm reads its own env var — a different
+    key, chosen silently, and at an ``api_base`` sent to that host. Logged once per
+    process per message."""
+    keyless: dict[tuple[str, bool], list[str]] = {}
+    for label, model, at_api_base in _keyless_models(merged):
         provider = provider_of(model)
         if provider is not None and provider in keys:
-            keyless.setdefault(provider, []).append(label)
-    for provider, labels in keyless.items():
-        message = (
-            f"[dgml] {keys[provider]} does not reach {', '.join(labels)}: a provider key "
-            f"applies only to models set in its own config layer, so litellm will read its "
-            f"own {provider} env var. Set those models (or 'models.family') in that layer, "
-            f"or give them their own key."
-        )
+            keyless.setdefault((provider, at_api_base), []).append(label)
+    for (provider, at_api_base), labels in keyless.items():
+        if at_api_base:
+            message = (
+                f"[dgml] {keys[provider]} is not sent to {', '.join(labels)}: a provider "
+                f"key never goes to a custom api_base, so litellm will send its own "
+                f"{provider} env var there instead. Set a key beside each api_base (or "
+                f'"EMPTY" if that server checks none).'
+            )
+        else:
+            message = (
+                f"[dgml] {keys[provider]} does not reach {', '.join(labels)}: a provider "
+                f"key applies only to models set in its own config layer, so litellm will "
+                f"read its own {provider} env var. Set those models (or 'models.family') in "
+                f"that layer, or give them their own key."
+            )
         if message not in _WARNED_PROVIDER_KEY_NOT_APPLIED:
             _WARNED_PROVIDER_KEY_NOT_APPLIED.add(message)
             logger.warning(message)

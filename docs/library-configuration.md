@@ -79,7 +79,9 @@ is `label_model = "x"` / `label_api_key = "k"` in TOML terms. A `Model` is one g
 another tier or section. The provider keys on `Models` (`anthropic_api_key` / `google_api_key` /
 `openai_api_key`) are written onto every model of that provider in the `Configuration` — the
 tiers `Models` sets or expands from `family`, and the section models — unless the model has its
-own key or an `api_base`. A model with no credentials
+own key or an `api_base`. The `Configuration` keeps them, so a per-call override of the same
+provider (`load_grounded_config(ws, values_model=…)`, a generation profile) runs on this
+configuration's key too, never the server's environment key. A model with no credentials
 leaves litellm its own env var — so at a custom `api_base`, an `openai/`, `anthropic/` or
 `gemini/` model needs `api_key` set beside it (a real key, or a placeholder such as `"EMPTY"`),
 or litellm sends the provider's env-var key to that host; `ollama/` needs none. See

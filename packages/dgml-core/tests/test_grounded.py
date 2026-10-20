@@ -364,8 +364,8 @@ def test_load_config_defaults(workspace: Workspace) -> None:
 
 def test_load_config_override_drops_tier_credentials(workspace: Workspace) -> None:
     # Tier credentials belong to the tier's model: an override to another model
-    # takes nothing from the tier — not its key, not its api_base — and the
-    # provider key on [models] serves tiers, never an override.
+    # takes nothing from the tier — not its key, not its api_base. The provider key
+    # on [models] serves an override of its own provider, as it serves a tier.
     from .conftest import write_config
 
     write_config(
@@ -385,8 +385,9 @@ def test_load_config_override_drops_tier_credentials(workspace: Workspace) -> No
     config = load_grounded_config(
         workspace, values_model="anthropic/claude-sonnet-5", schema_model="openai/gpt-5.4"
     )
-    assert (config.values_api_key, config.values_api_key_env) == (None, None)
+    assert (config.values_api_key, config.values_api_key_env) == ("sk-ant", None)
     assert config.values_api_base is None
+    # No openai_api_key, and the tier's Azure key is not the override's.
     assert (config.schema_api_key, config.schema_api_key_env, config.schema_api_base) == (
         None,
         None,

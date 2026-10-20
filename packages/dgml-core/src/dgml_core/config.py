@@ -48,6 +48,7 @@ therefore treat ``{}`` and "absent" alike unless they mean to distinguish them
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
@@ -63,6 +64,7 @@ from .errors import CorruptMetadata, LegacyConfigPresent
 from .models_config import (
     LLM_SECTIONS,
     ConfigSection,
+    Credentials,
     normalize_models_layer,
     normalize_task_layer,
     provider_keys,
@@ -167,16 +169,39 @@ def _build_settings_class(
                 ws_config or {},
                 TomlConfigSettingsSource(settings_cls, toml_file=user_path)(),
             )
-            return tuple(
-                InitSettingsSource(settings_cls, _normalize_layer(lyr, name, keys_found))
-                for lyr, name in zip(layers, _LAYER_NAMES, strict=True)
+            overrides, *config_layers = layers
+            # The overrides set models but never keys; they take the config's.
+            fallback = _config_provider_keys(config_layers)
+            return (
+                InitSettingsSource(
+                    settings_cls,
+                    _normalize_layer(overrides, _LAYER_NAMES[0], keys_found, fallback),
+                ),
+                *(
+                    InitSettingsSource(settings_cls, _normalize_layer(lyr, name, keys_found))
+                    for lyr, name in zip(config_layers, _LAYER_NAMES[1:], strict=True)
+                ),
             )
 
     return _DgmlSettings
 
 
+def _config_provider_keys(layers: list[dict[str, Any]]) -> dict[str, Credentials]:
+    """Each provider's key from the highest config layer that sets one."""
+    keys: dict[str, Credentials] = {}
+    for layer in layers:
+        models = layer.get(ConfigSection.MODELS)
+        if isinstance(models, dict):
+            for provider, pair in provider_keys(models).items():
+                keys.setdefault(provider, pair)
+    return keys
+
+
 def _normalize_layer(
-    layer: dict[str, Any], name: str = "", keys_found: dict[str, str] | None = None
+    layer: dict[str, Any],
+    name: str = "",
+    keys_found: dict[str, str] | None = None,
+    fallback_keys: Mapping[str, Credentials] | None = None,
 ) -> dict[str, Any]:
     """One config layer with its model groups made atomic (see
     :func:`~dgml_core.models_config.normalize_models_layer`): ``family`` expanded,
@@ -184,20 +209,27 @@ def _normalize_layer(
     and every model the layer sets carrying ``None`` for the credentials it leaves
     unset — so the merge replaces a model's group as a unit instead of pairing it with
     a lower layer's key. *keys_found* records where each provider's key was set (the
-    first layer to call wins, so call highest first), for the post-merge warning."""
+    first layer to call wins, so call highest first), for the post-merge warning.
+
+    *fallback_keys* is for the per-call override layer only (flags, a profile or
+    ``--generation-config`` file, ``values_model=``): its task models take the config's
+    provider key, on the same terms as a tier — same provider, no credentials of their
+    own, no ``api_base``. The override layer's own provider keys, if any, win."""
     out = dict(layer)
+    label = f"the {name}" if name else "this config layer"
     models = layer.get(ConfigSection.MODELS)
-    providers = provider_keys(models) if isinstance(models, dict) else {}
+    own = provider_keys(models) if isinstance(models, dict) else {}
+    providers = {**(fallback_keys or {}), **own}
     if keys_found is not None:
-        for provider, (api_key, _env) in providers.items():
+        for provider, (api_key, _env) in own.items():
             form = "api_key" if api_key is not None else "api_key_env"
-            keys_found.setdefault(provider, f"'models.{provider}_{form}' in the {name}")
+            keys_found.setdefault(provider, f"'models.{provider}_{form}' in {label}")
     if isinstance(models, dict):
-        out[ConfigSection.MODELS.value] = normalize_models_layer(models)
-    for section in LLM_SECTIONS:
+        out[ConfigSection.MODELS.value] = normalize_models_layer(models, label)
+    for section in sorted(LLM_SECTIONS):  # sorted: a set's order would vary which error wins
         table = layer.get(section)
         if isinstance(table, dict):
-            out[section.value] = normalize_task_layer(table, section, providers)
+            out[section.value] = normalize_task_layer(table, section, providers, label)
     return out
 
 
@@ -249,7 +281,12 @@ def load_merged_config(
     sections: dict[ConfigSection, Any] = {
         key: dict(value) for key, value in workspace.configuration.sections.items()
     }
-    for key, value in _normalize_layer(cli_overrides or {}).items():
+    overrides = _normalize_layer(
+        cli_overrides or {},
+        "per-call overrides",
+        fallback_keys=workspace.configuration.provider_keys,
+    )
+    for key, value in overrides.items():
         try:
             section = ConfigSection(str(key))
         except ValueError:

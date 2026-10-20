@@ -331,8 +331,10 @@ def resolve_generation_config(
     still falls back to its tier, and keys outside a model group (``thinking``)
     survive. A model's credentials move with it, so a model the overlay names
     takes only the credentials the overlay sets — a workspace ``api_key_env``
-    does not follow it, nor does a file's or profile's follow a flag's model —
-    else litellm reads its per-provider env var. Passing
+    does not follow it, nor does a file's or profile's follow a flag's model.
+    One that sets none takes the config's ``[models]`` provider key for its
+    provider, unless it has an ``api_base``; else litellm reads its per-provider
+    env var. Passing
     both ``--model`` and ``--label-model`` therefore fully specifies the models
     and works with no ``[generation]`` section at all.
 

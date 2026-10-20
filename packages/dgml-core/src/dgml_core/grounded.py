@@ -363,8 +363,9 @@ def load_grounded_config(
     ``schema_model`` / ``values_model`` are per-call overrides, applied as the
     merged config's highest layer (``cli_overrides``): an override replaces that
     model's whole credential group, so neither the section's ``schema_*`` /
-    ``values_*`` keys nor a tier's reach it. There is no per-call way to pass
-    credentials; an override runs on litellm's per-provider env var.
+    ``values_*`` keys nor a tier's reach it. It takes the config's provider key for
+    its provider (``anthropic_api_key`` …) when there is one, else litellm's
+    per-provider env var; there is no per-call way to pass credentials.
     """
     overrides = {
         key: model

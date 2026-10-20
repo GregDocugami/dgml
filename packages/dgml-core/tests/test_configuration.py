@@ -208,6 +208,35 @@ def test_section_models_take_the_provider_key_of_their_provider() -> None:
     }
 
 
+def test_a_per_call_override_takes_the_configurations_provider_key(tmp_path: Path) -> None:
+    """A multi-tenant caller passes each tenant's key by value: a `values_model=`
+    override must run on that key, not on the server's own `ANTHROPIC_API_KEY`."""
+    from dgml_core.grounded import load_grounded_config
+    from dgml_core.storage import Workspace
+
+    cfg = _build(models=Models(family="anthropic", anthropic_api_key="tenant-key"))
+    assert cfg.provider_keys == {"anthropic": ("tenant-key", None)}
+    assert "provider_keys" not in repr(cfg)
+    ws = Workspace(root=tmp_path, configuration=cfg)
+    config = load_grounded_config(
+        ws, values_model="anthropic/claude-sonnet-4-6", schema_model="openai/gpt-5"
+    )
+    assert config.values_api_key == "tenant-key"
+    assert config.schema_api_key is None  # no OpenAI key on this configuration
+
+
+def test_a_tier_at_an_api_base_without_a_key_is_warned(caplog: pytest.LogCaptureFixture) -> None:
+    cfg = _build(
+        models=Models(
+            family="anthropic",
+            anthropic_api_key="tenant-key",
+            standard=Model("anthropic/x", api_base="https://proxy"),
+        )
+    )
+    assert _resolve(cfg, Tier.STANDARD) == Model("anthropic/x", api_base="https://proxy")
+    assert "'Models.anthropic_api_key' is not sent to models.standard" in caplog.text
+
+
 def test_no_key_anywhere_leaves_litellm_its_env_var() -> None:
     """A family with no key set resolves to api_key=None, so litellm reads its own
     per-provider env var (the TOML path pins the same in test_generation_config)."""

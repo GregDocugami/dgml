@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -32,9 +33,13 @@ from dgml_core.errors import (
     GenerationConfigInvalid,
     LegacyConfigPresent,
     ModelsConfigInvalid,
+    StyleConfigInvalid,
+    TextExtractionConfigInvalid,
 )
 from dgml_core.models_config import ConfigSection
 from dgml_core.storage import Workspace, user_config_path
+from dgml_core.style_config import load_style_config
+from dgml_core.text_extraction_config import load_text_extraction_config
 
 from .conftest import dump_toml, write_config
 
@@ -340,7 +345,10 @@ def test_a_tier_credential_needs_its_tier_in_the_same_layer(workspace: Workspace
     tier resolves to — and follow it if the user layer changed."""
     _write_user_config({"models": {"family": "anthropic"}})
     write_config(workspace, {"models": {"advanced_api_key": "k-ws"}})
-    with pytest.raises(ModelsConfigInvalid, match=r"'models\.advanced' is not in this config"):
+    with pytest.raises(
+        ModelsConfigInvalid,
+        match=r"'models\.advanced_api_key' is set in the workspace config but 'models\.advanced'",
+    ):
         load_merged_config(workspace)
 
 
@@ -356,8 +364,105 @@ def test_a_key_cannot_outlive_a_model_changed_underneath_it(workspace: Workspace
 def test_a_section_credential_needs_its_model_in_the_same_layer(workspace: Workspace) -> None:
     _write_user_config({"generation": {"model": "anthropic/x"}})
     write_config(workspace, {"generation": {"api_key_env": "ANT"}})
-    with pytest.raises(GenerationConfigInvalid, match=r"'generation\.model' is not in this config"):
+    with pytest.raises(
+        GenerationConfigInvalid,
+        match=r"'generation\.api_key_env' is set in the workspace config but 'generation\.model'",
+    ):
         load_merged_config(workspace)
+
+
+@pytest.mark.parametrize(
+    ("where", "label"),
+    [("user", "the user config"), ("env", "the environment")],
+)
+def test_a_stray_credential_error_names_its_layer(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch, where: str, label: str
+) -> None:
+    if where == "user":
+        _write_user_config({"generation": {"api_key_env": "K"}})
+    else:
+        monkeypatch.setenv("DGML_GENERATION__API_KEY_ENV", "K")
+    with pytest.raises(GenerationConfigInvalid, match=f"is set in {label} but"):
+        load_merged_config(workspace)
+
+
+def test_a_null_model_sets_no_model(workspace: Workspace, tmp_path: Path) -> None:
+    """`"model": null` in a `--generation-config` file is no model, so a key beside it
+    is a stray credential, reported at the merge like any other."""
+    from dgml_core.generation import resolve_generation_config
+
+    write_config(workspace, {"models": {"family": "anthropic"}})
+    path = tmp_path / "gen.json"
+    path.write_text(json.dumps({"model": None, "api_key_env": "Z"}), encoding="utf-8")
+    with pytest.raises(GenerationConfigInvalid, match="is set in the command-line overrides but"):
+        resolve_generation_config(workspace, config=str(path))
+
+
+_OPT_IN = [
+    (ConfigSection.STYLE, load_style_config, StyleConfigInvalid),
+    (ConfigSection.TEXT_EXTRACTION, load_text_extraction_config, TextExtractionConfigInvalid),
+]
+
+
+@pytest.mark.parametrize(("section", "load", "invalid"), _OPT_IN)
+@pytest.mark.parametrize("enabled", [False, None])
+def test_a_stray_credential_in_a_layer_that_does_not_enable_its_section_is_dropped(
+    workspace: Workspace,
+    caplog: pytest.LogCaptureFixture,
+    section: ConfigSection,
+    load: Callable[[Workspace], object],
+    invalid: type[Exception],
+    enabled: bool | None,
+) -> None:
+    """A disabled section never calls its model, so a key with no model beside it is
+    dropped with a warning rather than failing every command. Off by default counts
+    as off."""
+    table: dict[str, object] = {"api_key_env": "K"}
+    if enabled is not None:
+        table["enabled"] = enabled
+    write_config(workspace, {"models": {"family": "anthropic"}, section: table})
+    assert "api_key_env" not in load_merged_config(workspace)[section]
+    assert load(workspace) is None
+    assert (
+        f"'{section}.api_key_env' in the workspace config has no '{section}.model'" in caplog.text
+    )
+
+
+@pytest.mark.parametrize(("section", "load", "invalid"), _OPT_IN)
+def test_a_stray_credential_in_a_layer_that_enables_its_section_is_rejected(
+    workspace: Workspace,
+    section: ConfigSection,
+    load: Callable[[Workspace], object],
+    invalid: type[Exception],
+) -> None:
+    """Enabled, the key would pair with the tier's model: the usual error."""
+    write_config(
+        workspace,
+        {"models": {"family": "anthropic"}, section: {"enabled": True, "api_key_env": "K"}},
+    )
+    with pytest.raises(
+        invalid,
+        match=rf"'{section}\.api_key_env' is set in the workspace config but '{section}\.model'",
+    ):
+        load_merged_config(workspace)
+
+
+@pytest.mark.parametrize(("section", "load", "invalid"), _OPT_IN)
+def test_a_stray_credential_is_judged_by_its_own_layer_not_the_merged_section(
+    workspace: Workspace,
+    caplog: pytest.LogCaptureFixture,
+    section: ConfigSection,
+    load: Callable[[Workspace], object],
+    invalid: type[Exception],
+) -> None:
+    """Another layer enabling the section does not rescue the key: it is dropped, with
+    the warning, so it can never pair with the tier's model."""
+    _write_user_config({section: {"enabled": True}})
+    write_config(workspace, {"models": {"family": "anthropic"}, section: {"api_key_env": "K"}})
+    assert load_merged_config(workspace)[section] == {"enabled": True}
+    assert (
+        f"'{section}.api_key_env' in the workspace config has no '{section}.model'" in caplog.text
+    )
 
 
 def test_keys_in_the_environment_name_their_model_there_too(
@@ -428,10 +533,11 @@ def test_provider_key_with_no_keyless_model_of_its_provider_is_quiet(
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
-def test_provider_key_skips_a_model_behind_a_custom_endpoint_without_warning(
+def test_provider_key_skips_a_model_behind_a_custom_endpoint_and_says_so(
     workspace: Workspace, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A keyless model at an `api_base` is deliberate, not a missed provider key."""
+    """The configured key is never sent to an `api_base`, but a keyless model there
+    makes litellm send its own env-var key instead — so that is said."""
     _write_user_config({"models": {"openai_api_key": "sk-real"}})
     write_config(
         workspace,
@@ -441,4 +547,39 @@ def test_provider_key_skips_a_model_behind_a_custom_endpoint_without_warning(
         "model": "openai/llama3",
         "api_base": "http://vllm:8000",
     }
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert "is not sent to classification.model: a provider key never goes" in caplog.text
+
+
+def test_same_layer_tier_at_an_api_base_is_warned_too(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_user_config(
+        {
+            "models": {
+                "family": "anthropic",
+                "anthropic_api_key_env": "K",
+                "standard_api_base": "http://proxy",
+            }
+        }
+    )
+    merged = load_merged_config(workspace)[ConfigSection.MODELS]
+    assert "standard_api_key_env" not in merged and merged["advanced_api_key_env"] == "K"
+    assert "is not sent to models.standard" in caplog.text
+
+
+def test_which_section_error_wins_does_not_depend_on_set_order(workspace: Workspace) -> None:
+    """Stray credentials in several sections report the same one every run, so the
+    CLI's error code is stable (sections are checked in name order)."""
+    from dgml_core.errors import ClassificationConfigInvalid
+
+    write_config(
+        workspace,
+        {
+            "models": {"family": "anthropic"},
+            "generation": {"api_key_env": "A"},
+            "grounded": {"values_api_key_env": "B"},
+            "classification": {"api_key_env": "C"},
+        },
+    )
+    with pytest.raises(ClassificationConfigInvalid):
+        load_merged_config(workspace)
