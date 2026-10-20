@@ -292,7 +292,9 @@ class PageRenderer(ABC):
         backend is missing."""
 
     @abstractmethod
-    def render(self, pdf_path: Path, output_dir: Path, *, dpi: int) -> None:
+    def render(
+        self, pdf_path: Path, output_dir: Path, *, dpi: int, image_spec: PageImageSpec
+    ) -> None:
         """Rasterize every page of ``pdf_path`` into ``output_dir``.
 
         Write one PNG per page named per :data:`PAGE_FILENAME_TEMPLATE`
@@ -300,11 +302,17 @@ class PageRenderer(ABC):
         ``output_dir`` is an empty scratch directory; :func:`render_pages`
         fits and encodes what is written there into the stored images.
 
-        The image written for a page MUST be exactly
-        ``round(pts * dpi / 72)`` pixels on each axis, measured from the
-        **MediaBox** and after applying ``/Rotate`` — :meth:`PageImageSpec.fit`
-        of that size is the coordinate space ``page_text/`` word boxes and every
-        ``dg:origin`` attribute are expressed in. A backend whose natural output
+        Let ``nominal`` be ``round(pts * dpi / 72)`` pixels on each axis,
+        measured from the **MediaBox** and after applying ``/Rotate``;
+        ``image_spec.fit(nominal)`` is the coordinate space ``page_text/`` word
+        boxes and every ``dg:origin`` attribute are expressed in. The image
+        written for a page MUST be exactly one of those two sizes: ``nominal``
+        (and :func:`render_pages` resizes it to the fit), or the fit itself,
+        rendered directly at that resolution — sharper for a small page, and far
+        cheaper for a large sheet, than resizing afterwards. :meth:`PageImageSpec.fit`
+        is idempotent, so the store step needs no telling which it got; a backend
+        that targets the fit must therefore hit it exactly, since a page one pixel
+        short of a bound reads as already fitted. A backend whose natural output
         differs (a different page box, or its own rounding) must correct for it.
 
         Raise :class:`PageRenderFailed` for backend errors. Renderers may be
@@ -633,7 +641,7 @@ def render_pages(
     # renders stay on the same filesystem as the stored images (LocalStore's
     # workspace staging, say), never on a RAM-backed /tmp.
     with tempfile.TemporaryDirectory(prefix=".dgml-render-", dir=output_dir.parent) as raw_dir:
-        renderer.render(pdf_path, Path(raw_dir), dpi=dpi)
+        renderer.render(pdf_path, Path(raw_dir), dpi=dpi, image_spec=image_spec)
         count = _store_pages(Path(raw_dir), output_dir, image_spec)
 
     if cache_entry is not None:

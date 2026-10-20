@@ -398,7 +398,8 @@ def test_render_dimensions_are_exactly_mediabox_times_dpi(
 
     raw = tmp_path / f"raw{dpi}"
     raw.mkdir()
-    make_renderer(PdfConfig(provider=provider)).render(pdf_path, raw, dpi=dpi)
+    unbounded = PageImageSpec(min_edge=None, max_edge=None)
+    make_renderer(PdfConfig(provider=provider)).render(pdf_path, raw, dpi=dpi, image_spec=unbounded)
     assert _png_size(raw / "page_1.png") == expected
 
     out = tmp_path / f"out{dpi}"
@@ -673,3 +674,67 @@ def test_one_file_can_mix_formats(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     doc.write_bytes(b"%PDF-1.4 two pages")
     assert render_pages(doc, tmp_path / "out") == 2
     assert [p.name for p in list_page_images(tmp_path / "out")] == ["page_1.png", "page_2.jpg"]
+
+
+# ---------------------------------------------------------------------------
+# PDFium renders an out-of-bounds page straight at its fitted size
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "page_size",
+    [(1190.55, 1683.78), (144.0, 216.0)],  # A2 (over the max), a 2 x 3 in label (under the min)
+    ids=["large-sheet", "small-label"],
+)
+def test_pypdfium2_renders_out_of_bounds_pages_at_the_fitted_size(
+    tmp_path: Path, page_size: tuple[float, float]
+) -> None:
+    """The engine's own PNG is already the stored size — the fit is applied by
+    choosing the render scale, not by resizing a 300-dpi render afterwards."""
+    pdf_path = tmp_path / "doc.pdf"
+    _write_text_pdf(pdf_path, pages_text=["Hello"], page_size=page_size)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    make_renderer(PdfConfig(provider=EngineName.PYPDFIUM2)).render(
+        pdf_path, raw, dpi=300, image_spec=DEFAULT_PAGE_IMAGE_SPEC
+    )
+    nominal = (round(page_size[0] * 300 / 72), round(page_size[1] * 300 / 72))
+    assert _png_size(raw / "page_1.png") == DEFAULT_PAGE_IMAGE_SPEC.fit(*nominal)
+    assert DEFAULT_PAGE_IMAGE_SPEC.fit(*nominal) != nominal
+
+
+def test_pypdfium2_pages_need_no_resize_in_the_store_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the render already at the fitted size, render_pages never resamples."""
+    from PIL import Image
+
+    monkeypatch.delenv(PAGE_CACHE_ENV, raising=False)
+    pdf_path = tmp_path / "sheet.pdf"
+    _write_text_pdf(pdf_path, pages_text=["Hello"], page_size=(1190.55, 1683.78))
+
+    def no_resize(self: Image.Image, *args: object, **kwargs: object) -> Image.Image:
+        raise AssertionError("store step resized a PDFium render")
+
+    monkeypatch.setattr(Image.Image, "resize", no_resize)
+    render_pages(pdf_path, tmp_path / "out", config=PdfConfig(provider=EngineName.PYPDFIUM2))
+    assert max(_stored(tmp_path / "out")[1]) == PAGE_MAX_EDGE
+
+
+def test_ghostscript_still_renders_at_the_nominal_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ghostscript renders every page at one resolution, so its engine output
+    stays nominal and render_pages fits it."""
+    monkeypatch.delenv(PAGE_CACHE_ENV, raising=False)
+    pdf_path = tmp_path / "label.pdf"
+    _write_text_pdf(pdf_path, pages_text=["Hello"], page_size=(144.0, 216.0))
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    make_renderer(PdfConfig(provider=EngineName.GHOSTSCRIPT)).render(
+        pdf_path, raw, dpi=300, image_spec=DEFAULT_PAGE_IMAGE_SPEC
+    )
+    assert _png_size(raw / "page_1.png") == (600, 900)
+    out = tmp_path / "out"
+    render_pages(pdf_path, out, config=PdfConfig(provider=EngineName.GHOSTSCRIPT))
+    assert _stored(out)[1] == (667, PAGE_MIN_EDGE)

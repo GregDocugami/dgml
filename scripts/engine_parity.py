@@ -38,6 +38,7 @@ from pathlib import Path
 
 from dgml_core.pages import (
     EngineName,
+    PageImageSpec,
     PdfConfig,
     list_page_images,
     make_renderer,
@@ -151,7 +152,11 @@ def check_render(pdf: Path, dpi: int, f: Findings) -> dict[EngineName, dict]:
             # those are each the smaller of PNG and JPEG, so the two engines'
             # copies of a page can differ in format and JPEG artifacts would
             # pass for engine divergence.
-            make_renderer(PdfConfig(provider=eng)).render(pdf, d, dpi=dpi)
+            # Unbounded: compare each engine's exact-dpi render, not PDFium's
+            # direct render at the fitted size for out-of-bounds pages.
+            make_renderer(PdfConfig(provider=eng)).render(
+                pdf, d, dpi=dpi, image_spec=PageImageSpec(min_edge=None, max_edge=None)
+            )
             n = len(list_page_images(d))
             out[eng] = {
                 "dir": d,
