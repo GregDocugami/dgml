@@ -36,10 +36,13 @@ What this does and does not do:
   configuration. (One exception by design: a model side with *no* key configured still falls
   back to litellm's own per-provider environment lookup — so a multi-tenant host should keep
   provider keys out of its process environment and pass them in `cfg`.)
-- **Nothing leaks through a `repr`.** `Model.api_key` and the `Models` provider keys are left out
-  of their reprs, and `ProviderSpec`, `StorageConfig` and `Configuration` print every
-  credential-named option or section value (`*api_key`, `*secret*`, `*token*`, `*password*`,
-  `*_uri`) as `***`, so `cfg` can be logged. Env-var names, endpoints and model ids stay visible.
+- **Nothing leaks through a `repr`.** Every `api_key` field — on `Model`, `Models`, and the
+  resolved task configs such as `GenerationConfig` — is left out of its repr, and `ProviderSpec`,
+  `StorageConfig` and `Configuration` print every option or section value whose name carries a
+  credential word (`key`, `secret`, `token`, `password`, `credential`, `dsn`, `apikey`,
+  `passwd`, `auth`) as `***`, nested tables and lists included, so `cfg` can be logged. A
+  `*_url` / `*_uri` value is hidden only when it carries `user:password@`, so an S3
+  `endpoint_url` shows. Counts such as `max_tokens`, env-var names and model ids stay visible.
 - **Nothing is written back.** There is no `config.toml`, no storage seal, no store row. The
   first `open` against a fresh backend writes the workspace's meta document (name,
   organization, id, schema version) to the docstore; later opens check it names the same

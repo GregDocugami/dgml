@@ -236,16 +236,19 @@ def test_a_per_call_provider_key_reaches_every_tier(tmp_path: Path) -> None:
     assert cfg.sections[ConfigSection.MODELS]["anthropic_api_key"] == "K1"  # untouched
 
 
-def test_a_stray_override_credential_names_the_overrides_layer(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The in-memory path names the layer as the TOML path does."""
+def test_a_stray_override_credential_is_refused_on_the_in_memory_path_too(tmp_path: Path) -> None:
     ws = Workspace(root=tmp_path, configuration=_build(models=Models(family="anthropic")))
     merged = load_merged_config(ws, cli_overrides={"grounded": {"values_api_key_env": "K"}})
-    assert merged[ConfigSection.GROUNDED] == {}
-    assert "'grounded.values_api_key_env' in the overrides (a flag, a --generation-config" in (
-        caplog.text
-    )
+    assert merged[ConfigSection.GROUNDED] == {"values_api_key_env": "K"}
+    with pytest.raises(GroundedConfigMissing, match=r"'grounded\.values_api_key_env' is set, but"):
+        resolve_tiered_model(
+            merged,
+            section_name=ConfigSection.GROUNDED,
+            tier=Tier.ADVANCED,
+            invalid=GroundedConfigMissing,
+            missing=GroundedConfigMissing,
+            prefix="values_",
+        )
 
 
 def test_a_tier_at_an_api_base_without_a_key_is_warned(caplog: pytest.LogCaptureFixture) -> None:
@@ -349,6 +352,12 @@ def test_redaction_matches_whole_words_and_spares_env_names() -> None:
         "mongo_uri": "mongodb://u:p@h",
         "nested": {"aws_secret_access_key": "s", "bucket": "b"},
         "unset_key": None,
+        "database_url": "postgresql://u:pw@h/d",
+        "endpoint_url": "http://minio:9000",
+        "plain_uri": "mongodb://h/d",
+        "dsn": "d",
+        "apikey": "a",
+        "hosts": [{"password": "p", "host": "h"}, "h2"],
     }
     assert redacted(table) == {
         "max_tokens": 64000,
@@ -359,7 +368,38 @@ def test_redaction_matches_whole_words_and_spares_env_names() -> None:
         "mongo_uri": "***",
         "nested": {"aws_secret_access_key": "***", "bucket": "b"},
         "unset_key": None,
+        "database_url": "***",
+        "endpoint_url": "http://minio:9000",
+        "plain_uri": "mongodb://h/d",
+        "dsn": "***",
+        "apikey": "***",
+        "hosts": [{"password": "***", "host": "h"}, "h2"],
     }
+
+
+def test_resolved_task_configs_hide_their_keys() -> None:
+    """The loaders' results carry the literal key once the merge has applied it, and
+    they are what a host is likeliest to log."""
+    from dgml_core.classification import ClassificationConfig
+    from dgml_core.generation.config import GenerationConfig
+    from dgml_core.grounded import GroundedConfig
+    from dgml_core.ocr import OcrConfig
+    from dgml_core.style_config import StyleConfig
+    from dgml_core.text_extraction_config import TextExtractionConfig
+
+    configs = [
+        GenerationConfig(model="m", label_model="l", api_key="SECRET", label_api_key="SECRET"),
+        GroundedConfig(
+            schema_model="s", values_model="v", schema_api_key="SECRET", values_api_key="SECRET"
+        ),
+        ClassificationConfig(model="m", api_key="SECRET"),
+        StyleConfig(model="m", api_key="SECRET"),
+        TextExtractionConfig(model="m", api_key="SECRET"),
+        OcrConfig(provider="azure", options={"endpoint": "https://e", "api_key": "SECRET"}),
+    ]
+    for cfg in configs:
+        assert "SECRET" not in repr(cfg) + str(cfg), cfg
+    assert "'endpoint': 'https://e'" in repr(configs[-1])
 
 
 def test_reprs_never_show_a_credential() -> None:

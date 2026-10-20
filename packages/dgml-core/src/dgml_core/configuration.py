@@ -405,7 +405,7 @@ class Configuration:
         # A single layer: normalized for the same provider-key and family rules as a
         # TOML layer, then its explicit ``None``s dropped — there is no lower layer to
         # override.
-        sections = _drop_none_values(_normalize_layer(layer, "Configuration"))
+        sections = _drop_none_values(_normalize_layer(layer))
         return cls._from_merged(identity=identity, storage=storage, sections=sections)
 
     @classmethod

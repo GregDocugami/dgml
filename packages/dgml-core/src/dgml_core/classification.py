@@ -37,7 +37,7 @@ import json
 import logging
 import os
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -146,7 +146,7 @@ class ClassificationConfig:
 
     model: str
     max_pages: int = DEFAULT_MAX_PAGES
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     api_key_env: str | None = None
     api_base: str | None = None
     naming_attempts: int = DEFAULT_NAMING_ATTEMPTS

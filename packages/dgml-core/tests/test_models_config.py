@@ -207,7 +207,7 @@ def test_tier_credentials_are_read_with_the_tier() -> None:
 
 
 def test_tier_credentials_without_the_tier_are_rejected() -> None:
-    with pytest.raises(ModelsConfigInvalid, match=r"'models\.light' is not"):
+    with pytest.raises(ModelsConfigInvalid, match=r"same config layer as 'models\.light'"):
         load_models_config(_merged({"standard": "s", "light_api_key": "k"}))
 
 
@@ -282,10 +282,14 @@ def test_section_credentials_without_a_section_model_are_rejected() -> None:
         ConfigSection.MODELS: {"standard": "s", "standard_api_key": "t", "standard_api_base": "tb"},
         ConfigSection.GENERATION: {"label_api_base": "sb"},
     }
-    with pytest.raises(ModelsConfigInvalid, match=r"'generation\.label_model' is not"):
+    with pytest.raises(
+        ModelsConfigInvalid, match=r"same config layer as 'generation\.label_model'"
+    ):
         _resolve(merged, Tier.STANDARD, "label_")
     merged[ConfigSection.GENERATION] = {"label_api_key_env": "SEC"}
-    with pytest.raises(ModelsConfigInvalid, match=r"'generation\.label_model' is not"):
+    with pytest.raises(
+        ModelsConfigInvalid, match=r"same config layer as 'generation\.label_model'"
+    ):
         _resolve(merged, Tier.STANDARD, "label_")
 
 
@@ -362,25 +366,31 @@ def test_malformed_section_credentials_are_the_sections_error() -> None:
         _resolve(merged)
 
 
-def test_normalize_drops_a_tier_credential_without_its_tier_in_the_layer(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    assert normalize_models_layer({"light_api_key": "k", "light_api_base": "b"}, "the env") == {}
-    warned = _warned(caplog)
-    assert "'models.light_api_key' in the env has no 'models.light' beside it" in warned
-    assert "Set 'models.light' (or 'models.family') in the env too" in warned
+def test_normalize_disowns_a_tier_credential_without_its_tier_in_the_layer() -> None:
+    """The layer takes the tier as unset, so the key never pairs with a lower layer's
+    model; load then refuses the key with no tier."""
+    out = normalize_models_layer({"light_api_key": "k", "light_api_base": "b"})
+    assert out == {
+        "light": None,
+        "light_api_key": "k",
+        "light_api_key_env": None,
+        "light_api_base": "b",
+    }
+    with pytest.raises(
+        ModelsConfigInvalid,
+        match=r"'models\.light_api_key' is set, but not .* 'models\.light'",
+    ):
+        load_models_config(_merged(_drop_none(out)))
     # `family` sets the tier in this layer, so the key has its model.
     out = normalize_models_layer({"family": "anthropic", "light_api_key": "k"})
-    assert out["light_api_key"] == "k" and _warned(caplog) == ""
+    assert out["light_api_key"] == "k" and out["light"] == PROVIDER_MODELS["anthropic"]["light"]
 
 
-def test_normalize_leaves_a_stray_tier_key_beside_an_unknown_family_to_the_family_error(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_normalize_leaves_a_stray_tier_key_beside_an_unknown_family_to_the_family_error() -> None:
     """A misspelled family with a tier key is the family's error, not the key's: the
-    key is neither blamed nor dropped, and load reports the family first."""
+    tier is not taken as unset, and load reports the family first."""
     out = normalize_models_layer({"family": "antropic", "light_api_key": "k"})
-    assert out["light_api_key"] == "k" and _warned(caplog) == ""
+    assert out == {"family": "antropic", "light_api_key": "k"}
     with pytest.raises(ModelsConfigInvalid, match=r"'models\.family' must be one of"):
         load_models_config(_merged(out))
 
@@ -404,30 +414,67 @@ def test_normalize_runs_the_layer_checks_despite_an_unknown_family() -> None:
         load_models_config(_merged(out))
 
 
-def test_normalize_drops_a_section_credential_without_its_model_in_the_layer(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_normalize_disowns_a_section_credential_without_its_model_in_the_layer() -> None:
     layer = {"values_api_key_env": "K", "schema_model": "s", "max_tool_iters": 3}
-    out = normalize_task_layer(layer, ConfigSection.GROUNDED, "the user config")
-    assert _drop_none(out) == {"schema_model": "s", "max_tool_iters": 3}
-    warned = _warned(caplog)
-    assert "'grounded.values_api_key_env' in the user config has no 'grounded.values_model'" in (
-        warned
-    )
-    assert "Set 'grounded.values_model' in the user config too" in warned
+    out = normalize_task_layer(layer, ConfigSection.GROUNDED)
+    assert _drop_none(out) == {"values_api_key_env": "K", "schema_model": "s", "max_tool_iters": 3}
+    assert out["values_model"] is None and out["schema_api_key"] is None
+    merged = {
+        ConfigSection.GROUNDED: _drop_none(out),
+        ConfigSection.MODELS: {"family": "anthropic"},
+    }
+    with pytest.raises(ModelsConfigInvalid, match=r"'grounded\.values_api_key_env' is set, but"):
+        resolve_tiered_model(
+            merged,
+            section_name=ConfigSection.GROUNDED,
+            tier=Tier.ADVANCED,
+            invalid=ModelsConfigInvalid,
+            missing=ModelsConfigInvalid,
+            prefix="values_",
+        )
     out = normalize_task_layer(
         {"values_model": "m", "values_api_key_env": "K"}, ConfigSection.GROUNDED
     )
     assert out["values_api_key_env"] == "K" and out["values_api_base"] is None
-    assert _warned(caplog) == ""
 
 
-def test_normalize_drops_a_stray_credential_whatever_the_sections_switch_says() -> None:
+def test_normalize_disowns_a_stray_credential_whatever_the_sections_switch_says() -> None:
+    """The switch is the loader's business: a disabled section never resolves its
+    model, so the stray key is refused only once the section is on."""
+    nulls = {"api_key": None, "api_base": None}
     for enabled in (False, True):
         out = normalize_task_layer({"enabled": enabled, "api_key_env": "K"}, ConfigSection.STYLE)
-        assert out == {"enabled": enabled}
+        assert out == {"enabled": enabled, "model": None, "api_key_env": "K", **nulls}
     out = normalize_task_layer({"enabled": False, "label_api_key": "k"}, ConfigSection.GENERATION)
-    assert out == {"enabled": False}
+    assert out == {
+        "enabled": False,
+        "label_model": None,
+        "label_api_key": "k",
+        "label_api_key_env": None,
+        "label_api_base": None,
+    }
+
+
+def test_a_malformed_provider_key_is_left_for_the_loaders() -> None:
+    """The merge raises nothing: the pair is completed but not applied, the tiers
+    report it, and so does a keyless section model of that provider — the key it
+    would have taken. A model of another provider never consults it."""
+    out = normalize_models_layer({"family": "anthropic", "anthropic_api_key": ""})
+    assert out["anthropic_api_key"] == "" and out["anthropic_api_key_env"] is None
+    merged = _merged(_drop_none(out))
+    apply_provider_keys(merged)
+    assert "standard_api_key" not in merged[ConfigSection.MODELS]
+    with pytest.raises(
+        ModelsConfigInvalid, match=r"'models\.anthropic_api_key' must be a non-empty"
+    ):
+        load_models_config(merged)
+    merged[ConfigSection.GENERATION] = {"model": "anthropic/x"}
+    with pytest.raises(
+        ModelsConfigInvalid, match=r"'models\.anthropic_api_key' must be a non-empty"
+    ):
+        _resolve(merged)
+    merged[ConfigSection.GENERATION] = {"model": "openai/x"}
+    assert _resolve(merged) == Model("openai/x")
 
 
 def test_provider_key_pair_is_one_group_in_its_layer() -> None:

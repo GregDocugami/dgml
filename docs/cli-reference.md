@@ -887,8 +887,9 @@ field nor a tier names a model it fails with `GENERATION_CONFIG_MISSING`, a
 malformed one with `GENERATION_CONFIG_INVALID`. Each model carries its own
 credentials (`api_key`/`api_key_env`/`api_base` for transcription,
 `label_api_key`/`label_api_key_env`/`label_api_base` for labeling), written beside
-it — a section credential in a layer that sets no section model is ignored with a
-warning, and a tier model takes its tier's credentials.
+it — a section credential in a layer that sets no section model is
+`GENERATION_CONFIG_INVALID` when generation runs (other commands are unaffected),
+and a tier model takes its tier's credentials.
 
 `--generation-config <profile|file>` and `--model` / `--label-model` override the
 models for one run (precedence: flags > `--generation-config` > the merged
@@ -2917,7 +2918,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 |---|---|---|
 | `WORKSPACE_NOT_INITIALIZED` | hard | A command that needs a workspace ran against a directory that has no workspace **config** — which is what makes a directory a workspace, since the config names the storage backend and cannot be reconstructed. This covers both "never a workspace" and "a workspace whose `config.toml` was deleted"; nothing on disk distinguishes them for a remote-backed workspace, so one error carries all the remedies. The message names the resolved path and offers remedies that work against *that* workspace: `dgml workspace create <path> --organization <org>` to make one there, `dgml workspace list` to find one you already have, or restoring the config from backup. (It deliberately does not say a bare `dgml workspace create`, which would create a workspace elsewhere and leave the command failing identically.) |
 | `LEGACY_CONFIG_PRESENT` | hard | A pre-migration `<workspace>/config.toml` is the only config present; the format is now TOML. Run `dgml init` to write `~/.config/dgml/config.toml`, then migrate any settings. |
-| `MODELS_CONFIG_INVALID` | hard | The `[models]` block is malformed (a tier, `family` or credential set to a non-string or empty value, `family` naming an unknown provider family, or both `*_api_key` and `*_api_key_env` set for one tier or provider). A tier credential in a layer that does not set its tier is not an error: it is ignored, with a warning. |
+| `MODELS_CONFIG_INVALID` | hard | The `[models]` block is malformed (a tier, `family` or credential set to a non-string or empty value, `family` naming an unknown provider family, both `*_api_key` and `*_api_key_env` set for one tier or provider, or a tier credential in a layer that does not set its tier). Raised by the commands that read the tiers, not by the merge, so `file add` and `file list` still run. |
 | `MISSING_EXTRA` | hard | A command needs an optional extra that isn't installed (e.g. `dgml[clustering]`). |
 | `INVALID_ARGUMENT` | hard | An argument is malformed or empty (e.g. blank `file_id`, unreadable `--proof`, a `file add --id` that is malformed, passed with a directory, or unsatisfiable under the chosen `--on-conflict`). |
 | `INTERNAL_ERROR` | hard | Unexpected exception; the message is a short, single-line `<ExcType>: <msg>` (capped, whitespace collapsed). Pass `--verbose` (or set `DGML_DEBUG=1`) for the full stderr traceback. |

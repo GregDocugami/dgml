@@ -144,13 +144,11 @@ def test_tier_models_carry_no_credentials(workspace: Workspace) -> None:
     assert (cfg.label_api_key, cfg.label_api_key_env, cfg.label_api_base) == (None, None, None)
 
 
-def test_section_credentials_without_a_section_model_are_dropped(
-    workspace: Workspace, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_section_credentials_without_a_section_model_are_rejected(workspace: Workspace) -> None:
     # A key is written beside the model it is for. Credentials on [generation] with
     # no [generation] model would pair with a tier's model — a group split across
-    # two tables — so they are dropped, and the warning says to name the model here
-    # or move the key to [models] as `standard_api_key_env` / `advanced_api_key_env`.
+    # two tables — so they are refused when generation runs. Name the model here, or
+    # move the key to [models] as `standard_api_key_env` / `advanced_api_key_env`.
     write_config(
         workspace,
         {
@@ -161,12 +159,8 @@ def test_section_credentials_without_a_section_model_are_dropped(
             },
         },
     )
-    cfg = load_generation_config(workspace)
-    assert (cfg.api_key_env, cfg.label_api_key_env) == (None, None)
-    assert "'generation.api_key_env' in the workspace config has no 'generation.model'" in (
-        caplog.text
-    )
-    assert "'generation.label_api_key_env' in the workspace config" in caplog.text
+    with pytest.raises(GenerationConfigInvalid, match=r"same config layer as 'generation\.model'"):
+        load_generation_config(workspace)
 
 
 def test_per_task_credentials_sit_beside_their_models(workspace: Workspace) -> None:

@@ -307,8 +307,8 @@ class GroundedConfig:
 
     schema_model: str
     values_model: str
-    schema_api_key: str | None = None
-    values_api_key: str | None = None
+    schema_api_key: str | None = field(default=None, repr=False)
+    values_api_key: str | None = field(default=None, repr=False)
     schema_api_key_env: str | None = None
     values_api_key_env: str | None = None
     schema_api_base: str | None = None

@@ -105,15 +105,6 @@ def config_bool(value: object) -> bool | None:
     return None
 
 
-#: The highest layer, as a message names it: flags, a ``--generation-config`` profile
-#: or file, or a library call's arguments. One name for both merge paths.
-OVERRIDES_LAYER = "overrides (a flag, a --generation-config file, or a per-call argument)"
-
-#: What each layer is called in a message, highest precedence first (the order
-#: ``settings_customise_sources`` returns them in).
-_LAYER_NAMES = (OVERRIDES_LAYER, "environment", "workspace config", "user config")
-
-
 def _build_settings_class(user_path: Path, ws_config: dict[str, Any] | None) -> type[BaseSettings]:
     """A ``BaseSettings`` subclass sourcing layer 2 from the TOML file at *user_path*
     and layer 3 from *ws_config*, the workspace's already-parsed config (``None`` when
@@ -169,29 +160,27 @@ def _build_settings_class(user_path: Path, ws_config: dict[str, Any] | None) -> 
                 ws_config or {},
                 TomlConfigSettingsSource(settings_cls, toml_file=user_path)(),
             )
-            return tuple(
-                InitSettingsSource(settings_cls, _normalize_layer(lyr, name))
-                for lyr, name in zip(layers, _LAYER_NAMES, strict=True)
-            )
+            return tuple(InitSettingsSource(settings_cls, _normalize_layer(lyr)) for lyr in layers)
 
     return _DgmlSettings
 
 
-def _normalize_layer(layer: dict[str, Any], name: str = "") -> dict[str, Any]:
+def _normalize_layer(layer: dict[str, Any]) -> dict[str, Any]:
     """One config layer with its model groups made atomic (see
     :func:`~dgml_core.models_config.normalize_models_layer`): ``family`` expanded, and
     every model and provider key pair the layer sets carrying ``None`` for the
     credentials it leaves unset — so the merge replaces a group as a unit instead of
-    pairing a new model with a lower layer's key. *name* labels the layer in warnings."""
+    pairing a new model with a lower layer's key. Raises nothing: what is malformed is
+    the loaders' to report, so a bad model setting fails the task that uses it rather
+    than every command."""
     out = dict(layer)
-    label = f"the {name}" if name else "this config layer"
     models = layer.get(ConfigSection.MODELS)
     if isinstance(models, dict):
-        out[ConfigSection.MODELS.value] = normalize_models_layer(models, label)
-    for section in sorted(LLM_SECTIONS):  # sorted: a stable warning order
+        out[ConfigSection.MODELS.value] = normalize_models_layer(models)
+    for section in LLM_SECTIONS:
         table = layer.get(section)
         if isinstance(table, dict):
-            out[section.value] = normalize_task_layer(table, section, label)
+            out[section.value] = normalize_task_layer(table, section)
     return out
 
 
@@ -248,7 +237,7 @@ def load_merged_config(
         sections: dict[ConfigSection, Any] = {
             key: dict(value) for key, value in workspace.configuration.sections.items()
         }
-        for key, value in _normalize_layer(cli_overrides or {}, OVERRIDES_LAYER).items():
+        for key, value in _normalize_layer(cli_overrides or {}).items():
             try:
                 section = ConfigSection(str(key))
             except ValueError:

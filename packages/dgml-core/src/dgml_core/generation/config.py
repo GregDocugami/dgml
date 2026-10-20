@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -112,12 +112,12 @@ class GenerationConfig:
 
     model: str
     label_model: str
-    # transcription (``model``) credentials
-    api_key: str | None = None
+    # transcription (``model``) credentials; the keys stay out of the repr
+    api_key: str | None = field(default=None, repr=False)
     api_key_env: str | None = None
     api_base: str | None = None
     # labeling (``label_model``) credentials
-    label_api_key: str | None = None
+    label_api_key: str | None = field(default=None, repr=False)
     label_api_key_env: str | None = None
     label_api_base: str | None = None
     # Anthropic extended thinking for BOTH generation passes, one of

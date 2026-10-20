@@ -21,22 +21,19 @@ Four tiers, cheapest to strongest, each mapped to a set of tasks:
 
 Each tier is a :class:`Model`: a model id plus optional credentials
 (``<tier>_api_key`` / ``<tier>_api_key_env`` / ``<tier>_api_base``). **A model and
-its credentials are one group, written together in one config layer.** A tier's
-credentials are the ``<tier>_*`` keys beside it; a task section's model
-(``generation.label_model``, ``grounded.schema_model``) takes only that section's
-``{prefix}api_key`` and friends; a credential in a layer that does not set its
-model is dropped with a warning, so nothing is ever inherited from another tier,
-section or layer. A model with no credentials leaves litellm to read its
-per-provider env var — the one fallback there is. See :func:`resolve_tiered_model`
-and :func:`normalize_models_layer`.
+its credentials are one group, written together in one config layer**: a tier's are
+the ``<tier>_*`` keys beside it, a task section's model (``generation.label_model``,
+``grounded.schema_model``) takes only that section's ``{prefix}api_key`` and friends,
+and a credential in a layer that does not set its model is refused by the task that
+resolves that model — never by the merge, which every command shares. A model with
+no credentials leaves litellm to read its per-provider env var.
 
-``<provider>_api_key`` / ``_env`` (``anthropic_``, ``google_``, ``openai_``) is a
-setting like any other: its pair merges as one group, the highest layer that sets
-either form winning. Once the layers are merged, :func:`apply_provider_keys` writes it
-onto every model of that provider — tier, task section or per-call override — that
-carries neither its own key nor an ``api_base``. Matching is by model-id prefix, so a
-key only ever reaches its own provider's models, and a model pointed at a custom
-endpoint never receives a key meant for the provider's own service.
+``<provider>_api_key`` / ``_env`` (``anthropic_``, ``google_``, ``openai_``) merges
+like any other setting, its pair as one group. :func:`apply_provider_keys` then writes
+it onto every model of that provider — tier, task section or per-call override — that
+carries neither its own key nor an ``api_base``: a model at a custom endpoint never
+receives a key meant for the provider's own service, and is warned about when it
+resolves, since litellm sends its own env var there instead.
 
 ``family`` picks a whole provider family's defaults: one of the
 :data:`~dgml_core.default_config.PROVIDER_MODELS` keys. It is shorthand for that
@@ -53,7 +50,7 @@ then higher), emitting a warning — so a minimal config that sets only, say,
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -113,12 +110,8 @@ _WARNED_TIER_FALLBACKS: set[tuple[Tier, Tier]] = set()
 _WARNED_DISABLED: set[ConfigSection] = set()
 
 # Provider keys withheld from a keyless model at a custom api_base (see
-# `apply_provider_keys`), keyed by the message.
+# `_check_provider_key_for`), keyed by the message.
 _WARNED_PROVIDER_KEY_NOT_APPLIED: set[str] = set()
-
-# Credentials dropped from a layer that does not set their model (see
-# `_drop_stray_group`), keyed by the message.
-_WARNED_DROPPED_CREDENTIAL: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -210,7 +203,7 @@ def _opt_str(value: Any, label: str, invalid: type[DgmlError]) -> str | None:
 
 
 def _credentials(
-    table: dict[str, Any], prefix: str, section: str, invalid: type[DgmlError]
+    table: Mapping[str, Any], prefix: str, section: str, invalid: type[DgmlError]
 ) -> Credentials:
     """``{prefix}api_key`` / ``{prefix}api_key_env`` from ``table``; setting both is an
     error."""
@@ -247,9 +240,6 @@ LLM_SECTIONS = frozenset(
     }
 )
 
-#: Sections that are off unless ``enabled = true`` (see :func:`section_enabled`).
-OPT_IN_SECTIONS = frozenset({ConfigSection.STYLE, ConfigSection.TEXT_EXTRACTION})
-
 
 def _model_keys(table: Mapping[str, Any]) -> list[str]:
     """The keys of ``table`` that head a model group: ``model`` and every ``*_model``."""
@@ -271,26 +261,25 @@ def _complete_group(table: dict[str, Any], prefix: str) -> None:
         table.setdefault(f"{prefix}{suffix}", None)
 
 
-def _drop_stray_group(
-    table: dict[str, Any], prefix: str, section: str, model_key: str, remedy: str, layer: str
-) -> None:
-    """Drop the credentials of a model group whose model *layer* does not set, warning
-    once per message. A key beside no model has no model it was meant for: paired with
-    another layer's it would follow that model wherever that layer moves it, so it is
-    withheld — never sent — and the user is told how to place it."""
-    stray = _stray_credential(table, prefix)
-    if stray is None:
-        return
-    for suffix in GROUP_SUFFIXES:
-        table.pop(f"{prefix}{suffix}", None)
-    message = (
-        f"[dgml] '{section}.{prefix}{stray}' in {layer} has no '{section}.{model_key}' beside "
-        f"it; it is ignored. Set {remedy} in {layer} too, or use 'models.<provider>_api_key' "
-        f"/ '_env', which reaches every keyless model of its provider."
+def _disown_stray_group(table: dict[str, Any], prefix: str, model_key: str) -> None:
+    """Set the group's model to ``None`` when the layer holds a credential for it but
+    no model: the layer then owns the group whole, so no lower layer's model pairs
+    with the key, and the task that resolves this model refuses it — only that task."""
+    if _stray_credential(table, prefix) is not None:
+        table[model_key] = None
+
+
+def _stray_error(
+    invalid: type[DgmlError], credential: str, model_key: str, remedy: str
+) -> DgmlError:
+    """*credential* and *model_key* are full dotted keys (``models.light_api_key`` /
+    ``models.light``, ``generation.label_api_key`` / ``generation.label_model``)."""
+    return invalid(
+        f"'{credential}' is set, but not in the same config layer as '{model_key}': a "
+        f"model's credentials are written beside it. Set {remedy} in that layer, or use "
+        f"'models.<provider>_api_key' / '_env', which reaches every keyless model of its "
+        f"provider."
     )
-    if message not in _WARNED_DROPPED_CREDENTIAL:
-        _WARNED_DROPPED_CREDENTIAL.add(message)
-        logger.warning(message)
 
 
 def _unknown_family(family: str) -> ModelsConfigInvalid:
@@ -299,11 +288,50 @@ def _unknown_family(family: str) -> ModelsConfigInvalid:
     )
 
 
-def provider_keys(models: dict[str, Any]) -> dict[str, Credentials]:
-    """A ``[models]`` table's ``<provider>_api_key`` / ``_env`` pairs, validated; a
-    provider with neither is left out."""
-    pairs = {p: _credentials(models, f"{p}_", "models", ModelsConfigInvalid) for p in PROVIDERS}
-    return {p: pair for p, pair in pairs.items() if pair != (None, None)}
+def provider_keys(models: Mapping[str, Any], *, strict: bool = True) -> dict[str, Credentials]:
+    """A ``[models]`` table's ``<provider>_api_key`` / ``_env`` pairs; a provider with
+    neither is left out. A malformed pair — empty, or both forms set — raises
+    ``ModelsConfigInvalid`` when *strict*, else is left out for the loader that would
+    have used it to report."""
+    out: dict[str, Credentials] = {}
+    for p in PROVIDERS:
+        try:
+            pair = _credentials(models, f"{p}_", "models", ModelsConfigInvalid)
+        except ModelsConfigInvalid:
+            if strict:
+                raise
+            continue
+        if pair != (None, None):
+            out[p] = pair
+    return out
+
+
+def _check_provider_key_for(merged: Mapping[ConfigSection, Any], model: Model, label: str) -> None:
+    """For a resolved model with no key, look at its provider's ``[models]`` pair — the
+    key it would have taken. A malformed pair is reported here (the merge skipped it);
+    a well-formed one the model did not take because of its ``api_base`` is warned
+    about, once per process, since litellm sends its own provider env var there."""
+    provider = provider_of(model.model)
+    models = merged.get(ConfigSection.MODELS)
+    if provider is None or not isinstance(models, dict):
+        return
+    try:
+        api_key, api_key_env = _credentials(models, f"{provider}_", "models", ModelsConfigInvalid)
+    except ModelsConfigInvalid:
+        if model.api_base is None:
+            raise
+        return  # not the key this model would have taken
+    if model.api_base is None or (api_key, api_key_env) == (None, None):
+        return
+    form = "api_key" if api_key is not None else "api_key_env"
+    message = (
+        f"[dgml] 'models.{provider}_{form}' is not sent to {label}: a provider key never "
+        f"goes to a custom api_base, so litellm will send its own {provider} env var there "
+        f'instead. Set a key beside the api_base (or "EMPTY" if that server checks none).'
+    )
+    if message not in _WARNED_PROVIDER_KEY_NOT_APPLIED:
+        _WARNED_PROVIDER_KEY_NOT_APPLIED.add(message)
+        logger.warning(message)
 
 
 def _take_provider_key(
@@ -323,42 +351,29 @@ def _take_provider_key(
         table[f"{prefix}api_key_env"] = api_key_env
 
 
-def normalize_models_layer(
-    models: dict[str, Any], layer: str = "this config layer"
-) -> dict[str, Any]:
-    """One config layer's ``[models]`` table with its groups made atomic.
-
-    ``family`` is expanded (:func:`expand_family`); then every set tier's group is
-    completed with explicit ``None``s. A tier credential whose tier this layer does not
-    set is dropped with a warning (:func:`_drop_stray_group`): a key is written beside
-    its model, and a layer boundary must not separate them — that is how a key ends up
-    following a model it was never meant for. Runs per layer, before the merge.
-
-    Each provider's key pair is a group too: a layer that sets either form gets
-    ``None`` for the other, so the highest layer's pair wins whole and one form in a
-    lower layer never clashes with the other in a higher one. Both forms in one layer
-    are a clash. The keys stay in the table; :func:`apply_provider_keys` writes them
-    onto models after the merge.
-
-    An unknown ``family`` is not expanded but skips none of the rest; it stays in the
-    table for :func:`load_models_config` to report, before any tier — so a stray tier
-    credential beside it is left alone rather than blamed for the family's typo.
-    *layer* names the layer in warnings (``the user config``)."""
+def normalize_models_layer(models: dict[str, Any]) -> dict[str, Any]:
+    """One config layer's ``[models]`` table with its groups made atomic, before the
+    merge: ``family`` expanded (:func:`expand_family`), each provider pair and each set
+    tier completed with explicit ``None``s, and a tier credential whose tier this layer
+    does not set — or a tier set to ``null`` — owning that tier as ``None``
+    (:func:`_disown_stray_group`). Raises nothing; the loaders report what is
+    malformed. An unknown ``family`` is left for :func:`load_models_config`, and a
+    stray tier credential beside it is left alone rather than blamed for the typo."""
     family = models.get("family")
     unknown_family = isinstance(family, str) and family not in PROVIDER_MODELS
     out = dict(expand_family(models))
-    for p in provider_keys(out):
-        out.setdefault(f"{p}_api_key", None)
-        out.setdefault(f"{p}_api_key_env", None)
+    for p in PROVIDERS:
+        if _stray_credential(out, f"{p}_") in ("api_key", "api_key_env"):  # either form set
+            out.setdefault(f"{p}_api_key", None)
+            out.setdefault(f"{p}_api_key_env", None)
     for t in TIERS:
         prefix = f"{t}_"
         model = out.get(t.value)
         if model is None:
             if not unknown_family:
-                remedy = f"'models.{t}' (or 'models.family')"
-                _drop_stray_group(out, prefix, "models", t.value, remedy, layer)
+                _disown_stray_group(out, prefix, t.value)
             if t.value in out:
-                _complete_group(out, prefix)  # an explicit null unsets the whole group
+                _complete_group(out, prefix)
             continue
         if not isinstance(model, str):
             continue  # malformed; load_models_config reports it
@@ -366,118 +381,57 @@ def normalize_models_layer(
     return out
 
 
-def normalize_task_layer(
-    section: dict[str, Any],
-    section_name: ConfigSection,
-    layer: str = "this config layer",
-) -> dict[str, Any]:
-    """One layer of an LLM task section with its groups made atomic: every model key
-    it sets (``model``, ``label_model``, ``schema_model``, …) has its credential group
-    completed with explicit ``None``s. A credential whose model this layer does not set
-    is dropped with a warning — the same rule as :func:`normalize_models_layer`. A
-    model key set to ``null`` sets no model and unsets its whole group, so a lower
-    layer's credentials do not outlive the model they were written beside."""
+def normalize_task_layer(section: dict[str, Any], section_name: ConfigSection) -> dict[str, Any]:
+    """One layer of an LLM task section, the same way: every model key it sets
+    (``model``, ``label_model``, …) has its group completed, and a credential whose
+    model this layer does not set, or a model set to ``null``, owns that model as
+    ``None``."""
     out = dict(section)
-    model_keys = _model_keys(section)
-    prefixes = {k[: -len("model")] for k in model_keys if section.get(k) is not None}
-    null_prefixes = {k[: -len("model")] for k in model_keys if section.get(k) is None}
-    strays = sorted(
-        {
-            key[: -len(suffix)]
-            for key, value in section.items()
-            for suffix in GROUP_SUFFIXES
-            if key.endswith(suffix) and value is not None
-        }
-        - prefixes
-    )
+    prefixes = {k[: -len("model")] for k in _model_keys(section) if section.get(k) is not None}
+    strays = {
+        key[: -len(suffix)]
+        for key, value in section.items()
+        for suffix in GROUP_SUFFIXES
+        if key.endswith(suffix) and value is not None
+    } - prefixes
     for prefix in strays:
-        model_key = f"{prefix}model"
-        remedy = f"'{section_name}.{model_key}'"
-        _drop_stray_group(out, prefix, section_name.value, model_key, remedy, layer)
+        _disown_stray_group(out, prefix, f"{prefix}model")
     for prefix in prefixes:
         if isinstance(section.get(f"{prefix}model"), str):
             _complete_group(out, prefix)
-    for prefix in null_prefixes:
-        _complete_group(out, prefix)
+    for key in _model_keys(out):
+        if out[key] is None:
+            _complete_group(out, key[: -len("model")])
     return out
 
 
-def _keyless_models(merged: Mapping[ConfigSection, Any]) -> Iterator[tuple[str, str, bool]]:
-    """``(config key, model id, has api_base)`` for every model in the merged config
-    that carries no key. A disabled ``style`` / ``text_extraction`` never calls its
-    model, so it is skipped."""
-    groups: list[tuple[str, dict[str, Any], str, str]] = []
-    models = merged.get(ConfigSection.MODELS)
-    if isinstance(models, dict):
-        groups += [(f"models.{t}", models, t.value, f"{t}_") for t in TIERS]
-    for section in sorted(LLM_SECTIONS):
-        table = merged.get(section)
-        if not isinstance(table, dict):
-            continue
-        if section in OPT_IN_SECTIONS and table.get("enabled") is not True:
-            continue
-        for key in sorted(_model_keys(table)):
-            groups.append((f"{section}.{key}", table, key, key[: -len("model")]))
-    for label, table, model_key, prefix in groups:
-        model = table.get(model_key)
-        if isinstance(model, str) and all(
-            table.get(f"{prefix}{suffix}") is None for suffix in ("api_key", "api_key_env")
-        ):
-            yield label, model, table.get(f"{prefix}api_base") is not None
-
-
 def apply_provider_keys(merged: Mapping[ConfigSection, Any]) -> None:
-    """Write the merged ``[models]`` provider keys onto the models that take them.
-
-    Every tier, task-section and per-call override model with no key of its own and
-    no ``api_base`` takes its provider's ``<provider>_api_key`` / ``_env``, in place.
-    Called once per read, by :func:`~dgml_core.config.load_merged_config` after the
-    last layer (the per-call overrides) is in — not before, since a model keyed here
-    keeps that key, and a higher layer's provider key would then never reach it.
-
-    A model at a custom ``api_base`` is left keyless on purpose, but then litellm sends
-    its own provider env var there instead, so that is warned about — once per process
-    per message."""
+    """Write the merged ``[models]`` provider keys onto every tier, section and
+    per-call override model with no key of its own and no ``api_base``, in place.
+    Called once per read by :func:`~dgml_core.config.load_merged_config`, after the
+    overrides are in: a model keyed earlier would keep that key over a higher layer's.
+    A malformed pair is skipped; the loader that would have used it reports it."""
     models = merged.get(ConfigSection.MODELS)
     if not isinstance(models, dict):
         return
-    keys = provider_keys(models)
+    keys = provider_keys(models, strict=False)
     if not keys:
         return
     for t in TIERS:
         _take_provider_key(models, t.value, f"{t}_", keys)
-    for section in sorted(LLM_SECTIONS):
+    for section in LLM_SECTIONS:
         table = merged.get(section)
         if isinstance(table, dict):
             for key in _model_keys(table):
                 _take_provider_key(table, key, key[: -len("model")], keys)
-    at_api_base: dict[str, list[str]] = {}
-    for label, model, has_api_base in _keyless_models(merged):
-        provider = provider_of(model)
-        if has_api_base and provider in keys:
-            at_api_base.setdefault(provider, []).append(label)
-    for provider, labels in at_api_base.items():
-        form = "api_key" if keys[provider][0] is not None else "api_key_env"
-        message = (
-            f"[dgml] 'models.{provider}_{form}' is not sent to {', '.join(labels)}: a "
-            f"provider key never goes to a custom api_base, so litellm will send its own "
-            f"{provider} env var there instead. Set a key beside each api_base (or "
-            f'"EMPTY" if that server checks none).'
-        )
-        if message not in _WARNED_PROVIDER_KEY_NOT_APPLIED:
-            _WARNED_PROVIDER_KEY_NOT_APPLIED.add(message)
-            logger.warning(message)
 
 
 def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
-    """Build a :class:`ModelsConfig` from the merged config mapping's
-    ``[models]`` section (an empty section yields an all-``None`` config).
-
-    ``family`` is validated here but not expanded (:func:`normalize_models_layer` did
-    that per layer), and provider keys are not read — :func:`apply_provider_keys` has
-    already written them onto the tiers, so every tier's credentials are the
-    ``<tier>_*`` keys beside it. A tier credential with no tier is an error here: the
-    merge drops one a layer leaves stray, so this only meets a hand-built mapping."""
+    """Build a :class:`ModelsConfig` from the merged mapping's ``[models]`` section (an
+    empty section yields an all-``None`` config). ``family`` and the provider pairs
+    are validated, not applied — the merge did that per layer and after it. A tier
+    credential with no tier is refused here: that is where the merge leaves one a
+    layer wrote beside no tier."""
     section = merged.get(ConfigSection.MODELS)
     if section is None:
         return ModelsConfig()
@@ -487,6 +441,7 @@ def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
     family = _opt_str(section.get("family"), "models.family", invalid)
     if family is not None and family not in PROVIDER_MODELS:
         raise _unknown_family(family)
+    provider_keys(section)  # for the raise: a malformed pair is this block's error
     tiers: dict[str, Model] = {}
     for t in TIERS:
         model = _opt_str(section.get(t.value), f"models.{t}", invalid)
@@ -495,7 +450,8 @@ def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
         if model is None:
             stray = _stray_credential(section, f"{t}_")
             if stray is not None:
-                raise invalid(f"'models.{t}_{stray}' is set but 'models.{t}' is not")
+                remedy = f"'models.{t}' (or 'models.family')"
+                raise _stray_error(invalid, f"models.{t}_{stray}", f"models.{t}", remedy)
             continue
         tiers[t.value] = Model(model, api_key, api_key_env, api_base)
     return ModelsConfig(**tiers)
@@ -552,22 +508,17 @@ def resolve_tiered_model(
     ``{prefix}api_key_env``, ``{prefix}api_base`` (``schema_`` / ``values_`` for
     grounded, ``label_`` for generation labeling, empty for the rest).
 
-    A model and its credentials are one group. A section that names a model takes
-    exactly that section's ``{prefix}api_key`` / ``_env`` / ``api_base`` — never a
-    tier's (the provider key was already written there by the merge) — and
-    ``[models]`` is not consulted at all, so a
-    malformed tier value or family cannot break a task that names its own model. A
-    section that names none takes the tier's :class:`Model` whole. Section credentials
-    with no section model are an error, not a partial override: a key written beside
-    no model has no model it was meant for (the merge drops one a layer leaves stray,
-    so this only meets a hand-built mapping). A model with no credentials leaves
-    litellm to read its per-provider env var.
+    A section that names a model takes exactly that section's credentials, never a
+    tier's, and the tiers are not read — a malformed tier or family cannot break it.
+    A section that names none takes the tier's :class:`Model` whole. Section
+    credentials with no section model are refused, not paired with the tier's model.
+    A resolved model with no key has its provider's ``[models]`` pair checked, the key
+    it would have taken (:func:`_check_provider_key_for`).
 
     Raises ``invalid`` for a malformed value, a literal+env-name clash, or
     credentials without a model; ``missing`` when neither the section nor the tier
-    resolves a model. Callers that treat a section's mere presence as a feature
-    switch (``style`` / ``text_extraction``) check that themselves before calling
-    this.
+    resolves a model. Opt-in sections (``style`` / ``text_extraction``) check their
+    switch before calling this.
     """
     section = merged.get(section_name)
     sec: dict[str, Any] = section if isinstance(section, dict) else {}
@@ -576,17 +527,24 @@ def resolve_tiered_model(
     api_base = _opt_str(sec.get(f"{prefix}api_base"), f"{section_name}.{prefix}api_base", invalid)
 
     if model is not None:
-        return Model(model, api_key, api_key_env, api_base)
-    stray = _stray_credential(sec, prefix)
-    if stray is not None:
-        raise invalid(
-            f"'{section_name}.{prefix}{stray}' is set but '{section_name}.{prefix}model' is "
-            f"not: credentials belong to the model written beside them"
-        )
-    tiered = load_models_config(merged).resolve(tier)
-    if tiered is None:
-        raise missing(
-            f"no {prefix}model for {section_name}: set [models].family, [models].{tier}, "
-            f"or '{section_name}.{prefix}model' in the config"
-        )
-    return tiered
+        resolved = Model(model, api_key, api_key_env, api_base)
+        label = f"{section_name}.{prefix}model"
+    else:
+        stray = _stray_credential(sec, prefix)
+        if stray is not None:
+            model_key = f"{section_name}.{prefix}model"
+            raise _stray_error(
+                invalid, f"{section_name}.{prefix}{stray}", model_key, f"'{model_key}'"
+            )
+        tiers = load_models_config(merged)
+        tiered = tiers.resolve(tier)
+        if tiered is None:
+            raise missing(
+                f"no {prefix}model for {section_name}: set [models].family, [models].{tier}, "
+                f"or '{section_name}.{prefix}model' in the config"
+            )
+        resolved = tiered
+        label = f"models.{tiers._nearest_set(tier)}"
+    if resolved.api_key is None and resolved.api_key_env is None:
+        _check_provider_key_for(merged, resolved, label)
+    return resolved

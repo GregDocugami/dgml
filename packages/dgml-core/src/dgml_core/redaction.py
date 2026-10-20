@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 #: A key naming a credential carries one of these: ``api_key``,
 #: ``aws_secret_access_key``, ``auth_token``. The storage seal matches them as
@@ -33,28 +34,47 @@ SECRET_WORDS = frozenset({"uri"})
 #: What a hidden value prints as.
 REDACTED = "***"
 
-_SECRET_NAME_WORDS = frozenset(SECRET_HINTS) | SECRET_WORDS
+#: Words that make a key a secret by name alone: the seal's hints plus the one-word
+#: spellings. Redaction only — the seal keeps its own, narrower match, which sealed
+#: workspaces depend on.
+_SECRET_NAME_WORDS = frozenset(SECRET_HINTS) | {"dsn", "apikey", "passwd", "credentials", "auth"}
+
+#: Keys judged by value: a ``*_url`` / ``*_uri`` is a secret only when it carries
+#: ``user:password@`` — ``mongo_uri = "mongodb://u:p@h/db"`` is, the S3
+#: ``endpoint_url`` is not.
+_URL_WORDS = SECRET_WORDS | {"url"}
+
+
+def _words(name: str) -> set[str]:
+    return set(name.lower().split("_"))
 
 
 def is_secret_name(name: str) -> bool:
-    """Whether a config key names a credential *value*: one of its ``_``-separated
-    words is a secret hint. A ``*_env`` key names the variable holding one, which is
-    not itself a secret."""
-    lowered = name.lower()
-    if lowered.endswith("_env"):
+    """Whether a config key names a credential *value* by its name alone. A ``*_env``
+    key names the variable holding one, which is not itself a secret."""
+    return not name.lower().endswith("_env") and not _SECRET_NAME_WORDS.isdisjoint(_words(name))
+
+
+def _is_url_with_userinfo(name: str, value: Any) -> bool:
+    if _URL_WORDS.isdisjoint(_words(name)) or not isinstance(value, str):
         return False
-    return not _SECRET_NAME_WORDS.isdisjoint(lowered.split("_"))
+    try:
+        return urlsplit(value).username is not None
+    except ValueError:
+        return True  # unparseable: assume the worst
 
 
 def redacted(table: Mapping[str, Any]) -> dict[str, Any]:
-    """*table* with every secret-named value replaced by :data:`REDACTED`, nested
-    tables included. ``None`` stays ``None``: unset is not a secret."""
-    out: dict[str, Any] = {}
-    for key, value in table.items():
-        if isinstance(value, Mapping):
-            out[key] = redacted(value)
-        elif value is not None and is_secret_name(str(key)):
-            out[key] = REDACTED
-        else:
-            out[key] = value
-    return out
+    """*table* with every credential value replaced by :data:`REDACTED`, nested tables
+    and lists included. ``None`` stays ``None``: unset is not a secret."""
+    return {key: _redacted_value(str(key), value) for key, value in table.items()}
+
+
+def _redacted_value(key: str, value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return redacted(value)
+    if isinstance(value, (list, tuple)):
+        return [_redacted_value(key, item) for item in value]
+    if value is not None and (is_secret_name(key) or _is_url_with_userinfo(key, value)):
+        return REDACTED
+    return value
