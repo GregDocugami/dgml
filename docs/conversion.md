@@ -1,11 +1,11 @@
-# Converting Word and Excel documents to PDF
+# Converting Word, Excel and PowerPoint documents to PDF
 
-DGML's pipeline works on PDFs. To ingest a Word (`.docx`, `.doc`) or Excel
-(`.xlsx`, `.xls`) document, DGML first converts it to PDF. `.pdf` inputs
-need no conversion and always work.
+DGML's pipeline works on PDFs. To ingest a Word (`.docx`, `.doc`), Excel
+(`.xlsx`, `.xls`) or PowerPoint (`.pptx`, `.ppt`) document, DGML first
+converts it to PDF. `.pdf` inputs need no conversion and always work.
 
 Conversion is **pluggable**: you choose which converter handles each format
-family (`docx`, `xlsx`) by naming it in your workspace config. There is **no
+family (`docx`, `xlsx`, `pptx`) by naming it in your workspace config. There is **no
 default converter** — until you configure one for a format, that format is
 unsupported, and adding or generating such a file fails with an actionable
 error telling you what to set.
@@ -62,7 +62,7 @@ All of the converters below are referenced by their dotted path in the
 
 ### LibreOffice — `translators_pdf.libreoffice:LibreOfficeConverter`
 
-Handles **both** `docx` and `xlsx` by driving a headless `soffice`
+Handles `docx`, `xlsx` and `pptx` by driving a headless `soffice`
 subprocess. No Python dependencies and no config fields — but LibreOffice
 must be installed and `soffice` must be on your `PATH` (or at a standard
 install location). It resolves `soffice` cross-platform and uses a
@@ -72,6 +72,8 @@ per-process lock directory so concurrent conversions are safe.
 [conversion.docx]
 provider = "translators_pdf.libreoffice:LibreOfficeConverter"
 [conversion.xlsx]
+provider = "translators_pdf.libreoffice:LibreOfficeConverter"
+[conversion.pptx]
 provider = "translators_pdf.libreoffice:LibreOfficeConverter"
 ```
 
@@ -235,7 +237,7 @@ file attestation key off the stored original document, not the converted PDF.
 ## Troubleshooting
 
 - **"no converter configured for .xlsx …"** — add a `conversion.xlsx`
-  (or `.docx`) entry to `config.toml` pointing at a converter. This appears
+  (or `.docx`, `.pptx`) entry to `config.toml` pointing at a converter. This appears
   both when adding a file and when generating.
 - **"pip install translators-pdf[xlsx]"** — the island renderer's
   dependencies are missing; install the extra.

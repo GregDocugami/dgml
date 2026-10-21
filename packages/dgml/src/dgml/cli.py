@@ -648,7 +648,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "path",
         type=Path,
         help=(
-            "Path to a file (.pdf, or a convertible source .docx/.doc/.xlsx/.xls "
+            f"Path to a file (.pdf, or a convertible source {'/'.join(FAMILY_BY_SUFFIX)} "
             "when a converter is configured), or a directory. When PATH is a "
             "directory, every ingestible file (case-insensitive) in it is added "
             "in one run and a summary envelope is returned. Use --recursive to "

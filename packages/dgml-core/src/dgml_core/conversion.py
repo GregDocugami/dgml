@@ -12,9 +12,9 @@
 
 """Document-to-PDF conversion — abstract provider interface, config loader, dispatcher.
 
-Source documents (docx, xlsx, …) are converted to PDF before the rest of the
+Source documents (docx, xlsx, pptx, …) are converted to PDF before the rest of the
 pipeline, which is PDF-only. Which converter handles each *format family*
-(``docx``, ``xlsx``) is chosen per workspace in the ``conversion`` section of
+(``docx``, ``xlsx``, ``pptx``) is chosen per workspace in the ``conversion`` section of
 ``<workspace>/config.toml``::
 
     {
@@ -69,6 +69,8 @@ FAMILY_BY_SUFFIX: dict[str, str] = {
     ".doc": "docx",
     ".xlsx": "xlsx",
     ".xls": "xlsx",
+    ".pptx": "pptx",
+    ".ppt": "pptx",
 }
 
 
@@ -263,7 +265,7 @@ def convert_to_pdf_bytes(path: Path, converters: Mapping[str, ConverterConfig]) 
 def load_conversion_config(workspace: Workspace) -> dict[str, ConverterConfig]:
     """Read and validate the ``conversion`` section of ``<workspace>/config.toml``.
 
-    Returns a mapping of format family (``"docx"``, ``"xlsx"``) to its
+    Returns a mapping of format family (``"docx"``, ``"xlsx"``, ``"pptx"``) to its
     :class:`ConverterConfig`. Only families explicitly configured are present —
     there are no defaults, so an absent family means that format is unsupported.
     A missing config file or missing ``conversion`` section yields an empty dict.

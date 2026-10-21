@@ -232,7 +232,7 @@ export function BodyFieldInput({
     case "files":
       input = (
         <>
-          <input type="file" multiple accept=".pdf,.docx,.xlsx" onChange={(e) => onChange({ files: Array.from(e.target.files ?? []) })} />
+          <input type="file" multiple accept=".pdf,.docx,.xlsx,.pptx" onChange={(e) => onChange({ files: Array.from(e.target.files ?? []) })} />
           {state.files.length > 0 && <small className="muted">{state.files.map((f) => f.name).join(", ")}</small>}
         </>
       );

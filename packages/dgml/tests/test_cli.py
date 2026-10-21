@@ -18,17 +18,19 @@ import shutil
 import sys
 import threading
 import tomllib
+import types
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import pytest
 from dgml.cli import main
 from dgml_core import layout
+from dgml_core.conversion import ConverterConfig, DocConverter
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import FileNotFound, InvalidArgument
 from dgml_core.migrations import (
@@ -3709,7 +3711,7 @@ def test_file_add_directory_clean_run(tmp_path: Path, capsys: pytest.CaptureFixt
 def test_file_add_directory_skips_unconfigured_sources(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """With no `conversion` config, convertible sources (docx/xlsx) in a bulk
+    """With no `conversion` config, convertible sources (docx/xlsx/pptx) in a bulk
     directory are silently skipped — not gathered, not counted as failures."""
     ws = tmp_path / "ws"
     _init_ws(ws)
@@ -3719,12 +3721,68 @@ def test_file_add_directory_skips_unconfigured_sources(
     src.mkdir()
     _write_text_pdf(src / "a.pdf", ["Alpha"])
     (src / "notes.docx").write_bytes(b"PK\x03\x04 not really a docx")
+    (src / "deck.pptx").write_bytes(b"PK\x03\x04 not really a pptx")
 
     rc = main(_ws_args(ws) + ["file", "add", str(src)])
     assert rc == 0
     payload = _read_stdout(capsys)
     assert payload["summary"]["total"] == 1
     assert [e["path"] for e in payload["results"]] == [str(src / "a.pdf")]
+
+
+class _FixedPdfConverter(DocConverter):
+    """Returns the PDF named by its ``pdf`` option, whatever the source."""
+
+    name: ClassVar[str] = "fixed-pdf"
+    input_formats: ClassVar[frozenset[str]] = frozenset()
+    config_fields: ClassVar[frozenset[str]] = frozenset({"pdf"})
+
+    @classmethod
+    def parse_config(cls, section: Mapping[str, Any]) -> ConverterConfig:
+        cls._check_no_extra_fields(section)
+        return ConverterConfig(provider=str(section["provider"]), options={"pdf": section["pdf"]})
+
+    def __init__(self, config: ConverterConfig) -> None:
+        self._pdf = Path(config.options["pdf"])
+
+    def to_pdf(self, path: Path) -> bytes:
+        return self._pdf.read_bytes()
+
+
+@needs_gs
+def test_file_add_directory_gathers_configured_pptx(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `conversion.pptx` configured, a bulk add gathers `.pptx` and `.ppt` (any
+    case) and converts them, while a family with no converter is still skipped."""
+    stub = types.ModuleType("cli_stub_conv")
+    stub._FixedPdfConverter = _FixedPdfConverter  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cli_stub_conv", stub)
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    rendered = tmp_path / "rendered.pdf"
+    _write_text_pdf(rendered, ["Slide one"])
+    conversion = {"pptx": {"provider": "cli_stub_conv:_FixedPdfConverter", "pdf": str(rendered)}}
+    with (ws / "config.toml").open("a", encoding="utf-8") as fh:
+        fh.write("\n" + dump_toml({"conversion": conversion}) + "\n")
+
+    src = tmp_path / "mixed"
+    src.mkdir()
+    _write_text_pdf(src / "a.pdf", ["Alpha"])
+    (src / "deck.pptx").write_bytes(b"PK\x03\x04 not really a pptx")
+    (src / "OLD.PPT").write_bytes(b"\xd0\xcf\x11\xe0 not really a ppt")
+    (src / "notes.docx").write_bytes(b"PK\x03\x04 not really a docx")
+
+    rc = main(_ws_args(ws) + ["file", "add", str(src)])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    by_name = {Path(e["path"]).name: e for e in payload["results"]}
+    assert set(by_name) == {"a.pdf", "deck.pptx", "OLD.PPT"}  # notes.docx: no converter
+    for name in ("deck.pptx", "OLD.PPT"):
+        assert by_name[name]["status"] == "added"
+        assert by_name[name]["conversion_error"] is None
 
 
 @needs_gs

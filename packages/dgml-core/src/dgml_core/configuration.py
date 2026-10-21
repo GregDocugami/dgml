@@ -292,7 +292,7 @@ class TextExtraction:
 @dataclass(frozen=True)
 class Conversion:
     """``[conversion]``: one :class:`ProviderSpec` per format family (``docx``,
-    ``xlsx``). Reads ``dgml_core.conversion.load_conversion_config``."""
+    ``xlsx``, ``pptx``). Reads ``dgml_core.conversion.load_conversion_config``."""
 
     families: Mapping[str, ProviderSpec] = field(default_factory=dict)
 

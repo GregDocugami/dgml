@@ -68,34 +68,40 @@ sys.modules["files_stub_conv"] = _stub_mod
 _STUB_DOCX = "files_stub_conv:_StubDocxConverter"
 
 
+@pytest.mark.parametrize(("family", "filename"), [("docx", "foo.docx"), ("pptx", "foo.pptx")])
 def test_convertible_source_persists_converted_pdf(
-    store: FileStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    store: FileStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    family: str,
+    filename: str,
 ) -> None:
     """A convertible source is stored as-is and its converted PDF is persisted
     alongside it at ``<stem>.pdf`` (the artifact generation later reuses)."""
     from .conftest import write_config
 
-    write_config(store.ws, {"conversion": {"docx": {"provider": _STUB_DOCX}}})
+    # The stub ignores the format, so it stands in for any family's converter.
+    write_config(store.ws, {"conversion": {family: {"provider": _STUB_DOCX}}})
     # The PDF-only post-steps need ghostscript / pdfminer; stub them out so the
     # test isolates the conversion-persistence behavior.
     monkeypatch.setattr(FileStore, "_safe_page_count", lambda self, *a, **k: (None, None))
     monkeypatch.setattr(FileStore, "_render_pages", lambda self, *a, **k: None)
     monkeypatch.setattr(FileStore, "_extract_text", lambda self, *a, **k: (None, None))
 
-    src = tmp_path / "foo.docx"
-    src.write_bytes(b"original docx bytes")
+    src = tmp_path / filename
+    src.write_bytes(b"original source bytes")
     result = store.add(src)
 
     assert result.conversion_error is None
-    assert result.record.original_filename == "foo.docx"
+    assert result.record.original_filename == filename
     # original preserved + converted PDF persisted, both as blobs under the file
     assert (
-        store.ws.blobs.get_blob(layout.file_source_key(result.record.id, "foo.docx"))
-        == b"original docx bytes"
+        store.ws.blobs.get_blob(layout.file_source_key(result.record.id, filename))
+        == b"original source bytes"
     )
     assert (
         store.ws.blobs.get_blob(layout.file_source_key(result.record.id, "foo.pdf"))
-        == b"%PDF-stub:foo.docx"
+        == b"%PDF-stub:" + filename.encode()
     )
     assert result.record.pdf_converter == "stub-docx"  # converter named on the record
 
@@ -186,6 +192,15 @@ def test_reject_non_pdf(store: FileStore, tmp_path: Path) -> None:
     bad.write_text("not a pdf")
     with pytest.raises(UnsupportedFileType):
         store.add(bad)
+
+
+def test_reject_convertible_source_without_converter(store: FileStore, tmp_path: Path) -> None:
+    """A known convertible format with no converter configured is rejected as
+    unconfigured, not as an unknown file type."""
+    deck = tmp_path / "deck.pptx"
+    deck.write_bytes(b"PK\x03\x04 not really a pptx")
+    with pytest.raises(UnsupportedFileType, match=r"conversion\.pptx\.provider"):
+        store.add(deck)
 
 
 def test_reject_invalid_magic(store: FileStore, tmp_path: Path) -> None:

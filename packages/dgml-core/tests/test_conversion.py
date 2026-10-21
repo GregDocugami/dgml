@@ -96,6 +96,8 @@ def test_non_docconverter_raises() -> None:
 def test_family_for_suffix() -> None:
     assert family_for_suffix(".DOCX") == "docx"
     assert family_for_suffix(".xls") == "xlsx"
+    assert family_for_suffix(".PPTX") == "pptx"
+    assert family_for_suffix(".ppt") == "pptx"
     assert family_for_suffix(".pdf") is None
     assert family_for_suffix(".txt") is None
 
