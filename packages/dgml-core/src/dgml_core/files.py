@@ -22,7 +22,7 @@ from typing import Any
 
 from . import layout
 from .conversion import (
-    FAMILY_BY_SUFFIX,
+    CONVERTIBLE_SUFFIXES_TEXT,
     convert_to_pdf_bytes,
     converter_name_for_path,
     family_for_suffix,
@@ -348,7 +348,7 @@ class FileStore:
         if family is None:
             raise UnsupportedFileType(
                 f"unsupported file type '{suffix or '<no extension>'}' "
-                f"(supported: .pdf, plus {'/'.join(FAMILY_BY_SUFFIX)} with a converter "
+                f"(supported: .pdf, plus {CONVERTIBLE_SUFFIXES_TEXT} with a converter "
                 "configured)"
             )
         # Resolving the config validates it and proves a converter is wired up

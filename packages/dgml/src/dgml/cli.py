@@ -49,7 +49,11 @@ from dgml_core.classification import (
 )
 from dgml_core.concurrency import map_concurrent
 from dgml_core.consistency import check_workspace
-from dgml_core.conversion import FAMILY_BY_SUFFIX, load_conversion_config
+from dgml_core.conversion import (
+    CONVERTIBLE_SUFFIXES_TEXT,
+    FAMILY_BY_SUFFIX,
+    load_conversion_config,
+)
 from dgml_core.default_config import PROVIDER_API_KEYS, PROVIDER_MODELS
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
@@ -648,7 +652,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "path",
         type=Path,
         help=(
-            f"Path to a file (.pdf, or a convertible source {'/'.join(FAMILY_BY_SUFFIX)} "
+            f"Path to a file (.pdf, or a convertible source {CONVERTIBLE_SUFFIXES_TEXT} "
             "when a converter is configured), or a directory. When PATH is a "
             "directory, every ingestible file (case-insensitive) in it is added "
             "in one run and a summary envelope is returned. Use --recursive to "

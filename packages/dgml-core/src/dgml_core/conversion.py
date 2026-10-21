@@ -73,6 +73,10 @@ FAMILY_BY_SUFFIX: dict[str, str] = {
     ".ppt": "pptx",
 }
 
+# The convertible suffixes as user-facing text (``.docx/.doc/…``), for the
+# add-time error and the CLI help.
+CONVERTIBLE_SUFFIXES_TEXT = "/".join(FAMILY_BY_SUFFIX)
+
 
 def family_for_suffix(suffix: str) -> str | None:
     """Return the conversion family for a file suffix (e.g. ``.docx`` → ``"docx"``),
