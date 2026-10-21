@@ -30,9 +30,12 @@ mirroring the ``dgml cluster --config PRESET|PATH`` precedent:
 
 Both are applied as the merged config's highest-precedence layer
 (``load_merged_config(cli_overrides=...)``), so they override the keys they name
-while the rest of the resolution is unchanged: unnamed keys (e.g. a workspace
-``api_key_env``) survive, and a model neither the overlay nor the config names
-still falls back to its ``[models]`` tier.
+while the rest of the resolution is unchanged. A model's credentials move with
+it: an overlay that sets ``model`` replaces that model's whole ``api_key`` /
+``api_key_env`` / ``api_base`` group, so a workspace ``api_key_env`` does not
+follow the overlay's model (keys outside a model group, e.g. ``thinking``, do
+survive). A model neither the overlay nor the config names still falls back to
+its ``[models]`` tier.
 
 Both keep the model choice visible/recorded: a profile/file is a checked-in,
 named artifact, and the effective models (plus a ``source`` label recording
@@ -42,15 +45,16 @@ The two models can name different providers (e.g. the ``anthropic_google``
 family blends Gemini and Anthropic models), so each carries its
 own credentials: ``api_key`` / ``api_key_env`` / ``api_base`` for transcription
 and ``label_api_key`` / ``label_api_key_env`` / ``label_api_base`` for labeling.
-These apply whether the models are set here or come from their tiers; the tiers
-themselves carry no credentials.
+Each applies only to the model set beside it in this section; a model that comes
+from its tier brings the tier's credentials, and a section credential with no
+section model is an error.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -62,7 +66,7 @@ from dgml_core.errors import (
     GenerationConfigMissing,
     short_error_message,
 )
-from dgml_core.models_config import ConfigSection, Tier, resolve_tiered_model
+from dgml_core.models_config import GROUP_SUFFIXES, ConfigSection, Tier, resolve_tiered_model
 from dgml_core.storage import Workspace
 
 # Extended thinking is OFF for generation unless the config says otherwise.
@@ -108,12 +112,12 @@ class GenerationConfig:
 
     model: str
     label_model: str
-    # transcription (``model``) credentials
-    api_key: str | None = None
+    # transcription (``model``) credentials; the keys stay out of the repr
+    api_key: str | None = field(default=None, repr=False)
     api_key_env: str | None = None
     api_base: str | None = None
     # labeling (``label_model``) credentials
-    label_api_key: str | None = None
+    label_api_key: str | None = field(default=None, repr=False)
     label_api_key_env: str | None = None
     label_api_base: str | None = None
     # Anthropic extended thinking for BOTH generation passes, one of
@@ -323,10 +327,16 @@ def resolve_generation_config(
     1 and 2 are collapsed into one ``[generation]`` overlay handed to
     :func:`~dgml_core.config.load_merged_config` as ``cli_overrides``, its
     highest-precedence layer. So an overlay overrides the keys it names and
-    leaves the rest of the resolution intact — a workspace ``api_key_env`` still
-    applies, and a model the overlay doesn't name still falls back to its tier.
-    Passing both ``--model`` and ``--label-model`` therefore fully specifies the
-    models and works with no ``[generation]`` section at all.
+    leaves the rest of the resolution intact: a model the overlay doesn't name
+    still falls back to its tier, and keys outside a model group (``thinking``)
+    survive. A model's credentials move with it, so a model the overlay names
+    takes only the credentials the overlay sets — a workspace ``api_key_env``
+    does not follow it, nor does a file's or profile's follow a flag's model.
+    One that sets none takes the config's ``[models]`` provider key for its
+    provider, unless it has an ``api_base``; else litellm reads its per-provider
+    env var. Passing
+    both ``--model`` and ``--label-model`` therefore fully specifies the models
+    and works with no ``[generation]`` section at all.
 
     With no ``config`` and no overrides this is exactly
     :func:`load_generation_config` (so an unresolvable model still raises
@@ -349,10 +359,12 @@ def resolve_generation_config(
         overlay = dict(load_generation_config_file(Path(config)))
         base_source = "file"
 
-    if model is not None:
-        overlay["model"] = model
-    if label_model is not None:
-        overlay["label_model"] = label_model
+    # A flag replaces the file's / profile's model and the credentials written beside it.
+    for prefix, flag in (("", model), ("label_", label_model)):
+        if flag is not None:
+            overlay[f"{prefix}model"] = flag
+            for suffix in GROUP_SUFFIXES:
+                overlay.pop(f"{prefix}{suffix}", None)
 
     overridden = model is not None or label_model is not None
     if base_source == "config":

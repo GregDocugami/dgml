@@ -152,6 +152,15 @@ class OcrConfig:
     # Universal: number of pages OCR'd concurrently (in-flight provider calls).
     max_concurrency: int = DEFAULT_OCR_CONCURRENCY
 
+    def __repr__(self) -> str:
+        """Credential-named options (an Azure ``api_key``) print as ``***``."""
+        from .redaction import redacted
+
+        return (
+            f"OcrConfig(provider={self.provider!r}, options={redacted(self.options)!r}, "
+            f"max_concurrency={self.max_concurrency!r})"
+        )
+
 
 def resolve_provider_class(provider: str) -> type[OcrProvider]:
     """Import and return the :class:`OcrProvider` subclass named by ``provider``.

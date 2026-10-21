@@ -189,9 +189,9 @@ def extract_file(
     ``locations_effort`` does the same for ``grounded.locations_reasoning_effort``,
     the effort of the location-grounding call on pages with OCR words (the no-words
     grid path keeps its own ``"medium"``).
-    ``values_model`` resolves as if it were set in ``[grounded]``: the section's
-    own ``values_api_key`` / ``values_api_key_env`` / ``values_api_base`` still
-    apply, and a tier's credentials never carry over to the new model
+    ``values_model`` resolves as a layer above ``[grounded]``: it replaces the
+    model's whole credential group, so neither the section's ``values_*`` keys nor
+    a tier's carry over to the new model
     (see :func:`~dgml_core.grounded.load_grounded_config`).
     ``write_stats`` and ``record_usage`` (both off by default) are forwarded
     to :func:`~dgml_core.grounded.extract_values`; the result's ``usage`` and

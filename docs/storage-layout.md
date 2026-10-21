@@ -568,35 +568,83 @@ explicit tiers in the user config, while tiers set in the same layer as the
 family, or a higher one, still override it. To drop a user-level pin in one
 workspace, restate the family there.
 
-Credentials can sit at three levels; the most specific wins:
+A model and its credentials are **one group, written together in one config
+layer**: a tier's are the `<tier>_*` keys beside it, a task's are the keys on its
+own section, and a credential in a layer that does not set its model is refused
+(`*_CONFIG_INVALID`) by the task that would have used it — the merge itself never
+fails, so commands that call no model are unaffected. A group never borrows from
+another tier, another section or another layer, and a key can never be separated
+from the model it was written beside.
 
 ```toml
 [models]
 family = "anthropic_google"
-anthropic_api_key_env = "ANTHROPIC_API_KEY"   # every anthropic/… model
-google_api_key_env    = "GEMINI_API_KEY"      # every gemini/… model
+anthropic_api_key_env = "ANTHROPIC_API_KEY"   # onto every keyless anthropic/… model
+google_api_key_env    = "GEMINI_API_KEY"      # … and every keyless gemini/… one
 expert          = "anthropic/claude-opus-5"
-expert_api_key_env = "OPUS_KEY"               # this tier only
-expert_api_base = "https://proxy.example"
+expert_api_key_env = "OPUS_KEY"               # this tier's own key …
+expert_api_base = "https://proxy.example"     # … and endpoint
 ```
 
 - **Per task**, on the task's own section (`generation.api_key_env`,
-  `grounded.schema_api_key`, `classification.api_base`, …).
+  `grounded.schema_api_key`, `classification.api_base`, …) — for the model that
+  section names in the same layer. Credentials in a layer whose section names no
+  model are refused when that task runs: a key beside no model has no model it was
+  meant for.
 - **Per tier**: `<tier>_api_key` / `<tier>_api_key_env` / `<tier>_api_base` next
-  to the tier, used by every task that takes its model from that tier. A tier's
-  credentials require the tier itself to be set. Like every other key they layer
-  independently of the tier: a workspace `config.toml` that overrides `expert`
-  still inherits a user-level `expert_api_key_env`. For a credential that should
-  follow the model, use the provider key.
-- **Per provider**: `anthropic_api_key`, `google_api_key`, `openai_api_key` (or
-  the `_env` form), matched on the model id's prefix (`anthropic/`, `gemini/`,
-  `openai/`) — for any model that sets nothing more specific, whether it came from
-  a tier or a task names it. One key per provider covers a mixed family such as
-  `anthropic_google`. A model of another provider (`ollama/…`) never receives
-  these keys.
+  to the tier, taken whole by every task that gets its model from that tier. They
+  require the tier to be set **in the same layer** (a `family` there counts), else
+  every task that reads the tiers is refused, and they move with it: a layer that
+  sets `expert` replaces `expert`'s whole group, so a workspace `config.toml` that
+  overrides `expert` does **not** inherit a user-level `expert_api_key_env`.
 
-A model with none of these falls back to litellm's per-provider env var. A tier
-that is unset borrows its fallback tier's credentials along with its model.
+  Because a `family` sets every tier in its layer, a tier credential may sit
+  beside the family alone, with no explicit tier:
+
+  ```toml
+  [models]
+  family = "anthropic"
+  expert_api_key_env = "OPUS_KEY"   # sent to whatever model the family picks for expert
+  ```
+
+  The key then goes to the family's default model for that tier, which **may
+  change across dgml upgrades** — and in a mixed family may belong to another
+  provider (in `anthropic_google`, `light` is a Gemini model, so `light_api_key`
+  there must be a Google key). To know which model a key is sent to, pin the tier
+  beside it (`expert = "anthropic/claude-opus-5"`).
+- **Per provider**: `anthropic_api_key`, `google_api_key`, `openai_api_key` (or
+  the `_env` form) merges like any other setting — the highest layer that sets
+  either form wins, so a key in `DGML_MODELS__ANTHROPIC_API_KEY_ENV` overrides one
+  in a config file, and one form in the user config never clashes with the other in
+  the workspace config. After the merge it is written onto every model of that
+  provider (by model-id prefix: `anthropic/`, `gemini/`, `openai/`) that has no key
+  of its own and no `api_base`: tiers, task sections, and per-call overrides
+  (`--model` / `--label-model`, a `--generation-config` profile or file,
+  `--values-model` / `--schema-model`) alike, whichever layer set the model. One
+  key per provider covers a mixed family such as `anthropic_google`. A model
+  pointed at a custom `api_base` never receives it; dgml warns there, because
+  litellm would send its own env-var key to that host instead.
+
+**Secrets injected through the environment** follow the same rules. The
+environment is a layer like any other, so `DGML_GENERATION__API_KEY_ENV` alone makes
+generation fail with `GENERATION_CONFIG_INVALID` — it names no model — and
+`DGML_GENERATION__MODEL` alone replaces the file's `generation` model group whole,
+`api_base` and key included.
+For an `anthropic/`, `gemini/` or `openai/` model, inject the provider key
+(`DGML_MODELS__ANTHROPIC_API_KEY_ENV=…`): it reaches every keyless model of that
+provider, whichever layer set the model. For any other model, or one at a custom
+`api_base`, set the whole group in the environment (`DGML_GENERATION__MODEL`,
+`DGML_GENERATION__API_BASE`, `DGML_GENERATION__API_KEY_ENV`).
+
+A model with no credentials falls back to litellm's per-provider env var — the one
+fallback there is. A tier that is unset borrows its fallback tier's model and
+credentials together.
+
+For an `openai/`, `anthropic/` or `gemini/` model at a custom `api_base`, set
+`api_key` (or `api_key_env`) beside it — the server's real key, or any placeholder
+such as `"EMPTY"` if it checks none. litellm requires a key for these providers, and
+without one it reads the provider's own environment variable and sends that to the
+custom host. `ollama/` models need no key and have no such fallback.
 
 `dgml init --provider {anthropic,anthropic_google,google,openai}` writes a
 family-only `[models]` block; omit `--provider` to auto-detect from the API-key
@@ -620,7 +668,7 @@ any settings across.
 ### `classification` (optional, required for `dgml file add --auto-classify`)
 
 The model defaults to the `[models].light` tier; add this section only to
-override it or set classification-specific credentials.
+override it (with that model's own credentials, if any).
 
 ```toml
 [classification]
@@ -634,8 +682,10 @@ Field rules:
 - `max_pages` — optional positive int, default `3`. First-N pages shown to the
   classifier.
 - `api_key` / `api_key_env` / `api_base` — optional; mutually-exclusive key /
-  env-var name, plus an optional endpoint. Apply whether the model is set here or
-  comes from the `light` tier; when unset, litellm uses its per-provider env var.
+  env-var name, plus an optional endpoint, for the `model` set here. They require
+  `model` in the same config layer (else `CLASSIFICATION_CONFIG_INVALID` when the
+  classifier runs); a model from the `light` tier takes the tier's own
+  `light_api_key` and friends. When unset, litellm uses its per-provider env var.
 
 ### `ocr` (optional, required for `--text-mode ocr`)
 
@@ -701,8 +751,10 @@ Field rules:
   mutually exclusive with the matching `*_env` field.
 - `schema_api_key_env` / `values_api_key_env` — optional env var names per side.
 - `schema_api_base` / `values_api_base` — optional endpoint per side.
-  These per-side credentials apply whether the model is set here or comes from
-  its tier; when unset, litellm uses its per-provider env var.
+  These per-side credentials are for the model set here and require it in the
+  same config layer (else `GROUNDED_CONFIG_INVALID` when that side runs); a model
+  from its tier takes the tier's credentials. When unset, litellm uses its
+  per-provider env var.
 - `max_tool_iters` — optional positive int, default 20. Cap on
   `get_page_words` tool calls per extraction.
 - `values_reasoning_effort` — optional, default `"medium"`. The reasoning budget
@@ -754,8 +806,10 @@ Field rules:
 - Labeling credentials: `label_api_key` / `label_api_key_env` /
   `label_api_base`. The two models carry **independent** credentials because
   they may name different providers (e.g. the `anthropic_google` family blends
-  Gemini and Anthropic models). These apply whether the models are set here
-  or come from their tiers; when unset, litellm uses its per-provider env var.
+  Gemini and Anthropic models). Each set is for the model set here and requires
+  it in the same config layer (else `GENERATION_CONFIG_INVALID` when generation
+  runs); a model from its tier takes the tier's credentials. When unset, litellm
+  uses its per-provider env var.
 - `thinking` — optional; `"disabled"` (default), `"adaptive"`, or
   `"between_tools"` (Claude Sonnet 5.5 rejects `"disabled"`; this is its off
   switch, thinking only between tool calls). Anthropic
@@ -805,7 +859,10 @@ Field rules:
   litellm model id. A local [Ollama](https://ollama.com/) model
   (`ollama/<name>`) keeps the merge on-device; any litellm-supported model works.
 - `api_base` — optional. The endpoint URL. Required for Ollama
-  (`http://localhost:11434`); omit for hosted providers.
+  (`http://localhost:11434`); omit for hosted providers. Like `api_key`, it
+  belongs to a `model` set in the same config layer (else
+  `TEXT_EXTRACTION_CONFIG_INVALID` when the feature runs); a model from the tier
+  takes the tier's own credentials.
 - `api_key` / `api_key_env` — optional literal key / env-var name,
   mutually exclusive. Local providers need neither; when both are unset,
   litellm falls back to its provider-default env var.
@@ -853,7 +910,10 @@ Field rules:
 - `model` — optional; falls back to the `light` tier. Provider-prefixed litellm
   model id; must be vision-capable (it is shown page images). A model alone does
   **not** enable the feature.
-- `api_base` — optional endpoint URL (e.g. for a local Ollama vision model).
+- `api_base` — optional endpoint URL (e.g. for a local Ollama vision model). Like
+  `api_key`, it belongs to a `model` set in the same config layer (else
+  `STYLE_CONFIG_INVALID` when the feature runs); a model from the tier takes the
+  tier's own credentials.
 - `api_key` / `api_key_env` — optional literal key / env-var name,
   mutually exclusive; when both unset, litellm falls back to its
   provider-default env var.

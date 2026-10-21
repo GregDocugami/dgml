@@ -315,8 +315,8 @@ class GroundedConfig:
 
     schema_model: str
     values_model: str
-    schema_api_key: str | None = None
-    values_api_key: str | None = None
+    schema_api_key: str | None = field(default=None, repr=False)
+    values_api_key: str | None = field(default=None, repr=False)
     schema_api_key_env: str | None = None
     values_api_key_env: str | None = None
     schema_api_base: str | None = None
@@ -368,20 +368,22 @@ def load_grounded_config(
     config's ``[grounded]`` section and ``[models]`` tiers. A model set on the
     section overrides its tier.
 
-    ``schema_model`` / ``values_model`` are per-call overrides and resolve
-    exactly as if written in ``[grounded]``: the section's own ``schema_*`` /
-    ``values_*`` credentials still apply, and nothing a tier carries does.
+    ``schema_model`` / ``values_model`` are per-call overrides, applied as the
+    merged config's highest layer (``cli_overrides``): an override replaces that
+    model's whole credential group, so neither the section's ``schema_*`` /
+    ``values_*`` keys nor a tier's reach it. It takes the config's provider key for
+    its provider (``anthropic_api_key`` …) when there is one, else litellm's
+    per-provider env var; there is no per-call way to pass credentials.
     """
-    merged = load_merged_config(workspace)
     overrides = {
         key: model
         for key, model in (("schema_model", schema_model), ("values_model", values_model))
         if model is not None
     }
-    if overrides:
-        section = merged.get(ConfigSection.GROUNDED)
-        base: dict[str, Any] = section if isinstance(section, dict) else {}
-        merged = {**merged, ConfigSection.GROUNDED: {**base, **overrides}}
+    merged = load_merged_config(
+        workspace,
+        cli_overrides={ConfigSection.GROUNDED.value: overrides} if overrides else None,
+    )
     schema = resolve_tiered_model(
         merged,
         section_name=ConfigSection.GROUNDED,

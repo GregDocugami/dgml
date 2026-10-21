@@ -140,7 +140,7 @@ class Workspace:
         merged = _merge_toml_layers(self)
         ident = workspace_config.read_identity(self)
         blob_cfg, doc_cfg = resolve_store_configs(self, merged=merged)
-        return Configuration.from_merged(
+        return Configuration._from_merged(
             identity=Identity(
                 workspace_id=ident.workspace_id, name=ident.name, organization=ident.organization
             ),
