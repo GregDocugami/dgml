@@ -51,7 +51,12 @@ from dgml_core.classification import (
 from dgml_core.clustering_types import ClusterMethod, ClusterMode
 from dgml_core.concurrency import map_concurrent
 from dgml_core.consistency import check_workspace
-from dgml_core.conversion import FAMILY_BY_SUFFIX, load_conversion_config
+from dgml_core.conversion import (
+    CONVERTIBLE_SUFFIXES_TEXT,
+    FAMILY_BY_SUFFIX,
+    load_conversion_config,
+    require_converter,
+)
 from dgml_core.default_config import PROVIDER_API_KEYS, PROVIDER_MODELS
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
@@ -651,7 +656,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "path",
         type=Path,
         help=(
-            "Path to a file (.pdf, or a convertible source .docx/.doc/.xlsx/.xls "
+            f"Path to a file (.pdf, or a convertible source {CONVERTIBLE_SUFFIXES_TEXT} "
             "when a converter is configured), or a directory. When PATH is a "
             "directory, every ingestible file (case-insensitive) in it is added "
             "in one run and a summary envelope is returned. Use --recursive to "
@@ -5159,9 +5164,15 @@ def _ingestible_suffixes(ws: Workspace) -> frozenset[str]:
     configured in the workspace. Unconfigured source types are skipped (not
     gathered), so a folder of PDFs with stray Office docs doesn't produce a
     pile of per-file failures. Raises ``ConversionConfigInvalid`` on a
-    malformed ``conversion`` config (a real error worth surfacing once)."""
+    malformed ``conversion`` config, or a family whose converter cannot be
+    resolved or does not handle the family's suffixes (a real error worth
+    surfacing once, up front, rather than once per gathered file)."""
     configured = load_conversion_config(ws)
-    extra = {sfx for sfx, family in FAMILY_BY_SUFFIX.items() if family in configured}
+    extra: set[str] = set()
+    for sfx, family in FAMILY_BY_SUFFIX.items():
+        if family in configured:
+            require_converter(sfx, configured)
+            extra.add(sfx)
     return frozenset({".pdf"} | extra)
 
 

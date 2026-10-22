@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from dgml_core import llm
 from dgml_core.concurrency import map_concurrent
-from dgml_core.conversion import ConverterConfig
+from dgml_core.conversion import ConverterConfig, FormatFamily
 from dgml_core.errors import (
     GenerationConfigInvalid,
     LabelModelUnreachable,
@@ -343,7 +343,7 @@ class ConvertOptions:
     # Per-format-family converters (docx/xlsx → PDF), from the workspace
     # `conversion` config. Passed to load_document_as_pdf so non-PDF inputs
     # convert; None/empty means PDF-only (every input must already be a PDF).
-    converters: dict[str, ConverterConfig] | None = None
+    converters: dict[FormatFamily, ConverterConfig] | None = None
     # PDF engine for page slicing (the per-window transcription payload), from
     # the workspace `pdf` config. None means the ghostscript default — which is
     # also what library callers with no workspace get.
