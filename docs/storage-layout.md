@@ -1376,8 +1376,9 @@ dimension rounding). They are `null` if a non-PDF source failed to convert
 
 `pdf_converter` names the converter that turned a non-PDF source into the
 PDF the pipeline ran on (the converter's name with any trailing
-`"converter"` suffix removed, e.g. `"libreoffice"`). It is `null` when the
-source was already a PDF.
+`"converter"` suffix removed, e.g. `"libreoffice"`). It is `"supplied"` when
+the caller passed the PDF to `FileStore.add` (`converted_pdf=`) instead of
+DGML converting the source, and `null` when the source was already a PDF.
 
 ## `page_text/page_N.json`
 
