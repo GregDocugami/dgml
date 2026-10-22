@@ -31,6 +31,7 @@ from .errors import (
     CONVERT_TO_PDF_OPERATION,
     AuthError,
     ConflictError,
+    ConflictErrorKind,
     DgmlError,
     EngineNotAvailable,
     FileNotFound,
@@ -73,17 +74,45 @@ class ConflictPolicy(StrEnum):
     DUPLICATE = "duplicate"  # Always create a new record.
 
 
+class ConflictKind(StrEnum):
+    """Which existing record :meth:`FileStore.add` matched (``AddFileResult.conflict_kind``).
+
+    ``HASH`` is a record with identical content; ``PATH`` is a different file
+    added from the same source path. A hash match wins when both apply. No
+    conflict at all is ``None``, not a member.
+    """
+
+    HASH = "hash"
+    PATH = "path"
+
+
 @dataclass
 class AddFileResult:
     record: FileRecord
     created: bool  # False if an existing record was returned.
-    conflict_kind: str | None = None  # "hash" | "path" | None.
+    conflict_kind: ConflictKind | None = None
     page_render_error: str | None = None
     page_count_error: str | None = None
     text_extraction_error: str | None = None
     conversion_error: str | None = None
     text_extraction: dict[str, Any] | None = field(default=None)
     note: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        """The ``dgml file add`` payload for this result (part of the CLI's JSON
+        contract): the record plus how the add went. ``conflict_kind`` is a plain
+        ``str`` (or ``None``) whatever the caller constructed the result with."""
+        return {
+            "file": self.record.to_json(),
+            "created": self.created,
+            "conflict_kind": None if self.conflict_kind is None else str(self.conflict_kind),
+            "page_render_error": self.page_render_error,
+            "page_count_error": self.page_count_error,
+            "text_extraction_error": self.text_extraction_error,
+            "conversion_error": self.conversion_error,
+            "text_extraction": self.text_extraction,
+            "note": self.note,
+        }
 
 
 def _validate_pdf(path: Path) -> None:
@@ -206,7 +235,7 @@ class FileStore:
                         f"content (added from '{held.original_path}'). Pick an unused id, "
                         f"or delete '{file_id}' first. No --on-conflict policy overrides "
                         f"this: reusing the id would destroy that record.",
-                        kind="id",
+                        kind=ConflictErrorKind.ID,
                         existing_id=file_id,
                     )
                 if held.sha256 == digest:
@@ -215,7 +244,7 @@ class FileStore:
                             f"duplicate creates a second record, but file id '{file_id}' "
                             f"is already taken (by this same content). Omit the id to "
                             f"generate one, or pick an unused id.",
-                            kind="id",
+                            kind=ConflictErrorKind.ID,
                             existing_id=file_id,
                         )
                     # An idempotent re-add of *this* record. Pin the hash conflict
@@ -229,7 +258,7 @@ class FileStore:
             if on_conflict is ConflictPolicy.ERROR:
                 raise ConflictError(
                     f"a file with identical content already exists as '{same_hash.id}'",
-                    kind="hash",
+                    kind=ConflictErrorKind.HASH,
                     existing_id=same_hash.id,
                 )
             if on_conflict is ConflictPolicy.SKIP:
@@ -237,7 +266,7 @@ class FileStore:
                     same_hash,
                     file_id,
                     on_conflict,
-                    conflict_kind="hash",
+                    conflict_kind=ConflictKind.HASH,
                     note="existing record returned (identical content)",
                 )
             if on_conflict is ConflictPolicy.REPLACE:
@@ -245,7 +274,7 @@ class FileStore:
                     same_hash,
                     file_id,
                     on_conflict,
-                    conflict_kind="hash",
+                    conflict_kind=ConflictKind.HASH,
                     note="replace is a no-op when content is identical; existing record returned",
                 )
             # DUPLICATE — fall through and create a new record.
@@ -254,7 +283,7 @@ class FileStore:
                 raise ConflictError(
                     f"a different file with the same source path already exists as "
                     f"'{same_path.id}'",
-                    kind="path",
+                    kind=ConflictErrorKind.PATH,
                     existing_id=same_path.id,
                 )
             if on_conflict is ConflictPolicy.SKIP:
@@ -262,7 +291,7 @@ class FileStore:
                     same_path,
                     file_id,
                     on_conflict,
-                    conflict_kind="path",
+                    conflict_kind=ConflictKind.PATH,
                     note="existing record returned (same source path, different content)",
                 )
             if on_conflict is ConflictPolicy.REPLACE:
@@ -274,7 +303,9 @@ class FileStore:
             digest,
             file_id=file_id,
             original_path=original_path,
-            conflict_kind=("hash" if same_hash else "path" if same_path else None),
+            conflict_kind=(
+                ConflictKind.HASH if same_hash else ConflictKind.PATH if same_path else None
+            ),
             text_mode=text_mode,
             dpi=dpi,
             record_usage=record_usage,
@@ -286,7 +317,7 @@ class FileStore:
         requested_id: str | None,
         on_conflict: ConflictPolicy,
         *,
-        conflict_kind: str,
+        conflict_kind: ConflictKind,
         note: str,
     ) -> AddFileResult:
         """Hand back a record dedup already matched — unless the caller named a
@@ -305,7 +336,7 @@ class FileStore:
             raise InvalidArgument(
                 f"file id {requested_id!r} cannot be honoured: this content is already "
                 f"in the workspace as '{record.id}' ({conflict_kind} match), and "
-                f"--on-conflict {on_conflict.value} returns that record instead of "
+                f"--on-conflict {on_conflict} returns that record instead of "
                 f"creating one. Use --on-conflict duplicate to add a second record as "
                 f"{requested_id!r}, delete '{record.id}', or omit the id."
             )
@@ -363,7 +394,7 @@ class FileStore:
         digest: str,
         *,
         original_path: str,
-        conflict_kind: str | None,
+        conflict_kind: ConflictKind | None,
         text_mode: TextMode,
         file_id: str | None = None,
         dpi: int = DEFAULT_DPI,

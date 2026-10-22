@@ -30,7 +30,7 @@ from dgml_core.errors import (
     InvalidPDF,
     UnsupportedFileType,
 )
-from dgml_core.files import ConflictPolicy, FileStore
+from dgml_core.files import ConflictKind, ConflictPolicy, FileStore
 from dgml_core.ocr import _image_dimensions
 from dgml_core.storage import Workspace
 
@@ -214,7 +214,7 @@ def test_conflict_hash_skip_returns_existing(store: FileStore, sample_pdf: Path)
     second = store.add(sample_pdf, on_conflict=ConflictPolicy.SKIP)
     assert second.record.id == first.record.id
     assert not second.created
-    assert second.conflict_kind == "hash"
+    assert second.conflict_kind is ConflictKind.HASH
 
 
 @needs_gs
@@ -504,6 +504,7 @@ def test_free_id_honoured_when_replace_swaps_path(
     shutil.copy2(sample_pdf_alt, sample_pdf)
     second = store.add(sample_pdf, file_id="rev-2", on_conflict=ConflictPolicy.REPLACE)
     assert second.created
+    assert second.conflict_kind is ConflictKind.PATH
     assert second.record.id == "rev-2"
     assert {r.id for r in store.list_all()} == {"rev-2"}
 

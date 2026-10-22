@@ -1355,6 +1355,9 @@ def test_check_returns_two_when_issues(
     assert rc == 2
     report = _read_stdout(capsys)
     assert report["issue_count"] >= 1
+    assert {(i["target_type"], i["target_id"]) for i in report["issues"]} == {("file", fid)}
+    # ``kind`` is wire format (an ``IssueKind`` member renders as its value).
+    assert "missing_pdf" in {i["kind"] for i in report["issues"]}
 
 
 @needs_gs
@@ -1724,14 +1727,14 @@ def test_cluster_config_preset_name_passes_preset_overrides(
 def _llm_partition(fid: str) -> Any:
     """A one-cluster LLMClusteringResult that names its emergent bucket in the
     same call (so clustering() needs no second naming round-trip)."""
-    from dgml_core.classification import ClassificationDecision
+    from dgml_core.classification import ClassificationDecision, DecisionKind
     from dgml_core.llm_clustering import LLMClusteringResult
 
     return LLMClusteringResult(
         clusters={fid: "unknown_0"},
         proposals={
             "unknown_0": ClassificationDecision(
-                decision="new",
+                decision=DecisionKind.NEW,
                 new_name="Sample Documents",
                 new_description="test docs",
                 new_key_questions=("What is this document about?",),
@@ -3800,6 +3803,7 @@ def test_file_add_directory_skip_already_imported(
         "hard_failed": 0,
     }
     for entry in payload["results"]:
+        assert entry["status"] == "skipped"
         assert entry["created"] is False
         assert entry["conflict_kind"] == "hash"
 
@@ -5121,6 +5125,24 @@ def test_discover_page_from_origin(tmp_path: Path, capsys: pytest.CaptureFixture
     inv = next((t for t in payload["tags"] if t["tag"] == "InvoiceCycle"), None)
     assert inv is not None
     assert inv["samples"][0]["page"] == 4
+
+
+def test_discover_full_reports_structural_roles(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--full`` emits each tag's structural ``role`` as its plain wire string."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    _seed_file_dir(ws, _DISC_FILE, pages=4)
+    _seed_discover_xml(ws, _DISC_FILE, _DISC_DS)
+    capsys.readouterr()
+
+    rc = main(_ws_args(ws) + ["discover", _DISC_FILE, "--docset", _DISC_DS, "--full"])
+    assert rc == 0
+    roles = {t["tag"]: t["role"] for t in _read_stdout(capsys)["tags"]}
+    assert roles["LiabilityCap"] == "leaf-value"
+    assert roles["IndemnificationClause"] == "container"
+    assert set(roles.values()) <= {"leaf-value", "container", "hybrid", "mixed"}
 
 
 def test_discover_depth_first_addressable(
@@ -6963,6 +6985,7 @@ def test_import_is_idempotent(tmp_path: Path, capsys: pytest.CaptureFixture[str]
     payload = _read_stdout(capsys)
     assert payload["imported"] == []
     assert payload["skipped"][0]["workspace_id"] == wid
+    assert payload["skipped"][0]["status"] == "skipped"
 
 
 def test_import_on_conflict_fail_stops(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -7005,7 +7028,9 @@ def test_import_reports_a_bad_row_and_keeps_going(
     assert main(["workspace", "import"]) == 2  # partial success
     payload = _read_stdout(capsys)
     assert [r["workspace_id"] for r in payload["imported"]] == [wid]
+    assert payload["imported"][0]["status"] == "imported"
     assert payload["failed"][0]["root"] == str(tmp_path / "vanished")
+    assert payload["failed"][0]["status"] == "failed"
     assert "does not exist" in payload["failed"][0]["reason"]
 
 
