@@ -1,6 +1,6 @@
 ---
 name: dgml
-description: Use when the user wants to manage a DGML workspace from the shell — initialize a workspace, add PDFs or Office documents (docx/xlsx, when a converter is configured) single or bulk from a directory, create or manage DocSets, assign files to DocSets, convert PDFs to DGML XML (grounded in place with dg:origin bounding boxes as part of generation), extract structured values against a schema (RNC schema generation, grounded value extraction to DGML), or run a consistency check. Triggers on phrases like "add these PDFs", "ingest these Word/Excel docs", "create a docset", "import documents into DGML", "ingest a folder of PDFs", "ground the DGML", "add bounding boxes", "extract values", "extraction schema", "generate a schema", "pull fields from these docs", "dgml workspace", "check the workspace".
+description: Use when the user wants to manage a DGML workspace from the shell — initialize a workspace, add PDFs or Office documents (docx/xlsx/pptx, when a converter is configured) single or bulk from a directory, create or manage DocSets, assign files to DocSets, convert PDFs to DGML XML (grounded in place with dg:origin bounding boxes as part of generation), extract structured values against a schema (RNC schema generation, grounded value extraction to DGML), or run a consistency check. Triggers on phrases like "add these PDFs", "ingest these Word/Excel docs", "create a docset", "import documents into DGML", "ingest a folder of PDFs", "ground the DGML", "add bounding boxes", "extract values", "extraction schema", "generate a schema", "pull fields from these docs", "dgml workspace", "check the workspace".
 ---
 
 # Using the `dgml` CLI
@@ -274,9 +274,9 @@ find "$DIR" -type f -iname '*.pdf' -print0 |
   done
 ```
 
-### Office documents (docx/xlsx)
+### Office documents (docx/xlsx/pptx)
 
-`file add` accepts not just `.pdf` but convertible sources — `.docx`/`.doc`/`.xlsx`/`.xls` — **when a converter is configured** for that format family in `<workspace>/config.toml`. The source is converted to PDF at add time, then ingested exactly like a PDF (same `page_images/`, `page_text/`, generation). With no converter configured for a non-PDF format, the add fails with `UNSUPPORTED_FILE_TYPE` — there is no default. Ready-made converters ship in the `translators-pdf` package (LibreOffice, Aspose.Words, an xlsx island-renderer, a generic command runner); or point a family at your own class. Minimal config:
+`file add` accepts not just `.pdf` but convertible sources — `.docx`/`.doc`/`.xlsx`/`.xls`/`.pptx`/`.ppt` — **when a converter is configured** for that format family in `<workspace>/config.toml`. The source is converted to PDF at add time, then ingested exactly like a PDF (same `page_images/`, `page_text/`, generation). With no converter configured for a non-PDF format, the add fails with `UNSUPPORTED_FILE_TYPE` — there is no default. Ready-made converters ship in the `translators-pdf` package (LibreOffice, Aspose.Words, an xlsx island-renderer, a generic command runner); or point a family at your own class. Minimal config:
 
 ```toml
 # <workspace>/config.toml
@@ -286,7 +286,7 @@ provider = "translators_pdf.libreoffice:LibreOfficeConverter"
 provider = "translators_pdf.xlsx:XlsxIslandsConverter"
 ```
 
-Install the providers you reference: `pip install translators-pdf` (LibreOffice needs `soffice` on PATH; `pip install translators-pdf[xlsx]` for the xlsx renderer). A convertible source that can't be converted (missing binary/SDK) is a *soft* fail — the File record is created with `conversion_error` set, like `page_render_error`. See [conversion.md](../../../docs/conversion.md).
+Install the providers you reference: `pip install translators-pdf` (LibreOffice needs `soffice` on PATH; `pip install translators-pdf[xlsx]` for the xlsx renderer). For `pptx`, use the LibreOffice converter: `[conversion.pptx]` with `provider = "translators_pdf.libreoffice:LibreOfficeConverter"`. A convertible source that can't be converted (missing binary/SDK) is a *soft* fail — the File record is created with `conversion_error` set, like `page_render_error`. See [conversion.md](../../../docs/conversion.md).
 
 ### Text extraction
 
@@ -601,6 +601,35 @@ uv run dgml batch prune                           # drop finished jobs
 `dgml batch unlock <job_id>` once `batch status` shows `lease.stale: true`).
 `BATCH_JOB_NONDETERMINISTIC` means the inputs changed under an open batch:
 `dgml batch cancel <job_id>` then resume.
+
+**Bound the wait with `--batch-deadline`.** A wave usually ends within an
+hour but can take many hours. When the user needs results by a certain time,
+add `--batch-deadline <duration>` (`90m`, `6h`, `1d`, at most `30d`; with
+`--batch`, on any batch command). Once it passes, open batches are canceled, results already
+produced are kept at batch price, and the rest of the run finishes
+synchronously at standard price, so the saving shrinks but the run ends. The
+deadline belongs to the job: set it on the first run; every `batch resume`
+honors it (a resume after it finishes the job instead of pausing), and passing
+a different duration on a resume is `BATCH_JOB_INVALID`. The payload's
+`.batch.deadline` reports `at`, `expired`, `canceled_batches`,
+`collected_after_cancel`, `sync_after_deadline` and `possibly_double_billed`;
+`dgml batch status` shows `deadline: {at, expired}`, and so does a paused
+run's `batch_job` block. Canceling can take minutes: the run waits a
+per-provider time for each cancel to settle (Anthropic 450 s, Gemini 60 s; a
+`--no-wait` run checks once and does not wait). A batch still
+canceling after that wait has its requests run synchronously; a provider that
+keeps processing while canceling (OpenAI does) may bill those twice.
+`possibly_double_billed` counts them and a WARNING names the batch. The job
+keeps such a batch as `settling`; once it ends, the next resume, `batch
+cancel` or `batch prune` records its real extra cost in `late_billed` /
+`late_billed_usd` (real spend is `cost_usd + late_billed_usd`), and `batch
+prune` keeps the job until then (listed in `settling`). While one is settling,
+`.batch.deadline.job_id` names that job, and `batch delete` refuses it without
+`--force` (the late cost would be lost).
+
+```bash
+job=$(uv run dgml docset generate "$ds" --batch --no-wait --batch-deadline 6h | jq -r .batch_job.job_id)
+```
 
 **Grounding is built in.** As the last step, generation grounds each
 `<stem>.dgml.xml` *in place* against the file's `page_text/` OCR — adding

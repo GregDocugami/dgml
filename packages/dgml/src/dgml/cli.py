@@ -51,7 +51,12 @@ from dgml_core.classification import (
 from dgml_core.clustering_types import ClusterMethod, ClusterMode
 from dgml_core.concurrency import map_concurrent
 from dgml_core.consistency import check_workspace
-from dgml_core.conversion import FAMILY_BY_SUFFIX, load_conversion_config
+from dgml_core.conversion import (
+    CONVERTIBLE_SUFFIXES_TEXT,
+    FAMILY_BY_SUFFIX,
+    load_conversion_config,
+    require_converter,
+)
 from dgml_core.default_config import PROVIDER_API_KEYS, PROVIDER_MODELS
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
@@ -651,7 +656,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "path",
         type=Path,
         help=(
-            "Path to a file (.pdf, or a convertible source .docx/.doc/.xlsx/.xls "
+            f"Path to a file (.pdf, or a convertible source {CONVERTIBLE_SUFFIXES_TEXT} "
             "when a converter is configured), or a directory. When PATH is a "
             "directory, every ingestible file (case-insensitive) in it is added "
             "in one run and a summary envelope is returned. Use --recursive to "
@@ -854,6 +859,20 @@ def _add_batch_arguments(
             "Continue an existing batch job (what `dgml batch resume` passes): "
             "responses already received are replayed, batches still open are "
             "collected rather than resubmitted. Requires batch mode."
+        ),
+    )
+    parser.add_argument(
+        "--batch-deadline",
+        default=None,
+        metavar="DURATION",
+        help=(
+            "Stop waiting on the provider's batches this long after the run (or job) "
+            "starts: 90m, 6h, 1d, or plain seconds. Once it passes, open batches are "
+            "canceled, results the provider already produced are kept (batch price), "
+            "and every remaining request of the run runs synchronously at standard "
+            "price. A job stores it as an absolute UTC time on its first run; every "
+            "resume honors it. Default: none (wait up to the provider's own limit). "
+            "Requires batch mode."
         ),
     )
 
@@ -2443,27 +2462,52 @@ def _end_job_capture() -> _Capture | None:
 
 
 def _flush_job_capture(
-    capture: _Capture | None, fmt: str, *, job: dict[str, Any] | None, payloads: bool = True
+    capture: _Capture | None,
+    fmt: str,
+    *,
+    job: dict[str, Any] | None,
+    payloads: bool = True,
+    deadline: dict[str, Any] | None = None,
 ) -> None:
     """Emit the output a job run held back. *job* (a job the run left behind)
-    goes into the last payload's ``batch.job`` — or, when the run emitted no
-    payload, into its last error envelope's ``details.batch.job``."""
+    and *deadline* (the job's batch deadline block, when it has one) go into
+    the last payload's ``batch.job`` / ``batch.deadline`` — or, when the run
+    emitted no payload, into its last error envelope's ``details.batch``."""
     if capture is None:
         return
-    if job is not None:
-        if payloads and capture.payloads:
-            block = capture.payloads[-1].setdefault("batch", {})
-            if isinstance(block, dict):
-                block["job"] = job
-        elif capture.errors:
-            error = capture.errors[-1].get("error")
-            if isinstance(error, dict):
-                error.setdefault("details", {})["batch"] = {"job": job}
+    fields = {name: value for name, value in (("job", job), ("deadline", deadline)) if value}
+    if payloads and capture.payloads:
+        for name, value in fields.items():
+            _attach_batch_field(capture.payloads[-1], name, value)
+    elif fields and capture.errors:
+        error = capture.errors[-1].get("error")
+        if isinstance(error, dict):
+            batch = error.setdefault("details", {}).setdefault("batch", {})
+            if isinstance(batch, dict):
+                batch.update(fields)
     if payloads:
         for payload in capture.payloads:
             _emit(payload, fmt)
     for envelope in capture.errors:
         _emit(envelope, fmt, stream=sys.stderr)
+
+
+def _attach_batch_field(payload: dict[str, Any], name: str, value: dict[str, Any]) -> None:
+    """Set *payload*'s ``batch.<name>`` (the block created if absent)."""
+    block = payload.setdefault("batch", {})
+    if isinstance(block, dict):
+        block[name] = value
+
+
+def _deadline_block(session: Any) -> dict[str, Any] | None:
+    """The just-closed *session*'s ``batch.deadline`` block, if it had one."""
+    if session is None:
+        return None
+    try:
+        block = session.deadline_json()
+    except Exception:
+        return None
+    return block if isinstance(block, dict) else None
 
 
 def _left_behind(session: Any) -> dict[str, Any] | None:
@@ -2542,13 +2586,14 @@ def _dispatch_with_job(args: argparse.Namespace, ws: Workspace, fmt: str) -> int
             return _emit_lease_lost(fenced, session, fmt)
         # A paused run's one result is the job to resume.
         _flush_job_capture(_end_job_capture(), fmt, job=None, payloads=False)
-        from dgml_core.batch.jobs import pending_job_payload
+        from dgml_core.batch.jobs import deadline_summary, pending_job_payload
 
         block = pending_job_payload(
             pending.job_id,
             command=command,
             submitted_batches=pending.submitted_batches,
             requests_in_flight=pending.requests_in_flight,
+            deadline=deadline_summary(session.manifest) if session is not None else None,
         )
         _emit({"batch_job": block}, fmt)
         return 0
@@ -2573,9 +2618,14 @@ def _dispatch_with_job(args: argparse.Namespace, ws: Workspace, fmt: str) -> int
             _end_job_capture()
             return _emit_lease_lost(fenced, session, fmt)
         job = _left_behind(session)
-        _flush_job_capture(_end_job_capture(), fmt, job=None)
-        if job is not None and isinstance(exc, DgmlError):
-            return _emit_error(exc.code, str(exc), fmt, details={"batch": {"job": job}})
+        deadline = _deadline_block(session)
+        _flush_job_capture(_end_job_capture(), fmt, job=None, deadline=deadline)
+        if isinstance(exc, DgmlError) and (job is not None or deadline is not None):
+            # The failure's envelope names the job left behind and the deadline
+            # block (possibly_double_billed, a settling job's id): with no
+            # payload, it is the only place an agent can learn them.
+            batch = {name: value for name, value in (("job", job), ("deadline", deadline)) if value}
+            return _emit_error(exc.code, str(exc), fmt, details={"batch": batch})
         raise
     session = _active_batch_job()
     job = None
@@ -2591,7 +2641,7 @@ def _dispatch_with_job(args: argparse.Namespace, ws: Workspace, fmt: str) -> int
             _end_job_capture()
             return _emit_nondeterministic(drift, session, fmt)
         job = _left_behind(session)
-    _flush_job_capture(_end_job_capture(), fmt, job=job)
+    _flush_job_capture(_end_job_capture(), fmt, job=job, deadline=_deadline_block(session))
     return rc
 
 
@@ -2638,6 +2688,7 @@ def _start_batch_job(
         wait=not getattr(args, "no_wait", False),
         cwd=os.getcwd(),
         log=log,
+        deadline_s=_batch_deadline_seconds(args),
     )
     # From here the run's output waits for the session's close (one outcome
     # per run; a job left behind is named in the payload).
@@ -2661,6 +2712,22 @@ def _reject_job_flags_without_batch(args: argparse.Namespace) -> None:
     if batch_label is not None:
         flag = "--batch-label" if batch_label else "--no-batch-label"
         raise BatchJobInvalid(f"{flag} is a batch option; it needs --batch")
+    if getattr(args, "batch_deadline", None) is not None:
+        raise BatchJobInvalid("--batch-deadline is a batch option; it needs --batch")
+
+
+def _batch_deadline_seconds(args: argparse.Namespace) -> float | None:
+    """``--batch-deadline`` in seconds, or None when not given
+    (INVALID_ARGUMENT for a value that is not a positive duration)."""
+    spec = getattr(args, "batch_deadline", None)
+    if spec is None:
+        return None
+    from dgml_core.batch import parse_duration
+
+    try:
+        return parse_duration(spec)
+    except ValueError as exc:
+        raise InvalidArgument(f"--batch-deadline: {exc}") from None
 
 
 def _subcommands(parser: argparse.ArgumentParser) -> Mapping[str, argparse.ArgumentParser]:
@@ -5159,9 +5226,15 @@ def _ingestible_suffixes(ws: Workspace) -> frozenset[str]:
     configured in the workspace. Unconfigured source types are skipped (not
     gathered), so a folder of PDFs with stray Office docs doesn't produce a
     pile of per-file failures. Raises ``ConversionConfigInvalid`` on a
-    malformed ``conversion`` config (a real error worth surfacing once)."""
+    malformed ``conversion`` config, or a family whose converter cannot be
+    resolved or does not handle the family's suffixes (a real error worth
+    surfacing once, up front, rather than once per gathered file)."""
     configured = load_conversion_config(ws)
-    extra = {sfx for sfx, family in FAMILY_BY_SUFFIX.items() if family in configured}
+    extra: set[str] = set()
+    for sfx, family in FAMILY_BY_SUFFIX.items():
+        if family in configured:
+            require_converter(sfx, configured)
+            extra.add(sfx)
     return frozenset({".pdf"} | extra)
 
 

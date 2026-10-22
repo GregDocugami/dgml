@@ -22,10 +22,12 @@ from typing import Any
 
 from . import layout
 from .conversion import (
+    CONVERTIBLE_SUFFIXES_TEXT,
     convert_to_pdf_bytes,
     converter_name_for_path,
     family_for_suffix,
     load_conversion_config,
+    require_converter,
 )
 from .errors import (
     CONVERT_TO_PDF_OPERATION,
@@ -427,7 +429,10 @@ class FileStore:
         A ``.pdf`` must have the PDF magic header. A convertible source
         (docx/xlsx/…) is accepted only if its format family has a converter
         configured in the workspace ``conversion`` config; otherwise it is an
-        :class:`UnsupportedFileType`. There is no default converter.
+        :class:`UnsupportedFileType`. There is no default converter. A configured
+        converter that cannot be resolved or does not handle the suffix is a
+        :class:`ConversionConfigInvalid` — a config error, refused before any write
+        rather than recorded per file.
 
         A ``converted_pdf`` the caller supplies stands in for that converter, so it
         is checked instead — after the source's type, so an unsupported source is
@@ -447,20 +452,18 @@ class FileStore:
         if family is None:
             raise UnsupportedFileType(
                 f"unsupported file type '{suffix or '<no extension>'}' "
-                "(supported: .pdf, plus .docx/.doc/.xlsx/.xls with a converter configured)"
+                f"(supported: .pdf, plus {CONVERTIBLE_SUFFIXES_TEXT} with a converter "
+                "configured)"
             )
         if converted_pdf is not None:
             if not converted_pdf.is_file():
                 raise FileNotFound(f"converted PDF does not exist: {converted_pdf}")
             _validate_pdf(converted_pdf)
             return
-        # Resolving the config validates it and proves a converter is wired up
-        # for this family — but does not yet construct it (no binary/SDK touch).
-        if family not in load_conversion_config(self.ws):
-            raise UnsupportedFileType(
-                f"no converter configured for '{suffix}'; set conversion.{family}.provider "
-                "in config.toml (see the translators-pdf package for ready-made converters)"
-            )
+        # Proves a converter is wired up for this family and handles the suffix.
+        # That resolves the converter class (an import) but does not construct it
+        # (no binary/SDK touch); _ensure_pdf imports the same module anyway.
+        require_converter(suffix, load_conversion_config(self.ws))
 
     def _create_record(
         self,
