@@ -55,6 +55,7 @@ from dgml_core.conversion import (
     CONVERTIBLE_SUFFIXES_TEXT,
     FAMILY_BY_SUFFIX,
     load_conversion_config,
+    require_converter,
 )
 from dgml_core.default_config import PROVIDER_API_KEYS, PROVIDER_MODELS
 from dgml_core.docsets import DocSetStore
@@ -5163,9 +5164,15 @@ def _ingestible_suffixes(ws: Workspace) -> frozenset[str]:
     configured in the workspace. Unconfigured source types are skipped (not
     gathered), so a folder of PDFs with stray Office docs doesn't produce a
     pile of per-file failures. Raises ``ConversionConfigInvalid`` on a
-    malformed ``conversion`` config (a real error worth surfacing once)."""
+    malformed ``conversion`` config, or a family whose converter cannot be
+    resolved or does not handle the family's suffixes (a real error worth
+    surfacing once, up front, rather than once per gathered file)."""
     configured = load_conversion_config(ws)
-    extra = {sfx for sfx, family in FAMILY_BY_SUFFIX.items() if family in configured}
+    extra: set[str] = set()
+    for sfx, family in FAMILY_BY_SUFFIX.items():
+        if family in configured:
+            require_converter(sfx, configured)
+            extra.add(sfx)
     return frozenset({".pdf"} | extra)
 
 

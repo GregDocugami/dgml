@@ -3784,8 +3784,52 @@ def test_file_add_directory_gathers_configured_pptx(
     by_name = {Path(e["path"]).name: e for e in payload["results"]}
     assert set(by_name) == {"a.pdf", "deck.pptx", "OLD.PPT"}  # notes.docx: no converter
     for name in ("deck.pptx", "OLD.PPT"):
-        assert by_name[name]["status"] == "added"
-        assert by_name[name]["conversion_error"] is None
+        entry = by_name[name]
+        assert entry["status"] == "added"
+        assert entry["conversion_error"] is None
+        # The converted PDF is persisted beside the source (the uppercase suffix
+        # lowercased in its name) and the pages were rendered from it.
+        assert entry["file"]["page_count"] == 1
+        assert entry["file"]["pdf_converter"] == "fixed-pdf"
+        assert (ws / layout.file_pdf_key(entry["file"]["id"], name)).is_file()
+
+
+class _SpreadsheetOnlyConverter(_FixedPdfConverter):
+    name: ClassVar[str] = "spreadsheet-only"
+    input_formats: ClassVar[frozenset[str]] = frozenset({".xlsx", ".xls"})
+
+
+def test_file_add_directory_refuses_a_family_on_the_wrong_converter(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`conversion.pptx` pointed at a converter that handles only spreadsheets is
+    one CONVERSION_CONFIG_INVALID up front, not a failed record per deck."""
+    stub = types.ModuleType("cli_stub_conv")
+    stub._SpreadsheetOnlyConverter = _SpreadsheetOnlyConverter  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cli_stub_conv", stub)
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    rendered = tmp_path / "rendered.pdf"
+    _write_text_pdf(rendered, ["Slide one"])
+    conversion = {
+        "pptx": {"provider": "cli_stub_conv:_SpreadsheetOnlyConverter", "pdf": str(rendered)}
+    }
+    with (ws / "config.toml").open("a", encoding="utf-8") as fh:
+        fh.write("\n" + dump_toml({"conversion": conversion}) + "\n")
+
+    src = tmp_path / "decks"
+    src.mkdir()
+    (src / "deck.pptx").write_bytes(b"PK\x03\x04 not really a pptx")
+    (src / "other.pptx").write_bytes(b"PK\x03\x04 not really a pptx either")
+
+    rc = main(_ws_args(ws) + ["file", "add", str(src)])
+    assert rc != 0
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "CONVERSION_CONFIG_INVALID"
+    assert "does not handle '.pptx'" in err["message"]
+    assert not (ws / "files").exists() or not any((ws / "files").iterdir())
 
 
 @needs_gs

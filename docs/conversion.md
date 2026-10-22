@@ -239,6 +239,11 @@ file attestation key off the stored original document, not the converted PDF.
 - **"no converter configured for .xlsx …"** — add a `conversion.xlsx`
   (or `.docx`, `.pptx`) entry to `config.toml` pointing at a converter. This appears
   both when adding a file and when generating.
+- **"converter 'xlsx-islands' (conversion.pptx.provider) does not handle
+  '.pptx' …"** — the family's `provider` names a converter whose
+  `input_formats` doesn't include that file type. Point the family at a
+  converter that handles it. This is checked before a file is added or a
+  folder is gathered, so it's one error, not one per file.
 - **"pip install translators-pdf[xlsx]"** — the island renderer's
   dependencies are missing; install the extra.
 - **Aspose SDK error** — `pip install aspose-words` or

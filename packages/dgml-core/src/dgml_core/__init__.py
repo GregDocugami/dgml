@@ -22,6 +22,7 @@ from .configuration import Configuration, Identity, ProviderSpec, Storage
 from .conversion import (
     ConverterConfig,
     DocConverter,
+    FormatFamily,
     load_conversion_config,
     make_converter,
 )
@@ -347,6 +348,7 @@ __all__ = [
     "FileRecord",
     "FileStore",
     "FileVersion",
+    "FormatFamily",
     "GenerationConfigInvalid",
     "GenerationConfigMissing",
     "GenerationFailed",
