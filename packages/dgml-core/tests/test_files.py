@@ -115,7 +115,7 @@ def test_supplied_converted_pdf_needs_no_converter(
     result = store.add(src, converted_pdf=text_pdf)
 
     assert result.conversion_error is None
-    assert result.record.pdf_converter == "supplied"
+    assert result.record.pdf_converter is None  # nothing was converted: a supplied PDF
     assert result.record.page_count == 2
     assert len(_page_images(store.ws, result.record.id)) == 2
     fid = result.record.id
@@ -146,7 +146,7 @@ def test_supplied_converted_pdf_is_used_over_a_configured_converter(
 
     result = store.add(src, converted_pdf=sample_pdf)
 
-    assert result.record.pdf_converter == "supplied"
+    assert result.record.pdf_converter is None  # nothing was converted: a supplied PDF
     pdf_key = layout.file_pdf_key(result.record.id, "foo.docx")
     assert store.ws.blobs.get_blob(pdf_key) == sample_pdf.read_bytes()
 
@@ -226,7 +226,7 @@ def test_duplicate_stores_the_supplied_pdf_under_the_new_record(
 
     assert second.created is True
     assert second.record.id != first.record.id
-    assert second.record.pdf_converter == "supplied"
+    assert second.record.pdf_converter is None
     assert second.note is None
     first_pdf = layout.file_pdf_key(first.record.id, "deck.docx")
     second_pdf = layout.file_pdf_key(second.record.id, "deck.docx")
@@ -237,8 +237,9 @@ def test_duplicate_stores_the_supplied_pdf_under_the_new_record(
 def test_supplied_pdf_is_named_in_the_exported_attestation(
     store: FileStore, tmp_path: Path, text_pdf: Path
 ) -> None:
-    """The record's ``pdf_converter`` travels into the bundle's attestation file, so
-    a verifier can see the PDF was supplied rather than produced by a converter."""
+    """The bundle's attestation names no converter for a supplied PDF: with a
+    convertible source, that absence is what tells a verifier DGML converted nothing
+    (every converter DGML runs is named)."""
     from dgml_core.file_attestation import (
         ATTESTATION_NS,
         METADATA_DIRNAME,
@@ -259,7 +260,8 @@ def test_supplied_pdf_is_named_in_the_exported_attestation(
 
     root_el = etree.parse(str(out_dir / METADATA_DIRNAME / METADATA_FILENAME)).getroot()
     assert root_el.tag == f"{{{ATTESTATION_NS}}}dgml-attestation"
-    assert root_el.get("pdf-converter") == "supplied"
+    assert root_el.get("pdf-converter") is None
+    assert root_el.find(f"{{{ATTESTATION_NS}}}artifacts/{{{ATTESTATION_NS}}}source") is not None
 
 
 @pytest.mark.parametrize(

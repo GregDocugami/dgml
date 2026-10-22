@@ -231,9 +231,11 @@ workspace like a PDF:
 - **Supplying the PDF yourself.** A library caller that already has the
   converted PDF can pass it to `FileStore.add(source, converted_pdf=pdf_path)`.
   It is stored as the source's PDF instead of running a converter, so no
-  converter needs to be configured, and the file records `pdf_converter =
-  "supplied"`. DGML can't check that the PDF matches the source; the caller
-  vouches for it. The CLI has no equivalent.
+  converter needs to be configured, and the file records no `pdf_converter`
+  — nothing was converted, which for a non-PDF source is how a supplied PDF
+  shows up in `file.json` and in the attestation. DGML can't check that the
+  PDF matches the source; the caller vouches for it. The CLI has no
+  equivalent.
 
 The converted PDF is a derived artifact, like page images. `dgml check` and
 file attestation key off the stored original document, not the converted PDF.

@@ -64,11 +64,6 @@ from .workspace_ops import WorkspaceOps
 
 PDF_MAGIC = b"%PDF-"
 
-# Recorded as ``pdf_converter`` when the caller hands :meth:`FileStore.add` the PDF
-# (``converted_pdf=``) instead of DGML converting the source — so the file record and
-# its attestation say the PDF was supplied, not produced by a converter.
-_SUPPLIED_PDF_CONVERTER = "supplied"
-
 
 class ConflictPolicy(StrEnum):
     """How :meth:`FileStore.add` reacts to an existing duplicate."""
@@ -128,9 +123,32 @@ def _validate_pdf(path: Path) -> None:
     converter path; this only guards against a mislabeled/corrupt PDF.
     """
     with path.open("rb") as fh:
-        magic = fh.read(len(PDF_MAGIC))
-    if magic != PDF_MAGIC:
+        head = fh.read(len(PDF_MAGIC))
+    _check_pdf_magic(head, path)
+
+
+def _check_pdf_magic(head: bytes, path: Path) -> None:
+    """Raise :class:`InvalidPDF` unless ``head`` (the file's first bytes, or the
+    whole file) starts with the PDF magic header."""
+    if not head.startswith(PDF_MAGIC):
         raise InvalidPDF(f"{path} does not start with the PDF magic header")
+
+
+def _read_supplied_pdf(path: Path) -> bytes:
+    """The bytes of a caller-supplied PDF, checked as read.
+
+    :func:`_validate_pdf` already looked at the file's header at the add gate, but
+    the bytes stored are these, read later; checking them too closes the gap in
+    which the file could have been rewritten in between (a converter writing in
+    place, say), so what is stored is always what was checked. A file gone since
+    the gate is :class:`FileNotFound`, as it would have been there.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise FileNotFound(f"converted PDF could not be read: {path} ({exc})") from exc
+    _check_pdf_magic(data, path)
+    return data
 
 
 class FileStore:
@@ -192,10 +210,12 @@ class FileStore:
         ``converted_pdf`` is a PDF the caller already made from a convertible
         source (docx/xlsx/…). It is stored as that file's PDF in place of running a
         converter, so the source's family needs no converter configured, and the
-        record's ``pdf_converter`` is ``"supplied"``. DGML cannot check that the PDF
-        matches the source; the caller vouches for it. It is rejected for a ``.pdf``
-        source, and unused when ``on_conflict`` returns an existing record — the
-        result's ``created`` is ``False`` then, as for any add that stores nothing
+        record's ``pdf_converter`` is ``None`` — nothing was converted, which for a
+        convertible source is how a supplied PDF is told apart (DGML names every
+        converter it runs; see ``docs/storage-layout.md``). DGML cannot check that the
+        PDF matches the source; the caller vouches for it. It is rejected for a
+        ``.pdf`` source, and unused when ``on_conflict`` returns an existing record —
+        the result's ``created`` is ``False`` then, as for any add that stores nothing
         (its ``note`` says so too).
         """
         # Validated here, alongside the OCR-config check below, so a rejected
@@ -224,9 +244,10 @@ class FileStore:
         if converted_pdf is not None:
             converted_pdf = Path(converted_pdf).expanduser().resolve()
         self._validate_source(source_path, converted_pdf=converted_pdf)
-        # Read now rather than at upload: `replace` deletes the old record before
-        # the new one is written, and the caller's PDF may be stored under it.
-        supplied_pdf = converted_pdf.read_bytes() if converted_pdf is not None else None
+        # The supplied PDF's bytes, read once a record is going to be created (so
+        # a `skip` or a conflict error never reads it) and checked as read — the
+        # bytes stored are the bytes checked (see _read_supplied_pdf).
+        supplied_pdf: bytes | None = None
 
         digest = sha256_file(source_path)
         original_path = self._relative_original_path(source_path)
@@ -290,7 +311,7 @@ class FileStore:
                     on_conflict,
                     conflict_kind=ConflictKind.HASH,
                     note="existing record returned (identical content)",
-                    unused_pdf=supplied_pdf is not None,
+                    unused_pdf=converted_pdf is not None,
                 )
             if on_conflict is ConflictPolicy.REPLACE:
                 return self._existing_result(
@@ -299,7 +320,7 @@ class FileStore:
                     on_conflict,
                     conflict_kind=ConflictKind.HASH,
                     note="replace is a no-op when content is identical; existing record returned",
-                    unused_pdf=supplied_pdf is not None,
+                    unused_pdf=converted_pdf is not None,
                 )
             # DUPLICATE — fall through and create a new record.
         elif same_path is not None:
@@ -317,12 +338,18 @@ class FileStore:
                     on_conflict,
                     conflict_kind=ConflictKind.PATH,
                     note="existing record returned (same source path, different content)",
-                    unused_pdf=supplied_pdf is not None,
+                    unused_pdf=converted_pdf is not None,
                 )
             if on_conflict is ConflictPolicy.REPLACE:
+                # Read before the delete: the caller's PDF may be stored under the
+                # record being replaced.
+                if converted_pdf is not None:
+                    supplied_pdf = _read_supplied_pdf(converted_pdf)
                 self.delete(same_path.id)
             # DUPLICATE — fall through.
 
+        if converted_pdf is not None and supplied_pdf is None:
+            supplied_pdf = _read_supplied_pdf(converted_pdf)
         return self._create_record(
             source_path,
             digest,
@@ -550,14 +577,16 @@ class FileStore:
 
         A PDF the caller supplied (``supplied_pdf``, the bytes of ``add``'s
         ``converted_pdf``) is persisted at that same key in place of running a
-        converter.
+        converter, with no converter name: ``None`` here means DGML converted
+        nothing, and a convertible source with none named is how a supplied PDF
+        is recognised, so no conversion DGML performs may ever leave it ``None``.
         """
         pdf_key = layout.file_pdf_key(file_id, PurePosixPath(source_key).name)
         if pdf_key == source_key:
             return source_key, None, None
         if supplied_pdf is not None:
             self.ws.blobs.put_blob(pdf_key, supplied_pdf)
-            return pdf_key, None, _SUPPLIED_PDF_CONVERTER
+            return pdf_key, None, None
 
         converters = load_conversion_config(self.ws)
         with self.ws.blobs.materialize(source_key) as src:
