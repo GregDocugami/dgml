@@ -360,7 +360,10 @@ def test_accepted_request_is_unchanged(workspace: Workspace, tmp_path: Path) -> 
     assert [b["type"] for b in content] == ["text", "file"]
     assert content[1] == {
         "type": "file",
-        "file": {"file_data": "data:application/pdf;base64," + base64.b64encode(pdf).decode()},
+        "file": {
+            "file_data": "data:application/pdf;base64," + base64.b64encode(pdf).decode(),
+            "filename": "document.pdf",
+        },
     }
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None

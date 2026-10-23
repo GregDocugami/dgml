@@ -107,6 +107,7 @@ from .llm import (
     LLMSteps,
     _mark_document_cacheable,
     _no_text_detail,
+    _pdf_content_block,
     describe_call_failure,
     is_anthropic_model,
     is_request_rejection,
@@ -534,20 +535,6 @@ def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
             f"file '{file_id}' has no source PDF: converting it failed: {failed[-1]}"
         )
     raise FileNotFound(f"file '{file_id}' has no source PDF")
-
-
-def _pdf_content_block(pdf_bytes: bytes) -> dict[str, Any]:
-    """An OpenAI-style ``file`` content block carrying the PDF inline.
-
-    litellm normalizes this across providers: Anthropic gets a
-    ``document`` block, Gemini gets ``inline_data``. The base64 string is
-    the same in both cases.
-    """
-    b64 = base64.b64encode(pdf_bytes).decode("ascii")
-    return {
-        "type": "file",
-        "file": {"file_data": f"data:application/pdf;base64,{b64}"},
-    }
 
 
 # ---- Schema generation -----------------------------------------------------
