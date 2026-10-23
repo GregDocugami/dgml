@@ -1012,8 +1012,10 @@ changes is the price and the wall-clock time.
 - **Semantic links**: every document's propose request in one wave, then the
   verify requests. The link cache works as usual, and documents that would
   share a cache entry share one request.
-- Batch backends exist for `anthropic/` models (Message Batches) and
-  `gemini/` models (Gemini Developer API Batch API). The
+- Batch backends exist for `anthropic/` models (Message Batches),
+  `gemini/` models (Gemini Developer API Batch API) and `openai/` models
+  (Batch API; a model litellm serves through the Responses API, such as
+  `gpt-5-pro`, is refused, see [batch-mode.md](batch-mode.md#providers)). The
   transcription, labeling, link and (when enabled) style models are checked
   before any model call; one with no batch backend fails the command with
   `BATCH_UNAVAILABLE`, naming the stage and model. The labeling model is
@@ -1516,7 +1518,9 @@ usage row carries `tier: "batch"`:
 ```
 
 A `schema_model` whose provider has no batch backend fails with
-`BATCH_UNAVAILABLE` before any PDF is read or request sent. See
+`BATCH_UNAVAILABLE` before any PDF is read or request sent, as does an OpenAI
+model litellm serves through the Responses API for this request (gpt-5.4 and
+later, which get tools with a reasoning effort here). See
 [batch-mode.md](batch-mode.md).
 
 ### `dgml extraction set-schema <docset_id> --schema-file PATH`
@@ -1660,8 +1664,9 @@ retry, the permissive-schema fallback) rides extra waves. A request the batch
 cannot serve is retried or run synchronously for that request only. Values,
 the XML written and `extraction_stats` are the same as a synchronous run; the
 `usage.jsonl` rows (under `--debug`) carry `"tier": "batch"`. A values model
-whose provider has no batch backend (only Anthropic and Gemini have one) is
-refused with `BATCH_UNAVAILABLE` before any request. Without `--batch` there is no `batch`
+whose provider has no batch backend (Anthropic, Gemini and OpenAI have one),
+or an OpenAI model litellm serves through the Responses API, is refused with
+`BATCH_UNAVAILABLE` before any request. Without `--batch` there is no `batch`
 block.
 
 ```json
@@ -3093,7 +3098,7 @@ passed:
 
 - every open provider batch of the current wave is canceled; the run waits a
   bounded, per-provider time for each cancel to settle (the backend's
-  `cancel_settle_s`: Anthropic 450 s, Gemini 60 s; 180 s for a backend that declares none;
+  `cancel_settle_s`: Anthropic 450 s, Gemini 60 s, OpenAI 660 s; 180 s for a backend that declares none;
   polled every 10 s; see [Batch mode](batch-mode.md#batch-deadline)) and
   collects the results the provider had already produced. A `--no-wait` run
   never waits out a cancel: it checks once, and keeps what has not settled as

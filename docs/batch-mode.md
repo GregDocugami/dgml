@@ -22,6 +22,7 @@ fields, see the [CLI reference](cli-reference.md).
 |---|---|---|
 | Anthropic (first-party API) | Message Batches | `anthropic/…` |
 | Google Gemini (Developer API) | Batch API (`batchGenerateContent`) | `gemini/…` |
+| OpenAI | Batch API | `openai/…`, bare `gpt-…` |
 
 **Gemini.** The key comes from the stage's credentials, else `GOOGLE_API_KEY`
 or `GEMINI_API_KEY` (litellm's order, so batches and their synchronous
@@ -41,9 +42,45 @@ there too; the first batch release (RFC #222) rejected them with
 Any other route has no batch backend and is **rejected before any work starts**
 with `BATCH_UNAVAILABLE`, naming the stage and model. That includes Amazon
 Bedrock, Vertex AI (`vertex_ai/…`, including Gemini models served there), Azure AI and aggregators such as OpenRouter, even when they
-host a Claude model. The provider is decided by how litellm resolves the model
+host a Claude or GPT model. The provider is decided by how litellm resolves the model
 string, so `openrouter/anthropic/claude-…` is an OpenRouter model, not an
 Anthropic one.
+
+OpenAI batches encode only Chat Completions requests (`/v1/chat/completions`).
+A request litellm serves through the **Responses API** (`/v1/responses`)
+instead cannot batch, so it is `BATCH_UNAVAILABLE` too, checked with the other
+models before any step runs (the same rule applies again when a request is
+built). That covers the Responses-only models (`gpt-5-pro`, `o3-pro`, the
+`codex` models, any `responses/…` or `openai/responses/…` model, or every model when
+`litellm.route_all_chat_openai_to_responses` is set), and gpt-5.4 and later
+for schema generation and value extraction, which send tools together with a
+reasoning effort (a combination litellm routes to the Responses API; the same
+model can still batch transcription, labeling and links). The extraction check
+uses the configured `grounded.values_reasoning_effort` (or `--values-effort`)
+for the value-extraction request; `default` sends no effort there, but location
+grounding always sends its own, so gpt-5.4+ extraction is refused either way
+(the error then names stage `extraction.locations`, or `extract.locations` under
+`docset run`). Use a chat-mode model
+for those stages, or run without `--batch`. For example:
+
+```text
+BATCH_UNAVAILABLE: stage 'schema' (model 'openai/gpt-5.4'): batch mode is not
+available for requests to 'openai/gpt-5.4' with tools and reasoning_effort (this
+stage sends both): litellm serves it through the OpenAI Responses API
+(/v1/responses), not Chat Completions, and batch mode encodes only
+/v1/chat/completions requests. Use a chat-mode model, or run without --batch
+```
+
+**Canceling an OpenAI batch is slow, and the work goes on.** OpenAI settles a
+cancel on sweeps of about five minutes (measured at about 5 and 10 minutes, and
+up to about 25 minutes in a larger run), and it *keeps processing* the batch
+while it is `cancelling`: in one measured batch, 2 of 20 requests were done at
+cancel and 19 of 20 by the time it ended, all of them billed. Under
+`--batch-deadline` the run waits 660 s (two sweeps) for the cancel to settle
+and collects what the batch produced; a cancel still unsettled after that keeps
+its batch record as `settling`, its requests run synchronously and count in
+`possibly_double_billed` (see [`--batch-deadline`](#batch-deadline)). Until the
+cancel settles, `dgml batch status` reports the batch's cleanup as `pending`.
 
 Batch mode **never falls back to a full-price synchronous run** because a
 provider is unsupported. You get an error naming the stage and model instead,
@@ -308,7 +345,7 @@ each canceled batch once, and keeps one still canceling as `settling`. Live meas
 | provider | measured cancel → ended |
 |---|---|
 | Anthropic (wait 450 s) | bimodal: ≤ 50 s, or 280–385 s; no work done while `canceling` |
-| OpenAI | ~306 s or ~606 s (one or two ~5-minute sweeps); up to ~25 min in a later scale run |
+| OpenAI (wait 660 s) | ~306 s or ~606 s (one or two ~5-minute sweeps); up to ~25 min in a later scale run |
 | Gemini (wait 60 s) | 3–7 s |
 
 **The wait is not an upper bound.** An OpenAI cancel took up to about 25

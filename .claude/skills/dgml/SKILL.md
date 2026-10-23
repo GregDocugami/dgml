@@ -168,9 +168,10 @@ classify in order, ONE WAVE PER FILE (each file must be offered the DocSets
 created for the files before it), so a directory of N files takes N round
 trips of minutes to hours each — prefer `existing` for a big curated
 ingest. `--batch` works only on a directory with `--auto-classify` and only
-for Anthropic (`anthropic/…`) models; otherwise it fails before adding
-anything (`INVALID_ARGUMENT` / `BATCH_UNAVAILABLE`). The entries are the
-same as without it, plus a top-level `batch` block.
+for models with a batch backend (`anthropic/…`, `gemini/…`, `openai/…`);
+otherwise it fails before adding anything (`INVALID_ARGUMENT` /
+`BATCH_UNAVAILABLE`). The entries are the same as without it, plus a
+top-level `batch` block.
 
 ```bash
 uv run dgml file add --workspace "$wid" /path/to/docs \
@@ -567,9 +568,12 @@ run with `--no-wait` (below). The output is the same as a synchronous run.
 Add `--no-batch-label` (or `batch_label = false` under `[generation]`) to
 label with ordinary synchronous calls when latency matters more than the
 labeling half of the bill; the payload's `batch.stages.label.mode` says which
-ran (`all-at-once`, `per-document` or `sync`). Only `anthropic/` and `gemini/` models have a batch
-backend; any other model fails fast with `BATCH_UNAVAILABLE`, naming the stage, before spending
-anything. The payload's `batch.stages` block reports what each stage did,
+ran (`all-at-once`, `per-document` or `sync`). Only `anthropic/`, `gemini/`
+and `openai/` models have a batch backend; any other model, and an OpenAI
+model litellm serves through the Responses API (`gpt-5-pro`, `o3-pro`,
+`codex`; gpt-5.4+ for schema generation and extraction), fails fast with
+`BATCH_UNAVAILABLE`, naming the stage, before spending anything. The
+payload's `batch.stages` block reports what each stage did,
 including `cost_usd`, `standard_cost_usd` and `saved_usd`, so you can report
 the saving without `--debug`.
 
@@ -615,8 +619,8 @@ a different duration on a resume is `BATCH_JOB_INVALID`. The payload's
 `collected_after_cancel`, `sync_after_deadline` and `possibly_double_billed`;
 `dgml batch status` shows `deadline: {at, expired}`, and so does a paused
 run's `batch_job` block. Canceling can take minutes: the run waits a
-per-provider time for each cancel to settle (Anthropic 450 s, Gemini 60 s; a
-`--no-wait` run checks once and does not wait). A batch still
+per-provider time for each cancel to settle (Anthropic 450 s, Gemini 60 s,
+OpenAI 660 s; a `--no-wait` run checks once and does not wait). A batch still
 canceling after that wait has its requests run synchronously; a provider that
 keeps processing while canceling (OpenAI does) may bill those twice.
 `possibly_double_billed` counts them and a WARNING names the batch. The job
@@ -835,7 +839,9 @@ uv run dgml extraction extract "$ds" "$fid" | jq '{mode, tool_calls, field_count
 #    Add --batch when nobody is waiting on the answer (a backfill, a nightly
 #    re-extract): both LLM phases go through the provider's batch API at about
 #    half price, but results take minutes to hours (up to 24h; 48h on Gemini).
-#    Only Anthropic and Gemini models can batch; anything else fails fast
+#    Only Anthropic, Gemini and OpenAI chat-mode models can batch (gpt-5.4+
+#    is refused here: litellm sends its extraction calls to the Responses
+#    API); anything else fails fast
 #    with BATCH_UNAVAILABLE and nothing is sent. One file id with --batch keeps the single-file payload
 #    above (plus a `batch` block), not `summary`/`results`. Every `batch` block
 #    reports `cost_usd`, `standard_cost_usd` and `saved_usd`.
