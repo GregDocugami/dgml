@@ -434,7 +434,7 @@ fi
 cat >> "$cfg" <<'EOF'
 
 [generation]
-model = "anthropic/claude-haiku-4-5"
+model = "anthropic/claude-haiku-5-5"
 label_model = "anthropic/claude-sonnet-5"
 api_key_env = "ANTHROPIC_API_KEY"
 EOF
