@@ -1969,7 +1969,11 @@ stripped). The first four replace 0.7's
 `submit_values` tool parameter (`"inlined"`, provider-enforced shape) or
 extraction fell back to a permissive parameter with code-side vocabulary
 pruning (`"permissive"` — the retry path when a provider rejects a very large
-inlined schema, e.g. Gemini's "too many states for serving").
+inlined schema, e.g. Gemini's "too many states for serving"). On that path the
+values tree travels as JSON text rather than a typed object (an untyped object
+is one Gemini's decoder can only leave empty), the fallback is logged as a
+warning once per model, and a run that submits an empty tree fails instead of
+writing an empty extraction as success.
 
 Errors across the group: `DOCSET_NOT_FOUND`, `FILE_NOT_FOUND`,
 `SCHEMA_NOT_FOUND`, `SCHEMA_INVALID`, `GUIDANCE_NOT_FOUND`, `NO_FILES`,
