@@ -97,7 +97,7 @@ Everything goes through public `dgml_core` calls:
 | Generate a schema | `grounded.generate_schema(ws, file_ids, config=load_grounded_config(ws), docset_name=…)` |
 | Extract / re-extract | `extract_file(ws, docset_id, file_id)` |
 | A file's docsets | `DocSetStore(ws).docsets_for_file(file_id)` |
-| Read the pair's DGML and values | the `*.dgml.xml` blob under `layout.docset_pair_prefix(…)`, projected with `extraction_xml.dgml_xml_to_values` (as `dgml extraction get-values` does) |
+| Read the pair's DGML and values | `read_dgml(ws, docset_id, file_id)` (the full `.dgml.xml`) and `get_extracted_values(ws, docset_id, file_id)` — the same calls `dgml extraction get-values` makes |
 
 The workspace `Configuration` built from an organisation's settings:
 
@@ -159,6 +159,28 @@ Adding a file, classification, schema generation and extraction are slow, so the
 background jobs on a thread pool; their state is in the `jobs` table, and the UI polls it.
 A per-(organisation, file) lock keeps two jobs from writing one file's `.dgml.xml` at
 once. Jobs left unfinished by a restart are marked `INTERRUPTED`.
+
+### Logs
+
+Every log line carries the workspace id (the organisation's UUID) it was logged for,
+dgml-core's lines included:
+
+```text
+2026-10-19 12:00:01 INFO [0b9c8d39-…] dgml_core.docsets: assigned file f1… to docset d7…
+```
+
+dgml-core logs through stdlib `logging` and leaves formatting to the host, so the id is
+added on the service's side (`logcontext.py`):
+
+- **A context variable holds the id.** Middleware binds it for each `/api/orgs/{id}/…`
+  request, and the job runner binds it around each job.
+- **A filter on the handler copies it onto each record** as `%(workspace_id)s`. It goes
+  on the handler, not a logger, so records from `dgml_core.extraction` and the other child
+  loggers get it too.
+- **The id follows the work:** into the thread a sync endpoint runs on, into a job (the
+  runner copies the submitting context), and into dgml-core's own worker threads.
+
+Any other id, such as a request id, can be added the same way.
 
 ### Errors
 

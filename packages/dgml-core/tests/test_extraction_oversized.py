@@ -32,6 +32,7 @@ from unittest.mock import patch
 
 import pytest
 from dgml_core import layout
+from dgml_core.batch import ItemErrorKind
 from dgml_core.default_config import PROVIDER_MODELS
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import ValuesExtractionFailed
@@ -246,7 +247,7 @@ def test_oversized_pdf_is_split_and_merged(workspace: Workspace, tmp_path: Path)
     # half, then the quarters go through.
     limit = _LIMIT
     with patch("litellm.completion", side_effect=_rejecting(limit, _bill_model, sizes)) as m:
-        result = extract_values(workspace, ds_id, fid, config=_config())
+        result = extract_values(workspace, ds_id, fid, config=_config(), write_stats=True)
 
     first_request = m.call_args_list[0].kwargs
     assert _attached_pdf(first_request) == pdf  # the whole document was tried first
@@ -269,6 +270,36 @@ def test_oversized_pdf_is_split_and_merged(workspace: Workspace, tmp_path: Path)
     assert stats is not None
     assert stats["outcome"] == "ok"
     assert stats["phases"]["phase1"]["pdf_parts"] == [[1, 2], [3, 4], [5, 6], [7, 8]]
+
+
+def test_oversized_pdf_is_split_under_batch_like_sync(workspace: Workspace, tmp_path: Path) -> None:
+    """Under a batch driver a too-large phase-1 request comes back as an
+    ``invalid`` item, is run synchronously, and the provider's 413 thrown into
+    the generator trips the same page-range split: same values as sync."""
+    from dgml_core.batch import BatchExecutor, BatchItemError, BatchRequest, FakeBackend
+    from dgml_core.grounded import extract_values_batch
+
+    pdf = _big_pdf(tmp_path)
+    ds_id, fid = _seed(workspace, pdf)
+    sizes: list[int] = []
+    with patch("litellm.completion", side_effect=_rejecting(_LIMIT, _bill_model, sizes)):
+        sync = extract_values(workspace, ds_id, fid, config=_config())
+
+    def script(req: BatchRequest) -> Any:
+        if len(json.dumps(req.kwargs["messages"]).encode()) > _LIMIT:
+            return BatchItemError(req.custom_id, ItemErrorKind.INVALID, "request_too_large")
+        return _bill_model(req.kwargs)
+
+    executor = BatchExecutor(FakeBackend(script), min_wave_size=1, sleep=lambda _s: None)
+    with patch("litellm.completion", side_effect=_rejecting(_LIMIT, _bill_model, [])):
+        batch = extract_values_batch(workspace, ds_id, [fid], config=_config(), executor=executor)
+
+    result = batch[fid]
+    assert not isinstance(result, Exception), result
+    assert result.values == sync.values
+    # The whole document and both halves were refused, then the quarters batched.
+    assert executor.stats.sync_fallbacks == 1 + 2
+    assert executor.stats.batch_ok == 4
 
 
 def test_part_requests_say_which_pages_they_hold(workspace: Workspace, tmp_path: Path) -> None:
@@ -323,13 +354,16 @@ def test_accepted_request_is_unchanged(workspace: Workspace, tmp_path: Path) -> 
     pdf = _big_pdf(tmp_path)
     ds_id, fid = _seed(workspace, pdf)
     with patch("litellm.completion", side_effect=_rejecting(10**9, _bill_model, [])) as m:
-        extract_values(workspace, ds_id, fid, config=_config())
+        extract_values(workspace, ds_id, fid, config=_config(), write_stats=True)
     assert m.call_count == 1
     content = m.call_args_list[0].kwargs["messages"][1]["content"]
     assert [b["type"] for b in content] == ["text", "file"]
     assert content[1] == {
         "type": "file",
-        "file": {"file_data": "data:application/pdf;base64," + base64.b64encode(pdf).decode()},
+        "file": {
+            "file_data": "data:application/pdf;base64," + base64.b64encode(pdf).decode(),
+            "filename": "document.pdf",
+        },
     }
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None
@@ -373,3 +407,43 @@ def test_merge_part_values_concatenates_and_rebases_refs() -> None:
     assert bill["Vendor"]["text"] == "Acme"  # first non-empty wins
     assert bill["Note"]["text"] == "late"  # an empty earlier value does not
     assert bill["Count"]["derived_from"] == ["Bill.Items[2].Name"]
+
+
+def test_merge_part_values_rebases_cited_inputs() -> None:
+    """A later part's 0.71 inputs are rebased like 0.7 refs, and the text each
+    one cites after "=" survives the rewrite."""
+    from dgml_core.grounded import _merge_part_values
+
+    base: dict[str, Any] = {"Bill": {"Items": [{"Amount": {"text": "1.00"}}]}}
+    extra: dict[str, Any] = {
+        "Bill": {
+            "Items": [{"Amount": {"text": "2.00"}}],
+            "Total": {
+                "text": "3.00",
+                "method": "calculated",
+                "inputs": ["Bill.Items[0].Amount=2.00", "Bill.Vendor"],
+            },
+        }
+    }
+    _merge_part_values(base, extra)
+    assert base["Bill"]["Total"]["inputs"] == ["Bill.Items[1].Amount=2.00", "Bill.Vendor"]
+
+
+def test_offset_page_numbers_shifts_evidence_with_its_value() -> None:
+    from dgml_core.grounded import _offset_page_numbers
+
+    values: dict[str, Any] = {
+        "End": {
+            "text": "2028-01-14",
+            "method": "calculated",
+            "evidence": [
+                {"text": "a term of 24 months", "page_number": 2},
+                {"text": "January 15, 2026", "locations": [{"page_number": 1}]},
+            ],
+        },
+        "Name": {"text": "Acme", "locations": [{"page_number": 1}]},
+    }
+    _offset_page_numbers(values, 10)
+    assert values["End"]["evidence"][0]["page_number"] == 12
+    assert values["End"]["evidence"][1]["locations"] == [{"page_number": 11}]
+    assert values["Name"]["locations"] == [{"page_number": 11}]

@@ -18,17 +18,19 @@ import shutil
 import sys
 import threading
 import tomllib
+import types
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import pytest
 from dgml.cli import main
 from dgml_core import layout
+from dgml_core.conversion import ConverterConfig, DocConverter
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import FileNotFound, InvalidArgument
 from dgml_core.migrations import (
@@ -1355,6 +1357,9 @@ def test_check_returns_two_when_issues(
     assert rc == 2
     report = _read_stdout(capsys)
     assert report["issue_count"] >= 1
+    assert {(i["target_type"], i["target_id"]) for i in report["issues"]} == {("file", fid)}
+    # ``kind`` is wire format (an ``IssueKind`` member renders as its value).
+    assert "missing_pdf" in {i["kind"] for i in report["issues"]}
 
 
 @needs_gs
@@ -1724,14 +1729,14 @@ def test_cluster_config_preset_name_passes_preset_overrides(
 def _llm_partition(fid: str) -> Any:
     """A one-cluster LLMClusteringResult that names its emergent bucket in the
     same call (so clustering() needs no second naming round-trip)."""
-    from dgml_core.classification import ClassificationDecision
+    from dgml_core.classification import ClassificationDecision, DecisionKind
     from dgml_core.llm_clustering import LLMClusteringResult
 
     return LLMClusteringResult(
         clusters={fid: "unknown_0"},
         proposals={
             "unknown_0": ClassificationDecision(
-                decision="new",
+                decision=DecisionKind.NEW,
                 new_name="Sample Documents",
                 new_description="test docs",
                 new_key_questions=("What is this document about?",),
@@ -2676,8 +2681,9 @@ def test_docset_generate_cache_dir_and_debug_threading(
     tmp_path: Path, text_pdf: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The cache dir is always set (it holds functional files the next run
-    reloads); --debug only flips ConvertOptions.debug, which gates the
-    debug-only artifacts. An explicit --cache-dir always wins."""
+    reloads); --debug flips ConvertOptions.debug, which gates the debug-only
+    artifacts, and ConvertOptions.record_usage, which gates the usage rows.
+    An explicit --cache-dir always wins."""
     ws = tmp_path / "ws"
     did = _init_with_docset(ws, capsys)
     main(_ws_args(ws) + ["file", "add", str(text_pdf)])
@@ -2712,10 +2718,12 @@ def test_docset_generate_cache_dir_and_debug_threading(
     default_opts = _run([], [])
     assert default_opts.cache_dir == cache_dir
     assert default_opts.debug is False
+    assert default_opts.record_usage is False
     # --debug: same cache dir, debug on (debug-only files also written).
     debug_opts = _run(["--debug"], [])
     assert debug_opts.cache_dir == cache_dir
     assert debug_opts.debug is True
+    assert debug_opts.record_usage is True
     # Explicit --cache-dir always wins.
     explicit = tmp_path / "mycache"
     assert _run([], ["--cache-dir", str(explicit)]).cache_dir == explicit
@@ -2816,6 +2824,47 @@ def test_docset_generate_models_from_config(
         "label_model": "anthropic/claude-sonnet-4-6",
         "source": "config",
     }
+
+
+@needs_gs
+@pytest.mark.usefixtures("no_link_model")
+def test_docset_generate_threads_both_models_credentials(
+    tmp_path: Path,
+    text_pdf: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The labeling model's key and api_base reach ConvertOptions beside the
+    transcription model's — otherwise every labeling-side call (roster planning,
+    labeling, descriptions) silently runs on litellm's env-var key instead."""
+    ws = tmp_path / "ws"
+    did = _init_with_docset(ws, capsys)
+    monkeypatch.setenv("T_KEY", "t-key")
+    monkeypatch.setenv("L_KEY", "l-key")
+    Workspace(root=ws).config_path.write_text(
+        dump_toml(
+            {
+                "generation": {
+                    "model": "anthropic/claude-haiku-4-5",
+                    "api_key_env": "T_KEY",
+                    "label_model": "anthropic/claude-sonnet-4-6",
+                    "label_api_key_env": "L_KEY",
+                    "label_api_base": "https://proxy.example",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    main(_ws_args(ws) + ["file", "add", str(text_pdf)])
+    fid = _read_stdout(capsys)["file"]["id"]
+    main(_ws_args(ws) + ["docset", "add-file", fid, "--docset", did])
+    capsys.readouterr()
+
+    with patch("dgml_core.generation.convert_batch", return_value={}) as mock_batch:
+        assert main(_ws_args(ws) + ["docset", "generate", did, "--no-coverage"]) == 0
+    opts = mock_batch.call_args.kwargs["options"]
+    assert (opts.api_key, opts.api_base) == ("t-key", None)
+    assert (opts.label_api_key, opts.label_api_base) == ("l-key", "https://proxy.example")
 
 
 @needs_gs
@@ -3665,7 +3714,7 @@ def test_file_add_directory_clean_run(tmp_path: Path, capsys: pytest.CaptureFixt
 def test_file_add_directory_skips_unconfigured_sources(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """With no `conversion` config, convertible sources (docx/xlsx) in a bulk
+    """With no `conversion` config, convertible sources (docx/xlsx/pptx) in a bulk
     directory are silently skipped — not gathered, not counted as failures."""
     ws = tmp_path / "ws"
     _init_ws(ws)
@@ -3675,12 +3724,112 @@ def test_file_add_directory_skips_unconfigured_sources(
     src.mkdir()
     _write_text_pdf(src / "a.pdf", ["Alpha"])
     (src / "notes.docx").write_bytes(b"PK\x03\x04 not really a docx")
+    (src / "deck.pptx").write_bytes(b"PK\x03\x04 not really a pptx")
 
     rc = main(_ws_args(ws) + ["file", "add", str(src)])
     assert rc == 0
     payload = _read_stdout(capsys)
     assert payload["summary"]["total"] == 1
     assert [e["path"] for e in payload["results"]] == [str(src / "a.pdf")]
+
+
+class _FixedPdfConverter(DocConverter):
+    """Returns the PDF named by its ``pdf`` option, whatever the source."""
+
+    name: ClassVar[str] = "fixed-pdf"
+    input_formats: ClassVar[frozenset[str]] = frozenset()
+    config_fields: ClassVar[frozenset[str]] = frozenset({"pdf"})
+
+    @classmethod
+    def parse_config(cls, section: Mapping[str, Any]) -> ConverterConfig:
+        cls._check_no_extra_fields(section)
+        return ConverterConfig(provider=str(section["provider"]), options={"pdf": section["pdf"]})
+
+    def __init__(self, config: ConverterConfig) -> None:
+        self._pdf = Path(config.options["pdf"])
+
+    def to_pdf(self, path: Path) -> bytes:
+        return self._pdf.read_bytes()
+
+
+@needs_gs
+def test_file_add_directory_gathers_configured_pptx(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `conversion.pptx` configured, a bulk add gathers `.pptx` and `.ppt` (any
+    case) and converts them, while a family with no converter is still skipped."""
+    stub = types.ModuleType("cli_stub_conv")
+    stub._FixedPdfConverter = _FixedPdfConverter  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cli_stub_conv", stub)
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    rendered = tmp_path / "rendered.pdf"
+    _write_text_pdf(rendered, ["Slide one"])
+    conversion = {"pptx": {"provider": "cli_stub_conv:_FixedPdfConverter", "pdf": str(rendered)}}
+    with (ws / "config.toml").open("a", encoding="utf-8") as fh:
+        fh.write("\n" + dump_toml({"conversion": conversion}) + "\n")
+
+    src = tmp_path / "mixed"
+    src.mkdir()
+    _write_text_pdf(src / "a.pdf", ["Alpha"])
+    (src / "deck.pptx").write_bytes(b"PK\x03\x04 not really a pptx")
+    (src / "OLD.PPT").write_bytes(b"\xd0\xcf\x11\xe0 not really a ppt")
+    (src / "notes.docx").write_bytes(b"PK\x03\x04 not really a docx")
+
+    rc = main(_ws_args(ws) + ["file", "add", str(src)])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    by_name = {Path(e["path"]).name: e for e in payload["results"]}
+    assert set(by_name) == {"a.pdf", "deck.pptx", "OLD.PPT"}  # notes.docx: no converter
+    for name in ("deck.pptx", "OLD.PPT"):
+        entry = by_name[name]
+        assert entry["status"] == "added"
+        assert entry["conversion_error"] is None
+        # The converted PDF is persisted beside the source (the uppercase suffix
+        # lowercased in its name) and the pages were rendered from it.
+        assert entry["file"]["page_count"] == 1
+        assert entry["file"]["pdf_converter"] == "fixed-pdf"
+        assert (ws / layout.file_pdf_key(entry["file"]["id"], name)).is_file()
+
+
+class _SpreadsheetOnlyConverter(_FixedPdfConverter):
+    name: ClassVar[str] = "spreadsheet-only"
+    input_formats: ClassVar[frozenset[str]] = frozenset({".xlsx", ".xls"})
+
+
+def test_file_add_directory_refuses_a_family_on_the_wrong_converter(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`conversion.pptx` pointed at a converter that handles only spreadsheets is
+    one CONVERSION_CONFIG_INVALID up front, not a failed record per deck."""
+    stub = types.ModuleType("cli_stub_conv")
+    stub._SpreadsheetOnlyConverter = _SpreadsheetOnlyConverter  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cli_stub_conv", stub)
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    rendered = tmp_path / "rendered.pdf"
+    _write_text_pdf(rendered, ["Slide one"])
+    conversion = {
+        "pptx": {"provider": "cli_stub_conv:_SpreadsheetOnlyConverter", "pdf": str(rendered)}
+    }
+    with (ws / "config.toml").open("a", encoding="utf-8") as fh:
+        fh.write("\n" + dump_toml({"conversion": conversion}) + "\n")
+
+    src = tmp_path / "decks"
+    src.mkdir()
+    (src / "deck.pptx").write_bytes(b"PK\x03\x04 not really a pptx")
+    (src / "other.pptx").write_bytes(b"PK\x03\x04 not really a pptx either")
+
+    rc = main(_ws_args(ws) + ["file", "add", str(src)])
+    assert rc != 0
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "CONVERSION_CONFIG_INVALID"
+    assert "does not handle '.pptx'" in err["message"]
+    assert not (ws / "files").exists() or not any((ws / "files").iterdir())
 
 
 @needs_gs
@@ -3756,6 +3905,7 @@ def test_file_add_directory_skip_already_imported(
         "hard_failed": 0,
     }
     for entry in payload["results"]:
+        assert entry["status"] == "skipped"
         assert entry["created"] is False
         assert entry["conflict_kind"] == "hash"
 
@@ -4521,7 +4671,7 @@ def test_dgmlx_verify_detects_tamper(tmp_path: Path, capsys: pytest.CaptureFixtu
     )
     capsys.readouterr()
 
-    (out_dir / "page_images" / "page_1.png").write_bytes(b"TAMPERED")
+    (out_dir / "page_images" / "page_1.jpg").write_bytes(b"TAMPERED")
     rc = main(_ws_args(ws) + ["dgmlx", "verify", str(out_dir)])
     assert rc == 2  # mirrors `check`: verified-but-failed
     payload = _read_stdout(capsys)
@@ -5101,6 +5251,24 @@ def test_discover_page_from_origin(tmp_path: Path, capsys: pytest.CaptureFixture
     assert inv["samples"][0]["page"] == 4
 
 
+def test_discover_full_reports_structural_roles(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--full`` emits each tag's structural ``role`` as its plain wire string."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    _seed_file_dir(ws, _DISC_FILE, pages=4)
+    _seed_discover_xml(ws, _DISC_FILE, _DISC_DS)
+    capsys.readouterr()
+
+    rc = main(_ws_args(ws) + ["discover", _DISC_FILE, "--docset", _DISC_DS, "--full"])
+    assert rc == 0
+    roles = {t["tag"]: t["role"] for t in _read_stdout(capsys)["tags"]}
+    assert roles["LiabilityCap"] == "leaf-value"
+    assert roles["IndemnificationClause"] == "container"
+    assert set(roles.values()) <= {"leaf-value", "container", "hybrid", "mixed"}
+
+
 def test_discover_depth_first_addressable(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -5552,8 +5720,18 @@ def test_extraction_get_guidance_missing(
     assert _read_stderr(capsys)["error"]["code"] == "GUIDANCE_NOT_FOUND"
 
 
+def _assigned_file(ws: Path, ds_id: str, pdf: Path, capsys: pytest.CaptureFixture[str]) -> str:
+    """Add *pdf* and assign it to *ds_id* (before any schema is set, so the
+    assignment doesn't fire auto-extraction). Returns the file id."""
+    main(_ws_args(ws) + ["file", "add", str(pdf)])
+    fid: str = _read_stdout(capsys)["file"]["id"]
+    main(_ws_args(ws) + ["docset", "add-file", fid, "--docset", ds_id])
+    capsys.readouterr()
+    return fid
+
+
 def test_extraction_get_values_json_and_xml(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """get-values projects the dg:extraction in the core dgml file to values
     JSON (default) or returns the raw XML with --as xml."""
@@ -5564,6 +5742,7 @@ def test_extraction_get_values_json_and_xml(
     _init_ws(ws)
     capsys.readouterr()
     ds_id = _new_docset(ws, capsys)
+    fid = _assigned_file(ws, ds_id, sample_pdf, capsys)
 
     schema_file = tmp_path / "schema.rnc"
     schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
@@ -5571,7 +5750,7 @@ def test_extraction_get_values_json_and_xml(
     capsys.readouterr()
 
     # Drop a core <stem>.dgml.xml (with a dg:extraction element) where
-    # extraction would have written it — get-values globs *.dgml.xml.
+    # extraction would have written it.
     wsx = Workspace(root=ws)
     vocab = parse_rnc(_RNC_SCHEMA)
     values = {
@@ -5581,18 +5760,18 @@ def test_extraction_get_values_json_and_xml(
         }
     }
     wsx.blobs.put_blob(
-        layout.dgml_xml_key(ds_id, "fileabc", "doc"),
+        layout.dgml_xml_key(ds_id, fid, sample_pdf.stem),
         standalone_extraction_doc(values, vocab=vocab).encode(),
     )
 
-    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, "fileabc"])
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid])
     assert rc == 0
     payload = _read_stdout(capsys)
     assert payload["format"] == "values"
     assert payload["values"]["VendorName"]["text"] == "Acme"
     assert payload["values"]["VendorName"]["locations"][0]["bounding_box"] == [10, 20, 30, 40]
 
-    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, "fileabc", "--as", "xml"])
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid, "--as", "xml"])
     assert rc == 0
     payload = _read_stdout(capsys)
     assert payload["format"] == "xml"
@@ -5600,16 +5779,63 @@ def test_extraction_get_values_json_and_xml(
     assert "<docset:VendorName" in payload["xml"]
 
 
+@pytest.mark.parametrize("as_form", ["values", "xml"])
 def test_extraction_get_values_not_found(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str], as_form: str
+) -> None:
+    """Assigned with nothing generated or extracted → DGML_NOT_FOUND; a generated
+    tree with no dg:extraction → VALUES_NOT_FOUND. Same in both output forms."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    ds_id = _new_docset(ws, capsys)
+    fid = _assigned_file(ws, ds_id, sample_pdf, capsys)
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid, "--as", as_form])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "DGML_NOT_FOUND"
+
+    Workspace(root=ws).blobs.put_blob(
+        layout.dgml_xml_key(ds_id, fid, sample_pdf.stem),
+        b'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#" xmlns:docset="http://dgml.io/ns/dgml/t">'
+        b"<docset:Header>tree only</docset:Header></dg:chunk>",
+    )
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid, "--as", as_form])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "VALUES_NOT_FOUND"
+
+
+def test_extraction_get_values_unassigned_file(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file that exists but isn't in the docset is FILE_NOT_FOUND, not
+    VALUES_NOT_FOUND — and an unknown id is too."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    ds_id = _new_docset(ws, capsys)
+    main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
+    fid = _read_stdout(capsys)["file"]["id"]
+
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, fid])
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "FILE_NOT_FOUND"
+    assert "not assigned" in err["message"]
+
+    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, "nofile"])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "FILE_NOT_FOUND"
+
+
+def test_extraction_get_values_unknown_docset(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ws = tmp_path / "ws"
     _init_ws(ws)
     capsys.readouterr()
-    ds_id = _new_docset(ws, capsys)
-    rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, "nofile"])
+    rc = main(_ws_args(ws) + ["extraction", "get-values", "nodocset", "nofile"])
     assert rc == 1
-    assert _read_stderr(capsys)["error"]["code"] == "VALUES_NOT_FOUND"
+    assert _read_stderr(capsys)["error"]["code"] == "DOCSET_NOT_FOUND"
 
 
 def test_extraction_generate_schema_no_files(
@@ -5789,6 +6015,53 @@ def test_extraction_extract_values_effort_overrides_config(
     assert "reasoning_effort" not in _extract("--values-effort", "default")
 
 
+def test_extraction_extract_locations_effort_overrides_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--locations-effort` replaces `grounded.locations_reasoning_effort` for
+    one call. The flag reaches the config the extraction runs with; the
+    grounding call itself is pinned in the core tests."""
+    from dgml_core import grounded
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _write_grounded_config(ws)
+    ds_id = _new_docset(ws, capsys)
+    seen: list[grounded.GroundedConfig] = []
+
+    def fake_extract(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["config"])
+        raise SystemExit(0)
+
+    with patch("dgml_core.grounded.extract_values", side_effect=fake_extract):
+        for flags in ([], ["--locations-effort", "low"], ["--locations-effort", "default"]):
+            with pytest.raises(SystemExit):
+                main(_ws_args(ws) + ["extraction", "extract", ds_id, "somefile", *flags])
+            capsys.readouterr()
+    assert [c.locations_reasoning_effort for c in seen] == ["high", "low", None]
+
+
+def test_extraction_extract_refuses_unknown_locations_effort(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _write_grounded_config(ws)
+    ds_id = _new_docset(ws, capsys)
+    with patch("litellm.completion") as mock_completion:
+        rc = main(
+            _ws_args(ws)
+            + ["extraction", "extract", ds_id, "somefile", "--locations-effort", "turbo"]
+        )
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "GROUNDED_CONFIG_INVALID"
+    assert "--locations-effort" in err["message"]
+    mock_completion.assert_not_called()
+
+
 def test_extraction_extract_refuses_unknown_values_effort(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -5812,9 +6085,10 @@ def test_extraction_extract_refuses_unknown_values_effort(
 def test_extraction_extract_records_usage_under_debug(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`extraction extract --debug` forwards debug into extract_values, so the
-    LLM cost/token row lands in usage.jsonl — same gating as every other LLM
-    op and the auto-extract path. Without --debug, no row is written."""
+    """`extraction extract --debug` turns on usage recording and the stats
+    document in extract_values, so the LLM cost/token row lands in usage.jsonl
+    and extraction_stats.json is stored — same gating as every other LLM op and
+    the auto-extract path. Without --debug, neither is written."""
     from dgml_core.usage import read_events
 
     ws = tmp_path / "ws"
@@ -5838,13 +6112,15 @@ def test_extraction_extract_records_usage_under_debug(
     response._hidden_params = {"response_cost": 0.004}
     response.usage = SimpleNamespace(prompt_tokens=300, completion_tokens=40, total_tokens=340)
 
-    # Without --debug: no usage row.
+    # Without --debug: no usage row and no stats document.
     fid = _fresh_file()
     with patch("litellm.completion", return_value=response):
         assert main(_ws_args(ws) + ["extraction", "extract", ds_id, fid]) == 0
     assert read_events(Workspace(root=ws)) == []
+    assert Workspace(root=ws).docs.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
 
-    # With --debug (global flag, precedes the subcommand): one extract_values row.
+    # With --debug (global flag, precedes the subcommand): one extract_values
+    # row, and the stats document.
     _wsx = Workspace(root=ws)
     _wsx.blobs.delete_blob(layout.dgml_xml_key(ds_id, fid, "doc"))  # re-extract cleanly
     with patch("litellm.completion", return_value=response):
@@ -5853,6 +6129,8 @@ def test_extraction_extract_records_usage_under_debug(
     assert len(events) == 1
     assert events[0]["operation"] == "extract_values"
     assert events[0]["cost_usd"] == 0.004
+    stats = Workspace(root=ws).docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None and stats["outcome"] == "ok"
 
 
 def test_docset_add_file_auto_extracts_when_schema_set(
@@ -5872,9 +6150,12 @@ def test_docset_add_file_auto_extracts_when_schema_set(
     capsys.readouterr()
     _seed_file_dir(ws, "fileauto0001", pages=1)
 
-    # Empty locations → phase 2 has nothing to match, no phase-3 call needed.
-    values = {"VendorName": {"text": "Acme", "locations": []}}
+    # An unprinted (defaulted) value → phase 2 has nothing to match, no
+    # phase-3 call needed. (A bare value with no box and no method would be
+    # dropped as unverifiable.)
+    values = {"VendorName": {"text": "Acme", "method": "defaulted"}}
     response = _tool_response("submit_values", {"values": values})
+    response._hidden_params = {"response_cost": 0.03}
     with patch("litellm.completion", return_value=response):
         rc = main(_ws_args(ws) + ["docset", "add-file", "fileauto0001", "--docset", ds_id])
     assert rc == 0
@@ -5883,6 +6164,17 @@ def test_docset_add_file_auto_extracts_when_schema_set(
     assert payload["extraction"]["performed"] is True
     assert payload["extraction"]["error"] is None
     assert payload["extraction"]["model"] == "gemini/gemini-2.5-pro"
+    # The run's cost is reported without --debug, so no usage.jsonl is needed.
+    assert payload["extraction"]["usage"]["cost_usd"] == 0.03
+    assert set(payload["extraction"]["usage"]) == {
+        "cost_usd",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cache_read_tokens",
+        "cache_creation_tokens",
+        "duration_s",
+    }
 
     _wsx = Workspace(root=ws)
     xml = _wsx.blobs.get_blob(layout.dgml_xml_key(ds_id, "fileauto0001", "doc")).decode("utf-8")
@@ -5930,9 +6222,39 @@ def test_docset_add_file_extraction_failure_is_soft(
     payload = _read_stdout(capsys)
     assert payload["assigned"] is True
     assert "GROUNDED_CONFIG_MISSING" in payload["extraction"]["error"]
+    # Nothing was spent before the config error.
+    assert payload["extraction"]["usage"] is None
     # Assignment is on disk despite the failed extraction.
     main(_ws_args(ws) + ["docset", "list-files", ds_id])
     assert "fileauto0003" in _read_stdout(capsys)["file_ids"]
+
+
+def test_docset_add_file_failed_extraction_reports_what_it_spent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A soft extraction failure after an LLM call still reports that call's
+    cost in `extraction.usage`, without --debug."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _write_grounded_config(ws)
+    ds_id = _new_docset(ws, capsys)
+    schema_file = tmp_path / "schema.rnc"
+    schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
+    main(_ws_args(ws) + ["extraction", "set-schema", ds_id, "--schema-file", str(schema_file)])
+    capsys.readouterr()
+    _seed_file_dir(ws, "fileauto0004", pages=1)
+
+    # A tree that fits no schema root is refused after the call was billed.
+    bogus = {"Bogus": {"text": "x", "locations": [{"page_number": 1}]}}
+    response = _tool_response("submit_values", {"values": bogus})
+    response._hidden_params = {"response_cost": 0.05}
+    with patch("litellm.completion", return_value=response):
+        rc = main(_ws_args(ws) + ["docset", "add-file", "fileauto0004", "--docset", ds_id])
+    assert rc == 0
+    extraction = _read_stdout(capsys)["extraction"]
+    assert "VALUES_EXTRACTION_FAILED" in extraction["error"]
+    assert extraction["usage"]["cost_usd"] == 0.05
 
 
 @needs_gs
@@ -6084,12 +6406,28 @@ def test_link_usage_is_recorded_per_document(
 
     both_proposing = threading.Barrier(2, timeout=10)
 
-    def fake_call(config: Any, **kwargs: Any) -> str:
-        if "reviewer" in str(kwargs["system_prompt"]):
-            return json.dumps({"verdicts": [{"i": 0, "keep": True}]})
-        both_proposing.wait()  # exactly one propose call per document
-        return json.dumps(
-            {"links": [{"subject": "e0001", "object": "e0002", "predicate": "references"}]}
+    from litellm import ModelResponse
+
+    # Mocked at litellm, below every call path the link pass may take (it
+    # drives request steps now, so a mock of llm.call_continued would let the
+    # pass reach the real provider unnoticed).
+    def fake_completion(**kwargs: Any) -> Any:
+        reply: dict[str, Any]
+        if "reviewer" in json.dumps(kwargs["messages"]):
+            reply = {"verdicts": [{"i": 0, "keep": True}]}
+        else:
+            both_proposing.wait()  # exactly one propose call per document
+            reply = {"links": [{"subject": "e0001", "object": "e0002", "predicate": "references"}]}
+        return ModelResponse(
+            choices=[
+                {
+                    "message": {"role": "assistant", "content": json.dumps(reply)},
+                    "finish_reason": "stop",
+                    "index": 0,
+                }
+            ],
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            model="fake/model",
         )
 
     def fake_convert(paths: Any, *, options: Any, on_output: Any, **_kw: Any) -> dict[str, str]:
@@ -6101,7 +6439,7 @@ def test_link_usage_is_recorded_per_document(
 
     with (
         patch("dgml_core.generation.convert_batch", side_effect=fake_convert),
-        patch("dgml_core.llm.call_continued", side_effect=fake_call),
+        patch("litellm.completion", side_effect=fake_completion),
     ):
         rc = main(_ws_args(ws) + ["--debug", "docset", "generate", did, "--no-coverage"])
     assert rc == 0
@@ -6109,6 +6447,9 @@ def test_link_usage_is_recorded_per_document(
     rows = [e for e in read_events(Workspace(root=ws)) if e["operation"] == "links"]
     assert len(rows) == 2  # one per document, not one covering both
     assert {r["context"]["doc"] for r in rows} == {"one.pdf", "two.pdf"}
+    # Each row is its own document's answered pass, not a failed call's row.
+    assert [r["outcome"] for r in rows] == ["ok", "ok"]
+    assert all(r["total_tokens"] > 0 for r in rows)
 
 
 @needs_gs
@@ -6768,6 +7109,7 @@ def test_import_is_idempotent(tmp_path: Path, capsys: pytest.CaptureFixture[str]
     payload = _read_stdout(capsys)
     assert payload["imported"] == []
     assert payload["skipped"][0]["workspace_id"] == wid
+    assert payload["skipped"][0]["status"] == "skipped"
 
 
 def test_import_on_conflict_fail_stops(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -6810,7 +7152,9 @@ def test_import_reports_a_bad_row_and_keeps_going(
     assert main(["workspace", "import"]) == 2  # partial success
     payload = _read_stdout(capsys)
     assert [r["workspace_id"] for r in payload["imported"]] == [wid]
+    assert payload["imported"][0]["status"] == "imported"
     assert payload["failed"][0]["root"] == str(tmp_path / "vanished")
+    assert payload["failed"][0]["status"] == "failed"
     assert "does not exist" in payload["failed"][0]["reason"]
 
 

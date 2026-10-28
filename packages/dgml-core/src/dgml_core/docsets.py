@@ -182,6 +182,9 @@ class DocSetStore:
             layout.pair_id(docset_id, file_id),
             {"docset_id": docset_id, "file_id": file_id, "assigned_at": now_iso()},
         )
+        # Here rather than in a caller, so every assignment path (auto-extract,
+        # clustering into a new DocSet, direct library use) reports it.
+        logger.info("assigned file %s to docset %s", file_id, docset_id)
 
     def remove_file(self, docset_id: str, file_id: str) -> None:
         if not docset_id.strip():

@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
-from dgml_core import ClassificationDecision, layout
+from dgml_core import ClassificationDecision, DecisionKind, layout
 from dgml_core.grounded import ExtractionResult
 from dgml_sample_service import operations
 from dgml_sample_service.db import dgml_settings
@@ -138,7 +138,11 @@ def test_upload_view_and_storage_lock(
     assert files[0]["page_count"] == 1 and files[0]["page_image_renderer"] == "pypdfium2"
 
     page = client.get(f"/api/orgs/{org_id}/files/{file_id}/pages/1")
-    assert page.status_code == 200 and page.content.startswith(b"\x89PNG")
+    # A page is a PNG or a JPEG, whichever was smaller; the type must match the bytes.
+    assert page.status_code == 200
+    expected = "image/png" if page.content.startswith(b"\x89PNG") else "image/jpeg"
+    assert page.content[:3] in (b"\x89PN", b"\xff\xd8\xff")
+    assert page.headers["content-type"] == expected
     assert client.get(f"/api/orgs/{org_id}/files/{file_id}/pages/9").status_code == 404
     source = client.get(f"/api/orgs/{org_id}/files/{file_id}/source")
     assert source.status_code == 200 and source.content.startswith(b"%PDF")
@@ -201,7 +205,7 @@ def test_classify_assigns_and_extracts(
 
     def fake_classify(ws: Any, fid: str, *, config: Any, mode: Any) -> ClassificationDecision:
         seen["mode"], seen["model"] = mode, config.model
-        return ClassificationDecision(decision="existing", existing_docset_id=ds["id"])
+        return ClassificationDecision(decision=DecisionKind.EXISTING, existing_docset_id=ds["id"])
 
     def fake_extract(ws: Any, docset_id: str, fid: str, **_: Any) -> ExtractionResult:
         key = layout.dgml_xml_key(docset_id, fid, "lease")
@@ -217,7 +221,7 @@ def test_classify_assigns_and_extracts(
     monkeypatch.setattr(operations, "classify_file", fake_classify)
     monkeypatch.setattr("dgml_core.extraction.extract_file", fake_extract)
     monkeypatch.setattr(
-        "dgml_core.extraction._auto_extract",
+        "dgml_core.extraction.auto_extract",
         lambda ws, d, f, **kw: {
             "performed": True,
             "error": None,
@@ -261,6 +265,30 @@ def test_classify_assigns_and_extracts(
     assert client.get(f"{base}/{ds['id']}").json()["file_ids"] == []
 
 
+def test_dgml_reads_report_unassigned_and_not_generated(
+    client: TestClient, org: dict[str, Any], pdf: Any, wait_job: Any
+) -> None:
+    """The DGML routes go through dgml_core.read_dgml: an unassigned file is
+    FILE_NOT_FOUND, an assigned one with nothing written yet has no DGML."""
+    org_id = org["id"]
+    base = f"/api/orgs/{org_id}/docsets"
+    ds = client.post(base, json={"name": "Leases"}).json()
+    file_id = _add_file(client, org_id, pdf, wait_job)
+    pair_url = f"{base}/{ds['id']}/files/{file_id}"
+
+    for path in ("dgml", "dgml.xml"):
+        r = client.get(f"{pair_url}/{path}")
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "FILE_NOT_FOUND"
+
+    assert client.post(pair_url, json={"extract": False}).json()["assigned"] is True
+    pair = client.get(f"{pair_url}/dgml").json()
+    assert pair["xml"] is None and pair["values"] is None and pair["has_extraction"] is False
+    r = client.get(f"{pair_url}/dgml.xml")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "DGML_NOT_FOUND"
+
+
 def test_classify_none_leaves_file_unassigned(
     client: TestClient,
     org: dict[str, Any],
@@ -274,7 +302,9 @@ def test_classify_none_leaves_file_unassigned(
     monkeypatch.setattr(
         operations,
         "classify_file",
-        lambda *a, **k: ClassificationDecision(decision="none", reason="a lease, not an invoice"),
+        lambda *a, **k: ClassificationDecision(
+            decision=DecisionKind.NONE, reason="a lease, not an invoice"
+        ),
     )
     job = client.post(f"/api/orgs/{org_id}/files/{file_id}/classify", json={}).json()
     done = wait_job(org_id, job["id"])
@@ -300,7 +330,7 @@ def test_classify_new_creates_docset(
         operations,
         "classify_file",
         lambda *a, **k: ClassificationDecision(
-            decision="new",
+            decision=DecisionKind.NEW,
             new_name="Lease",
             new_description="A lease",
             new_key_questions=("What is the rent?",),

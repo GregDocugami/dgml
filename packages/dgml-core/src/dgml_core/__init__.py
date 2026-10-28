@@ -22,15 +22,24 @@ from .configuration import Configuration, Identity, ProviderSpec, Storage
 from .conversion import (
     ConverterConfig,
     DocConverter,
+    FormatFamily,
     load_conversion_config,
     make_converter,
 )
+from .dgml_output import DgmlDocument, read_dgml
 from .docsets import DocSetStore
 
 # Exported in full, and pinned so by tests/test_error_codes.py.
 from .errors import (
     AttestationInvalid,
     AuthError,
+    BatchExecutionFailed,
+    BatchJobBusy,
+    BatchJobInvalid,
+    BatchJobLeaseLost,
+    BatchJobNondeterministic,
+    BatchJobNotFound,
+    BatchUnavailable,
     ChainConfigError,
     ChainRpcFailed,
     ChainTxReverted,
@@ -39,10 +48,12 @@ from .errors import (
     ClassificationFailed,
     ClusteringConfigInvalid,
     ConflictError,
+    ConflictErrorKind,
     ConversionConfigInvalid,
     ConversionFailed,
     CorruptMetadata,
     DgmlError,
+    DgmlNotFound,
     DocSetNotFound,
     EmptyModelResponse,
     EngineNotAvailable,
@@ -85,6 +96,7 @@ from .errors import (
     TextExtractionFailed,
     UnsupportedFileType,
     ValuesExtractionFailed,
+    ValuesNotFound,
     WalletKeyMissing,
     WorkspaceMigrationFailed,
     WorkspaceNotFound,
@@ -94,9 +106,10 @@ from .errors import (
     WorkspacesWriteConflict,
 )
 
-# Eager: ``.extraction`` imports only docsets/errors/storage at module scope and
-# reaches ``.grounded`` → ``.llm`` inside the function, so it costs nothing here.
-from .extraction import add_file_and_extract, extract_file
+# Eager: ``.extraction`` imports only dgml_output/docsets/errors/storage at module
+# scope (all already loaded above) and reaches ``.grounded`` → ``.llm`` and
+# ``.extraction_xml`` inside the functions, so it costs nothing here.
+from .extraction import add_file_and_extract, extract_file, get_extracted_values
 from .file_attestation import (
     ArtifactKind,
     ArtifactRef,
@@ -116,7 +129,7 @@ from .file_attestation import (
     verify_file_version,
     write_attestation,
 )
-from .files import AddFileResult, ConflictPolicy, FileStore
+from .files import AddFileResult, ConflictKind, ConflictPolicy, FileStore
 from .ids import RECORD_ID_SHAPE, is_record_id
 from .layout import Collection
 from .migrations import (
@@ -155,6 +168,7 @@ from .storage_service import (
     StorageConfig,
 )
 from .text_extraction import TextMode
+from .utils import page_image_key, read_page_image
 from .workspace_config import WorkspaceIdentity
 from .workspace_create import CreateWorkspaceResult, create_workspace
 from .workspace_id import (
@@ -174,15 +188,32 @@ from .workspaces_resolve import (
 from .workspaces_store import WorkspacesConfig, WorkspacesStore, default_workspaces_root
 
 if TYPE_CHECKING:
+    from .auto_classification import (
+        BulkClassifyBatch,
+        auto_classify,
+        classify_bulk_batch,
+        prepare_bulk_classify,
+    )
+    from .batch.jobs import (
+        cancel_job,
+        delete_job,
+        job_status,
+        list_job_summaries,
+        prune_jobs,
+        resume_would_wait,
+        unlock_job,
+    )
     from .classification import (
         ClassificationConfig,
         ClassificationDecision,
         ClassifyMode,
+        DecisionKind,
         classify_file,
         load_classification_config,
     )
-    from .consistency import CheckReport, Issue, check_workspace
-    from .grounded import ExtractionResult
+    from .consistency import CheckReport, Issue, IssueKind, IssueTarget, check_workspace
+    from .generation.link_stage import LinkOutcome, LinkStage, StagedDocument
+    from .grounded import ExtractionResult, ManyExtraction, extract_values_many
 
 __version__ = "0.1.0"
 
@@ -201,13 +232,35 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())
 #: session (bill extraction) spend that entire budget on an unused client.
 #: Importing a submodule directly, or touching any name below, still loads it
 #: exactly as before. ``tests/test_public_api.py`` pins the invariant.
+#: The orchestration API below (auto-classification, multi-file extraction,
+#: the semantic-link stage, batch job management) is lazy for the same reason,
+#: and so that ``dgml_core.batch`` is never on the default import path.
 _LAZY_SUBMODULES = {
     "CheckReport": ".consistency",
     "ClassificationConfig": ".classification",
     "ClassificationDecision": ".classification",
     "ClassifyMode": ".classification",
+    "DecisionKind": ".classification",
     "ExtractionResult": ".grounded",
     "Issue": ".consistency",
+    "IssueKind": ".consistency",
+    "IssueTarget": ".consistency",
+    "BulkClassifyBatch": ".auto_classification",
+    "auto_classify": ".auto_classification",
+    "classify_bulk_batch": ".auto_classification",
+    "prepare_bulk_classify": ".auto_classification",
+    "ManyExtraction": ".grounded",
+    "extract_values_many": ".grounded",
+    "LinkOutcome": ".generation.link_stage",
+    "LinkStage": ".generation.link_stage",
+    "StagedDocument": ".generation.link_stage",
+    "cancel_job": ".batch.jobs",
+    "delete_job": ".batch.jobs",
+    "job_status": ".batch.jobs",
+    "list_job_summaries": ".batch.jobs",
+    "prune_jobs": ".batch.jobs",
+    "resume_would_wait": ".batch.jobs",
+    "unlock_job": ".batch.jobs",
     "check_workspace": ".consistency",
     "classify_file": ".classification",
     "load_classification_config": ".classification",
@@ -245,7 +298,15 @@ __all__ = [
     "AttestationInvalid",
     "AttestationInventory",
     "AuthError",
+    "BatchExecutionFailed",
+    "BatchJobBusy",
+    "BatchJobInvalid",
+    "BatchJobLeaseLost",
+    "BatchJobNondeterministic",
+    "BatchJobNotFound",
+    "BatchUnavailable",
     "BlobStore",
+    "BulkClassifyBatch",
     "ChainConfigError",
     "ChainRpcFailed",
     "ChainTxReverted",
@@ -260,13 +321,18 @@ __all__ = [
     "Collection",
     "Configuration",
     "ConflictError",
+    "ConflictErrorKind",
+    "ConflictKind",
     "ConflictPolicy",
     "ConversionConfigInvalid",
     "ConversionFailed",
     "ConverterConfig",
     "CorruptMetadata",
     "CreateWorkspaceResult",
+    "DecisionKind",
+    "DgmlDocument",
     "DgmlError",
+    "DgmlNotFound",
     "DocConverter",
     "DocSet",
     "DocSetAssignment",
@@ -282,6 +348,7 @@ __all__ = [
     "FileRecord",
     "FileStore",
     "FileVersion",
+    "FormatFamily",
     "GenerationConfigInvalid",
     "GenerationConfigMissing",
     "GenerationFailed",
@@ -295,11 +362,16 @@ __all__ = [
     "InvalidArgument",
     "InvalidPDF",
     "Issue",
+    "IssueKind",
+    "IssueTarget",
     "LabelModelUnreachable",
     "LegacyConfigPresent",
+    "LinkOutcome",
     "LinkPlanFailed",
+    "LinkStage",
     "LocalDirWorkspacesStore",
     "LocalStore",
+    "ManyExtraction",
     "Migration",
     "MigrationResult",
     "MissingExtra",
@@ -324,6 +396,7 @@ __all__ = [
     "SchemaGenerationFailed",
     "SchemaInvalid",
     "SchemaNotFound",
+    "StagedDocument",
     "Storage",
     "StorageBackendMismatch",
     "StorageConfig",
@@ -335,6 +408,7 @@ __all__ = [
     "TextMode",
     "UnsupportedFileType",
     "ValuesExtractionFailed",
+    "ValuesNotFound",
     "VerifyResult",
     "WalletKeyMissing",
     "Workspace",
@@ -352,7 +426,10 @@ __all__ = [
     "add_file_and_extract",
     "attest_file",
     "attest_file_version",
+    "auto_classify",
+    "cancel_job",
     "check_workspace",
+    "classify_bulk_batch",
     "classify_file",
     "collect_file_version",
     "collect_from_attestation",
@@ -360,12 +437,17 @@ __all__ = [
     "create_workspace",
     "default_workspaces_root",
     "default_workspaces_store",
+    "delete_job",
     "export_attestation",
     "extract_file",
+    "extract_values_many",
     "generate_unique_workspace_id",
+    "get_extracted_values",
     "is_record_id",
     "is_workspace_id",
+    "job_status",
     "layout",
+    "list_job_summaries",
     "load_classification_config",
     "load_conversion_config",
     "load_ocr_config",
@@ -379,12 +461,19 @@ __all__ = [
     "make_workspaces_store",
     "migrate_workspace",
     "new_workspace_id",
+    "page_image_key",
     "pending_migrations",
+    "prepare_bulk_classify",
+    "prune_jobs",
     "read_attestation",
+    "read_dgml",
+    "read_page_image",
     "resolve_store_configs",
+    "resume_would_wait",
     "slice_pages",
     "stamp_schema_version",
     "storage_fingerprint",
+    "unlock_job",
     "verify_attestation_dir",
     "verify_bundle",
     "verify_file_version",
