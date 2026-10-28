@@ -13,7 +13,8 @@
 from __future__ import annotations
 
 import pytest
-from dgml_core.ids import ID_ALPHABET, ID_LENGTH, is_record_id, new_id
+from dgml_core.errors import InvalidArgument
+from dgml_core.ids import ID_ALPHABET, ID_LENGTH, is_record_id, new_id, require_record_id
 
 
 def test_new_id_format() -> None:
@@ -74,3 +75,13 @@ def test_is_record_id_accepts(value: str) -> None:
 )
 def test_is_record_id_rejects(value: str) -> None:
     assert not is_record_id(value)
+
+
+def test_require_record_id_passes_silently() -> None:
+    require_record_id("invoice-2024-q1", label="file id")
+
+
+def test_require_record_id_names_the_id_in_the_message() -> None:
+    with pytest.raises(InvalidArgument, match="docset id 'AbC' is not well formed") as exc_info:
+        require_record_id("AbC", label="docset id")
+    assert "lowercase" in str(exc_info.value)

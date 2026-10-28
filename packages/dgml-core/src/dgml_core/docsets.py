@@ -29,7 +29,7 @@ from .errors import (
     SchemaNotFound,
     now_iso,
 )
-from .ids import RECORD_ID_SHAPE, is_record_id, new_id
+from .ids import new_id, require_record_id
 from .models import DocSet, DocSetAssignment
 from .storage import Workspace
 from .workspace_ops import WorkspaceOps
@@ -91,13 +91,10 @@ class DocSetStore:
         """
         if not name.strip():
             raise InvalidArgument("docset name must not be empty")
-        if docset_id is not None and not is_record_id(docset_id):
-            # Never case-folded: the id is how the caller's system and this
-            # workspace name the same DocSet (see FileStore.add).
-            raise InvalidArgument(
-                f"docset id {docset_id!r} is not well formed: it must be {RECORD_ID_SHAPE}."
-            )
-        if docset_id is not None:
+        if docset_id is None:
+            docset_id = new_id()
+        else:
+            require_record_id(docset_id, label="docset id")
             # put_doc is an upsert on every backend, so writing under an id another
             # DocSet holds would silently replace its manifest. Best-effort against
             # a race (get_doc -> put_doc is not atomic), the same posture as
@@ -111,7 +108,6 @@ class DocSetStore:
                     kind=ConflictErrorKind.ID,
                     existing_id=docset_id,
                 )
-        docset_id = docset_id or new_id()
         ds = DocSet(
             id=docset_id,
             name=name,

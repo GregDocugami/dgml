@@ -87,7 +87,7 @@ def test_from_json_tolerates_missing_key_questions(workspace: Workspace) -> None
     ds = store.create(name="X")
     # A docset.json that omits the optional key_questions field.
     minimal = {"id": ds.id, "name": "Minimal", "description": "no key_questions"}
-    workspace.docs.put_doc("docsets", ds.id, minimal)
+    workspace.docs.put_doc(layout.Collection.DOCSETS, ds.id, minimal)
     loaded = store.get(ds.id)
     assert loaded.key_questions == []
     assert loaded.name == "Minimal"
@@ -173,7 +173,7 @@ def test_requested_id_docset_takes_assignments(workspace: Workspace, docset_id: 
     store = DocSetStore(workspace)
     store.create(name="X", docset_id=docset_id)
     fid = "abcdefghijkl"
-    workspace.docs.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc(layout.Collection.FILES, fid, {"id": fid})
     store.add_file(docset_id, fid)
     assert store.list_files(docset_id) == [fid]
     store.remove_file(docset_id, fid)
@@ -222,7 +222,7 @@ def test_add_remove_file_reference(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "abcdefghijkl"
-    workspace.docs.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc(layout.Collection.FILES, fid, {"id": fid})
     store.add_file(ds.id, fid)
     assert store.list_files(ds.id) == [fid]
     store.remove_file(ds.id, fid)
@@ -235,7 +235,7 @@ def test_add_file_logs_the_assignment(
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "abcdefghijkl"
-    workspace.docs.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc(layout.Collection.FILES, fid, {"id": fid})
     caplog.set_level(logging.INFO, logger="dgml_core")
 
     store.add_file(ds.id, fid)
@@ -447,7 +447,7 @@ def _assigned_pair(workspace: Workspace) -> tuple[DocSetStore, str, str]:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "abcdefghijkl"
-    workspace.docs.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc(layout.Collection.FILES, fid, {"id": fid})
     store.add_file(ds.id, fid)
     workspace.blobs.put_blob(f"docsets/{ds.id}/files/{fid}/report.dgml.xml", b"<x/>")
     workspace.docs.put_doc("extraction_stats", f"{ds.id}/{fid}", {"matched": 3})
@@ -458,7 +458,7 @@ def test_add_file_records_an_assignment_document(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "abcdefghijkl"
-    workspace.docs.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc(layout.Collection.FILES, fid, {"id": fid})
     store.add_file(ds.id, fid)
 
     doc = workspace.docs.get_doc("assignments", f"{ds.id}/{fid}")
@@ -498,7 +498,7 @@ def test_docset_delete_removes_every_assignment_and_artifact(workspace: Workspac
     assert workspace.docs.find_docs("assignments", {"docset_id": did}) == []
     assert workspace.blobs.list_blobs(f"docsets/{did}/") == []
     # the underlying file is untouched
-    assert workspace.docs.get_doc("files", fid) is not None
+    assert workspace.docs.get_doc(layout.Collection.FILES, fid) is not None
 
 
 def test_reassign_is_idempotent(workspace: Workspace) -> None:
@@ -516,7 +516,7 @@ def test_reassign_is_idempotent(workspace: Workspace) -> None:
 def test_docsets_for_file_lists_each_assignment(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     fid = "abcdefghijkl"
-    workspace.docs.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc(layout.Collection.FILES, fid, {"id": fid})
     a = store.create(name="A", description="first")
     b = store.create(name="B")
     store.create(name="Unrelated")
@@ -538,7 +538,7 @@ def test_docsets_for_file_lists_each_assignment(workspace: Workspace) -> None:
 def test_docsets_for_file_unassigned_returns_empty(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     store.create(name="A")
-    workspace.docs.put_doc("files", "abcdefghijkl", {"id": "abcdefghijkl"})
+    workspace.docs.put_doc(layout.Collection.FILES, "abcdefghijkl", {"id": "abcdefghijkl"})
     assert store.docsets_for_file("abcdefghijkl") == []
 
 
@@ -566,7 +566,7 @@ def test_docsets_for_file_missing_assigned_at(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "abcdefghijkl"
-    workspace.docs.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc(layout.Collection.FILES, fid, {"id": fid})
     workspace.docs.put_doc(
         "assignments", layout.pair_id(ds.id, fid), {"docset_id": ds.id, "file_id": fid}
     )
@@ -628,7 +628,7 @@ def test_docsets_for_file_unaffected_by_malformed_manifest_elsewhere(
     every file in the workspace."""
     store, did, fid = _assigned_pair(workspace)
     unrelated = store.create(name="Unrelated")
-    workspace.docs.put_doc("docsets", unrelated.id, {"id": unrelated.id})
+    workspace.docs.put_doc(layout.Collection.DOCSETS, unrelated.id, {"id": unrelated.id})
 
     with pytest.raises(KeyError):
         store.list_all()
