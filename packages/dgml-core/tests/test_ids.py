@@ -42,6 +42,10 @@ def test_new_id_collisions_rare() -> None:
         "9-9_9",
         "invoice-2024-q1",
         "invoice_2024_q1",
+        # A canonical UUID, and its 32-hex form: ids decided by another
+        # system are the main reason a caller supplies one.
+        "123e4567-e89b-12d3-a456-426614174000",
+        "123e4567e89b12d3a456426614174000",
     ],
 )
 def test_is_record_id_accepts(value: str) -> None:
@@ -56,6 +60,8 @@ def test_is_record_id_accepts(value: str) -> None:
         "a" * 41,  # one past the ceiling
         "Z" * ID_LENGTH,
         "AbC",  # uppercase: would collide on a case-insensitive filesystem
+        "123E4567-E89B-12D3-A456-426614174000",  # uppercase UUID: lowercase it first
+        "{123e4567-e89b-12d3-a456-426614174000}",  # braced UUID form
         "-abc",  # leading separator
         "_abc",
         "a.b",

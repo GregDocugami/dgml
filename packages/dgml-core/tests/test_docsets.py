@@ -18,6 +18,8 @@ import pytest
 from dgml_core import layout
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
+    ConflictError,
+    ConflictErrorKind,
     DocSetNotFound,
     FileNotFound,
     InvalidArgument,
@@ -95,6 +97,87 @@ def test_create_empty_name_rejected(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     with pytest.raises(InvalidArgument):
         store.create(name="   ")
+
+
+# --------------------------------------------------------------------------
+# Caller-supplied docset ids. Same grammar as file ids (test_files.py covers the
+# content-hash interplay that docsets don't have).
+# --------------------------------------------------------------------------
+
+
+def test_create_with_requested_id_uses_it(workspace: Workspace) -> None:
+    store = DocSetStore(workspace)
+    ds = store.create(name="Contracts", docset_id="q2-contracts")
+    assert ds.id == "q2-contracts"
+    assert store.get("q2-contracts") == ds
+    assert (workspace.root / "docsets" / "q2-contracts" / "docset.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "docset_id",
+    [
+        "abc",
+        "a" * 40,
+        "a_b-c",
+        "0start",
+        "123e4567-e89b-12d3-a456-426614174000",  # UUID
+        "123e4567e89b12d3a456426614174000",  # uuid4().hex
+    ],
+)
+def test_create_requested_id_accepts_grammar_bounds(workspace: Workspace, docset_id: str) -> None:
+    """The grammar's edges have to survive being used as a real path segment."""
+    store = DocSetStore(workspace)
+    assert store.create(name="X", docset_id=docset_id).id == docset_id
+    assert store.get(docset_id).id == docset_id
+
+
+@pytest.mark.parametrize(
+    "docset_id",
+    ["ab", "A" * 12, "-lead", "a.b", "a/b", "", "123E4567-E89B-12D3-A456-426614174000"],
+)
+def test_create_rejects_malformed_requested_id(workspace: Workspace, docset_id: str) -> None:
+    store = DocSetStore(workspace)
+    with pytest.raises(InvalidArgument, match="not well formed"):
+        store.create(name="X", docset_id=docset_id)
+    # Nothing half-built — the shape check runs before any write.
+    assert store.list_all() == []
+    assert not (workspace.root / "docsets").exists()
+
+
+def test_create_requested_id_already_held_conflicts(workspace: Workspace) -> None:
+    """put_doc is an upsert, so without the guard a reused id would silently
+    replace the other DocSet's manifest."""
+    store = DocSetStore(workspace)
+    first = store.create(
+        name="First", description="keep me", key_questions=["q1"], docset_id="shared"
+    )
+    with pytest.raises(ConflictError) as exc_info:
+        store.create(name="Second", description="clobber", docset_id="shared")
+    assert exc_info.value.kind is ConflictErrorKind.ID
+    assert exc_info.value.existing_id == "shared"
+    assert "First" in str(exc_info.value)
+    assert store.get("shared") == first
+    assert store.list_all() == [first]
+
+
+def test_create_without_id_still_mints(workspace: Workspace) -> None:
+    store = DocSetStore(workspace)
+    ds = store.create(name="X")
+    assert len(ds.id) == 12
+    assert ds.id.isalnum() and ds.id.islower()
+
+
+@pytest.mark.parametrize("docset_id", ["123e4567-e89b-12d3-a456-426614174000", "my_set-2"])
+def test_requested_id_docset_takes_assignments(workspace: Workspace, docset_id: str) -> None:
+    """A separator-bearing docset id must round-trip through layout.pair_id."""
+    store = DocSetStore(workspace)
+    store.create(name="X", docset_id=docset_id)
+    fid = "abcdefghijkl"
+    workspace.docs.put_doc("files", fid, {"id": fid})
+    store.add_file(docset_id, fid)
+    assert store.list_files(docset_id) == [fid]
+    store.remove_file(docset_id, fid)
+    assert store.list_files(docset_id) == []
 
 
 def test_list_all(workspace: Workspace) -> None:
