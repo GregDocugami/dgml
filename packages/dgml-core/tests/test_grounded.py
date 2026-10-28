@@ -2185,7 +2185,7 @@ def test_schema_overflow_rejection_keeps_the_permissive_fallback(workspace: Work
     calls = _phase1_calls(mock_completion)
     assert [c["tool_choice"] for c in calls] == ["required", "required"]
     submit_tool = next(t for t in calls[1]["tools"] if t["function"]["name"] == "submit_values")
-    assert "properties" not in submit_tool["function"]["parameters"]["properties"]["values"]
+    assert submit_tool["function"]["parameters"]["properties"]["values"]["type"] == "string"
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None
     assert stats["phase1_tool_schema"] == "permissive"
@@ -3437,8 +3437,9 @@ def test_prune_to_vocabulary_drops_unknown_keys() -> None:
 
 def test_extract_values_permissive_fallback_on_too_many_states(workspace: Workspace) -> None:
     """A Gemini 'too many states for serving' rejection retries phase 1 once
-    with a permissive object parameter, prunes the result against the
-    vocabulary, and records the mode in extraction_stats.json."""
+    with the permissive parameter (the values tree as JSON text), decodes
+    and prunes the result against the vocabulary, and records the mode in
+    extraction_stats.json."""
     fid = "f1aaaaaaaaaa"
     _seed_file(workspace, fid)
     _seed_page_text(workspace, fid, page=1, words=[{"t": "hi", "l": [10, 20, 30, 40]}])
@@ -3457,17 +3458,27 @@ def test_extract_values_permissive_fallback_on_too_many_states(workspace: Worksp
         "litellm.completion",
         side_effect=[
             Exception("BadRequestError: The specified schema produces too many states for serving"),
-            _tool_call_response("submit_values", {"values": phase1_values}),
+            _tool_call_response("submit_values", {"values": json.dumps(phase1_values)}),
         ],
     ) as mock_completion:
         result = extract_values(workspace, ds.id, fid, config=config, write_stats=True)
 
     assert mock_completion.call_count == 2
-    # Retry used the permissive values parameter (no inlined properties).
+    # Retry used the permissive values parameter: JSON text, no inlined schema.
     retry_tools = mock_completion.call_args_list[1].kwargs["tools"]
     submit_tool = next(t for t in retry_tools if t["function"]["name"] == "submit_values")
     values_param = submit_tool["function"]["parameters"]["properties"]["values"]
+    assert values_param["type"] == "string"
     assert "properties" not in values_param
+    # ...and its user prompt carries the permissive block (values as JSON
+    # text, absent roots null, never `{}`) as its own block after the schema,
+    # which the first attempt did not have.
+    first_user = mock_completion.call_args_list[0].kwargs["messages"][1]["content"]
+    retry_user = mock_completion.call_args_list[1].kwargs["messages"][1]["content"]
+    assert first_user[0] == retry_user[0]  # the cached schema block is untouched
+    assert not any("SUBMISSION FORMAT" in b.get("text", "") for b in first_user)
+    assert "SUBMISSION FORMAT" in retry_user[1]["text"]
+    assert "``null``" in retry_user[1]["text"]
     # Fabricated key pruned code-side.
     assert "bogus_key" not in result.values
     assert result.values["title"]["text"] == "hi"
@@ -4755,13 +4766,36 @@ def test_extract_values_refuses_a_tree_pruned_to_nothing_in_permissive_mode(
         "litellm.completion",
         side_effect=[
             Exception("BadRequestError: The specified schema produces too many states for serving"),
-            _tool_call_response("submit_values", {"values": {"title": "Hello world"}}),
+            _tool_call_response("submit_values", {"values": json.dumps({"title": "Hello world"})}),
         ],
     ):
         with pytest.raises(ValuesExtractionFailed, match="nothing that fits the schema"):
             extract_values(workspace, ds_id, fid, config=config, write_stats=True)
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None and stats["outcome"] == "error"
+
+
+def test_extract_values_refuses_an_empty_tree_in_permissive_mode(workspace: Workspace) -> None:
+    """The permissive fallback used to return `{}` for every file on Gemini
+    and write an empty <dg:extraction/> as "ok". An empty tree on that path
+    now fails the file, with the stats still recording the fallback."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch(
+        "litellm.completion",
+        side_effect=[
+            Exception("BadRequestError: The specified schema produces too many states for serving"),
+            _tool_call_response("submit_values", {"values": "{}", "layout": {}}),
+        ],
+    ):
+        with pytest.raises(ValuesExtractionFailed, match="empty values tree under the permissive"):
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None and stats["outcome"] == "error"
+    assert stats["phase1_tool_schema"] == "permissive"
 
 
 def test_extract_values_keeps_an_empty_tree_as_a_legal_outcome(workspace: Workspace) -> None:
