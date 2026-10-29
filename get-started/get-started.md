@@ -168,7 +168,7 @@ label_model = "anthropic/claude-sonnet-5"
 api_key_env = "ANTHROPIC_API_KEY"
 
 [classification]
-model = "gemini/gemini-2.5-flash"
+model = "gemini/gemini-3.8-flash"
 api_key_env = "GEMINI_API_KEY"
 ```
 
@@ -297,7 +297,7 @@ clustering specifically, add a `[classification]` section to your config:
 
 ```toml
 [classification]
-model = "gemini/gemini-2.5-flash"
+model = "gemini/gemini-3.8-flash"
 api_key_env = "GEMINI_API_KEY"
 ```
 *Make sure your `GEMINI_API_KEY` (or chosen provider key) is exported in your terminal environment.*

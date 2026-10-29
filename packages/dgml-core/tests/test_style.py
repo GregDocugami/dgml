@@ -366,11 +366,11 @@ def test_load_style_config_enabled_falls_back_to_light_tier(tmp_path: Path) -> N
     cfg = load_style_config(
         _ws_with_config(
             tmp_path,
-            {"models": {"light": "gemini/gemini-2.5-flash-lite"}, "style": {"enabled": True}},
+            {"models": {"light": "gemini/gemini-3.5-flash-lite"}, "style": {"enabled": True}},
         )
     )
     assert cfg is not None
-    assert cfg.model == "gemini/gemini-2.5-flash-lite"
+    assert cfg.model == "gemini/gemini-3.5-flash-lite"
 
 
 def test_load_style_config_rejects_non_bool_enabled(tmp_path: Path) -> None:

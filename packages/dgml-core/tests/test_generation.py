@@ -892,7 +892,7 @@ def test_roster_content_blocks_cache_marker_is_anthropic_only() -> None:
     roster = {"Foo": RosterEntry(description="a role")}
     (block,) = _roster_content_blocks(roster, model="anthropic/claude-haiku-5-5")
     assert block["cache_control"] == {"type": "ephemeral"}
-    (block,) = _roster_content_blocks(roster, model="gemini/gemini-2.5-pro")
+    (block,) = _roster_content_blocks(roster, model="gemini/gemini-3.1-pro-preview")
     assert "cache_control" not in block
     assert _roster_content_blocks({}, model="anthropic/claude-haiku-5-5") == []
 

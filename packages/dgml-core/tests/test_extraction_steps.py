@@ -216,7 +216,7 @@ def test_too_many_states_falls_back_to_the_permissive_schema(workspace: Workspac
         gen.throw(TOO_MANY_STATES)
 
 
-GEMINI = "gemini/gemini-2.5-pro"
+GEMINI = "gemini/gemini-3.1-pro-preview"
 # litellm's wording for a Gemini HTTP 500, as the attempt wraps it.
 GEMINI_500 = RuntimeError(
     "litellm.InternalServerError: GeminiException InternalServerError - "
@@ -274,7 +274,7 @@ def test_other_gemini_errors_do_not_fall_back(workspace: Workspace) -> None:
     ("model", "text", "expected"),
     [
         (GEMINI, str(GEMINI_500), True),
-        ("vertex_ai/gemini-2.5-pro", "VertexAIException InternalServerError - 500", True),
+        ("vertex_ai/gemini-3.1-pro-preview", "VertexAIException InternalServerError - 500", True),
         ("anthropic/claude-sonnet-5", str(GEMINI_500), False),
         (GEMINI, "litellm.InternalServerError: OpenAIException InternalServerError", False),
         (GEMINI, "litellm.RateLimitError: GeminiException - 429", False),

@@ -31,19 +31,20 @@ from __future__ import annotations
 # mapping and per-task overrides are documented in the CLI reference, not
 # baked into the config file (the mapping may change without a config rewrite).
 #
-# The cheap Gemini tier uses the `gemini-flash-lite-latest` *alias*, not a
-# pinned version. A pinned flash-lite (`gemini-2.5-flash-lite`) was the default
-# here until Google closed it to new API users — it began returning HTTP 404
-# ("no longer available to new users") on a fresh key, so a new user running
-# `dgml init --provider google` got a config that failed on first use. The
-# alias tracks the current flash-lite and cannot go stale that way. Users who
-# need a reproducible pin can still set an explicit model in their own config.
+# The Gemini tiers are pinned versions, so a dgml upgrade — not Google moving
+# an alias — is what changes the model a workspace runs. The pins must be ones
+# Google still serves to *new* API users: the previous generation was closed to
+# them before its shutdown date (HTTP 404, "no longer available to new users"),
+# so a fresh `dgml init --provider google` got a config that failed on first
+# use. Move a pin when Google closes it, using the replacement its deprecations
+# page names. `advanced`/`expert` are a preview id because Google has no GA Pro
+# newer than the closed one.
 PROVIDER_MODELS: dict[str, dict[str, str]] = {
     "anthropic_google": {
         # Gemini Flash-Lite for the cheap high-volume vision work
         # (classification/style); Anthropic for the document-reasoning pipeline
         # (transcription → labeling/value-extraction → schema generation).
-        "light": "gemini/gemini-flash-lite-latest",
+        "light": "gemini/gemini-3.5-flash-lite",
         "standard": "anthropic/claude-haiku-5-5",
         "advanced": "anthropic/claude-sonnet-5",
         "expert": "anthropic/claude-opus-5",
@@ -62,10 +63,10 @@ PROVIDER_MODELS: dict[str, dict[str, str]] = {
         "expert": "anthropic/claude-opus-5",
     },
     "google": {
-        "light": "gemini/gemini-flash-lite-latest",
-        "standard": "gemini/gemini-2.5-flash",
-        "advanced": "gemini/gemini-2.5-pro",
-        "expert": "gemini/gemini-2.5-pro",
+        "light": "gemini/gemini-3.5-flash-lite",
+        "standard": "gemini/gemini-3.8-flash",
+        "advanced": "gemini/gemini-3.1-pro-preview",
+        "expert": "gemini/gemini-3.1-pro-preview",
     },
     "openai": {
         # The gpt-5.4 family, sized to the tiers: nano/mini for the cheap

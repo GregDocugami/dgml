@@ -104,7 +104,7 @@ def _seed(
             },
             "grounded": {
                 "schema_model": "anthropic/claude-opus-4-7",
-                "values_model": "gemini/gemini-2.5-pro",
+                "values_model": "gemini/gemini-3.1-pro-preview",
             },
         },
     )

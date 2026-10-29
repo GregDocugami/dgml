@@ -242,15 +242,15 @@ def test_completion_with_retry_retries_empty_choices_then_succeeds(
     monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)  # no backoff wait
     caplog.set_level(logging.INFO, logger="dgml_core.llm")
 
-    result = llm._completion_with_retry({"model": "gemini/gemini-2.5-pro", "messages": []})
+    result = llm._completion_with_retry({"model": "gemini/gemini-3.1-pro-preview", "messages": []})
 
     assert calls["n"] == 3
     assert result.choices[0].message == "ok"
     # Each retry costs a paid call and the backoff, so each is logged, like a
     # raised error's retry.
     assert [r.getMessage() for r in caplog.records if r.name == "dgml_core.llm"] == [
-        "model returned no choices (model 'gemini/gemini-2.5-pro'); retry 1 of 2 in 2s",
-        "model returned no choices (model 'gemini/gemini-2.5-pro'); retry 2 of 2 in 4s",
+        "model returned no choices (model 'gemini/gemini-3.1-pro-preview'); retry 1 of 2 in 2s",
+        "model returned no choices (model 'gemini/gemini-3.1-pro-preview'); retry 2 of 2 in 4s",
     ]
 
 
@@ -274,7 +274,7 @@ def test_completion_with_retry_raises_on_persistent_empty(
 
     with pytest.raises(EmptyModelResponse, match="no choices"):
         llm._completion_with_retry(
-            {"model": "gemini/gemini-2.5-pro", "messages": []}, max_retries=3
+            {"model": "gemini/gemini-3.1-pro-preview", "messages": []}, max_retries=3
         )
 
     assert calls["n"] == 3  # exhausted every attempt before raising
@@ -294,7 +294,7 @@ def test_completion_with_retry_retries_dict_shaped_empty(
     monkeypatch.setattr("litellm.completion", flaky)
     monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
 
-    result = llm._completion_with_retry({"model": "gemini/gemini-2.5-pro", "messages": []})
+    result = llm._completion_with_retry({"model": "gemini/gemini-3.1-pro-preview", "messages": []})
 
     assert calls["n"] == 2
     assert result == _resp("OK")
@@ -823,7 +823,7 @@ def test_is_openai_model_matches_openai_routed_ids(model: str) -> None:
     "model",
     [
         "anthropic/claude-sonnet-5",
-        "gemini/gemini-2.5-pro",
+        "gemini/gemini-3.1-pro-preview",
         "ollama/llama3",
         # Azure deployments of the same models are a different endpoint with
         # their own quirks; nothing here has been validated against them, so
@@ -840,7 +840,7 @@ def test_prefill_supported_on_anthropic_but_not_openai_or_gemini() -> None:
     # Gemini refuses a trailing model turn outright ("Requests ending with a
     # model turn are not supported", 400) — see supports_assistant_prefill and
     # test_prefill_support.py for what the earlier assumption cost.
-    assert llm.supports_assistant_prefill("gemini/gemini-2.5-flash") is False
+    assert llm.supports_assistant_prefill("gemini/gemini-3.8-flash") is False
     # Unrecognized ids (self-hosted, proxied) keep the prefill path — it is the
     # natural behaviour of an OpenAI-compatible server that just concatenates
     # the messages into a prompt.
@@ -1158,7 +1158,7 @@ def test_thinking_omitted_when_unset() -> None:
 def test_thinking_not_sent_to_non_anthropic_models() -> None:
     """The field is Anthropic-shaped; other providers spell reasoning their
     own way and reject it."""
-    for model in ("gemini/gemini-2.5-pro", "openai/gpt-5"):
+    for model in ("gemini/gemini-3.1-pro-preview", "openai/gpt-5"):
         kwargs = llm._build_completion_kwargs(
             llm.LLMConfig(model=model, thinking="disabled"),
             messages=[{"role": "user", "content": "hi"}],

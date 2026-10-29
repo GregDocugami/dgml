@@ -738,7 +738,7 @@ them.
   "assigned": true,
   "extraction": {
     "performed": true,
-    "model": "gemini/gemini-2.5-pro",
+    "model": "gemini/gemini-3.1-pro-preview",
     "tool_calls": 0,
     "usage": {
       "cost_usd": 0.0123,
@@ -1631,7 +1631,7 @@ needs grounding.
 {
   "docset_id": "o8vr8rs488vg",
   "file_id": "5kqt9r5fowno",
-  "model": "gemini/gemini-2.5-pro",
+  "model": "gemini/gemini-3.1-pro-preview",
   "mode": "full-extraction",
   "tool_calls": 2,
   "field_count": 7,
@@ -2324,7 +2324,7 @@ Configure the model via the `classification` section in
 ```json
 {
   "classification": {
-    "model": "gemini/gemini-flash-lite-latest",
+    "model": "gemini/gemini-3.5-flash-lite",
     "max_pages": 3,
     "api_key_env": "GEMINI_API_KEY"
   }
@@ -2333,7 +2333,7 @@ Configure the model via the `classification` section in
 
 | Field | Required | Meaning |
 |---|---|---|
-| `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-flash-lite-latest`, `anthropic/claude-opus-5`, `openai/gpt-4o`. |
+| `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-3.5-flash-lite`, `anthropic/claude-opus-5`, `openai/gpt-4o`. |
 | `max_pages` | no (default `3`) | How many rendered page images (`page_images/page_1.{png,jpg}` …) to send to the LLM. Cap is per-classification cost: 1 is the cheap setting, 4+ is the thorough one. |
 | `naming_attempts` | no (default `1`) | How many independent proposals to request when naming a *newly clustered* DocSet (`dgml cluster`, not per-file `--auto-classify`). At `1` the single proposal is used as-is. At `2`+ the name the plurality of attempts agreed on wins, and that share is reported as the file's `naming_confidence` — a 3-of-3 agreement is safe to accept unreviewed, a 2-1 split is worth a look. Costs tokens linearly, so raise it only for runs where a wrong DocSet name is expensive to undo. |
 | `api_key` | no | Optional literal API key. Use only on per-developer workspaces (config.toml isn't checked in). Mutually exclusive with `api_key_env`. |
@@ -2385,7 +2385,7 @@ The `classification` payload block:
 ```json
 "classification": {
   "performed": true,
-  "model": "gemini/gemini-flash-lite-latest",
+  "model": "gemini/gemini-3.5-flash-lite",
   "decision": "existing",
   "docset_id": "k7q3xb91pmrf",
   "docset_created": false,
@@ -2422,7 +2422,7 @@ comes back without a reason is treated as a malformed response
 ```json
 "classification": {
   "performed": true,
-  "model": "gemini/gemini-flash-lite-latest",
+  "model": "gemini/gemini-3.5-flash-lite",
   "decision": "none",
   "docset_id": null,
   "docset_created": false,

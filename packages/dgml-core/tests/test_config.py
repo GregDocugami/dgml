@@ -88,10 +88,10 @@ def test_unknown_section_is_dropped(workspace: Workspace) -> None:
 
 
 def test_keys_are_config_section_members(workspace: Workspace) -> None:
-    write_config(workspace, {"models": {"light": "gemini/gemini-2.5-flash-lite"}})
+    write_config(workspace, {"models": {"light": "gemini/gemini-3.5-flash-lite"}})
     merged = load_merged_config(workspace)
     assert set(merged) == {ConfigSection.MODELS}
-    assert merged[ConfigSection.MODELS] == {"light": "gemini/gemini-2.5-flash-lite"}
+    assert merged[ConfigSection.MODELS] == {"light": "gemini/gemini-3.5-flash-lite"}
 
 
 # ---- Layering ---------------------------------------------------------------
