@@ -29,7 +29,7 @@ from dgml_core.llm import (
         "gemini/gemini-3.6-flash",
         "gemini/gemini-3.1-pro-preview",
         "gemini/gemini-3-flash-preview",
-        "vertex_ai/gemini-2.5-pro",
+        "vertex_ai/gemini-3.1-pro-preview",
     ],
 )
 def test_gemini_never_prefills(model: str) -> None:

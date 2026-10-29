@@ -76,7 +76,7 @@ def _fake_factory(cfg: BackendConfig) -> FakeBackend:
         ("claude-sonnet-4-6", "anthropic"),
         ("openai/gpt-5.4", "openai"),
         ("gpt-4o", "openai"),
-        ("gemini/gemini-2.5-pro", "gemini"),
+        ("gemini/gemini-3.1-pro-preview", "gemini"),
         ("bedrock/" + BEDROCK_ID, "bedrock"),
         ("vertex_ai/claude-sonnet-4-6", "vertex_ai"),
         # Claude served by another host is that host's provider, not Anthropic's
@@ -120,13 +120,13 @@ def test_resolve_backend_returns_registered_fake_per_provider() -> None:
 
     for provider in ("anthropic", "openai", "gemini"):
         register_backend(provider, factory)
-    for model in ("anthropic/claude-haiku-5-5", "openai/gpt-5.4", "gemini/gemini-2.5-pro"):
+    for model in ("anthropic/claude-haiku-5-5", "openai/gpt-5.4", "gemini/gemini-3.1-pro-preview"):
         backend = resolve_backend(model, api_key="k", api_base=None)
         assert backend.provider == provider_of(model)
     assert [c.model for c in seen] == [
         "anthropic/claude-haiku-5-5",
         "openai/gpt-5.4",
-        "gemini/gemini-2.5-pro",
+        "gemini/gemini-3.1-pro-preview",
     ]
     assert all(c.api_key == "k" for c in seen)
 
@@ -225,7 +225,7 @@ def test_assert_batchable_missing_dependency_names_stage() -> None:
 
     register_backend("gemini", _fake_factory, available=probe, install_hint="pip install g")
     with pytest.raises(BatchUnavailable) as info:
-        assert_batchable({"transcribe": "gemini/gemini-2.5-pro"})
+        assert_batchable({"transcribe": "gemini/gemini-3.1-pro-preview"})
     msg = str(info.value)
     assert msg.startswith("stage 'transcribe'")
     assert "`pip install g`" in msg

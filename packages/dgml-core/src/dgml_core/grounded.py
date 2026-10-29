@@ -170,8 +170,8 @@ if TYPE_CHECKING:
 DEFAULT_MAX_TOOL_ITERS = 20
 
 # Per-call output token cap — deliberately set to the largest ceiling any
-# current frontier model offers (128K on Claude Opus/Sonnet 5, Sonnet 4.6,
-# Gemini 2.5 Pro). `llm._build_completion_kwargs` clamps this down to each
+# current frontier model offers (128K on Claude Opus/Sonnet 5, Sonnet 4.6).
+# `llm._build_completion_kwargs` clamps this down to each
 # model's documented limit, so a model with a lower ceiling (e.g. 64K) gets
 # its own maximum rather than a 400. Asking for the ceiling matters for value
 # extraction: a long itemized document can genuinely need >65K output tokens,
@@ -4682,7 +4682,7 @@ def _is_gemini_internal_error(exc: Exception, model: str) -> bool:
     Gemini does not always name an oversized inlined tool schema: the same
     schema that one request rejects as "too many states" (a 400) another
     answers with 500 ``INTERNAL`` and no detail, reproducibly, and the
-    permissive schema then succeeds (observed on gemini-2.5-pro with a
+    permissive schema then succeeds (observed on Gemini Pro with a
     144-element docset schema). The 500 carries nothing to match on, so
     this is deliberately narrow: only a Gemini-routed *model*, only litellm's
     Google provider exception wording, and the caller applies it only while

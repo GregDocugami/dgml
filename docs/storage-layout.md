@@ -440,7 +440,7 @@ optional and not merely a place for overrides. It may also carry any other secti
 per-workspace override.
 
 **Env-var overrides (layer 4).** Prefix `DGML_`, split path segments on `__`,
-lowercased — e.g. `DGML_MODELS__ADVANCED=gemini/gemini-2.5-pro`,
+lowercased — e.g. `DGML_MODELS__ADVANCED=gemini/gemini-3.1-pro-preview`,
 `DGML_GENERATION__LABEL_MODEL=…`, `DGML_OCR__ENDPOINT=…`. This overrides config
 **settings**; it is distinct from provider **secret** vars (`ANTHROPIC_API_KEY`,
 `GEMINI_API_KEY`, …), which litellm and the `*_api_key_env` indirection use to
@@ -546,7 +546,7 @@ family (an explicit tier always overrides its family default):
 ```toml
 [models]
 family   = "anthropic_google"
-light    = "gemini/gemini-flash-lite-latest"  # classification, style
+light    = "gemini/gemini-3.5-flash-lite"  # classification, style
 standard = "anthropic/claude-haiku-5-5"    # transcription, text extraction
 advanced = "anthropic/claude-sonnet-5"     # labeling, value extraction
 expert   = "anthropic/claude-opus-5"       # schema generation
@@ -670,7 +670,7 @@ override it (with that model's own credentials, if any).
 
 ```toml
 [classification]
-model = "gemini/gemini-flash-lite-latest"
+model = "gemini/gemini-3.5-flash-lite"
 ```
 
 Field rules:
@@ -734,7 +734,7 @@ credentials.
 ```toml
 [grounded]
 schema_model = "anthropic/claude-opus-5"
-values_model = "gemini/gemini-2.5-pro"
+values_model = "gemini/gemini-3.1-pro-preview"
 schema_api_key_env = "ANTHROPIC_API_KEY"
 values_api_key_env = "GEMINI_API_KEY"
 ```

@@ -1450,7 +1450,7 @@ def test_cluster_assigns_unassigned_files_to_docsets(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
 
     # Empty workspace: no unassigned files → no-op, no LLM or clusterer call.
@@ -1708,7 +1708,7 @@ def test_cluster_config_flag_passes_overrides_to_run_clustering(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
     main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
     fid = _read_stdout(capsys)["file"]["id"]
@@ -1744,7 +1744,7 @@ def test_cluster_config_flag_missing_file_errors(
     ws = tmp_path / "ws"
     _init_ws(ws)
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
     main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
     capsys.readouterr()
@@ -1781,7 +1781,7 @@ def test_cluster_config_preset_name_passes_preset_overrides(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
     main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
     fid = _read_stdout(capsys)["file"]["id"]
@@ -1837,7 +1837,7 @@ def test_cluster_method_llm_routes_to_llm_partitioner(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
     main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
     fid = _read_stdout(capsys)["file"]["id"]
@@ -1869,7 +1869,7 @@ def test_cluster_method_auto_small_corpus_uses_llm(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
     main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
     fid = _read_stdout(capsys)["file"]["id"]
@@ -1903,7 +1903,7 @@ def test_cluster_partial_success_when_llm_fails(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
 
     # Existing DocSet "Foo" — mock run_clustering to put one file in "Foo"
@@ -2011,7 +2011,7 @@ def test_file_add_auto_classify_creates_new_docset(
     # the LLM is forced to call create_new_docset.
 
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
 
     new_questions = [
@@ -2040,7 +2040,7 @@ def test_file_add_auto_classify_creates_new_docset(
     assert cls["docset_name"] == "Receipts"
     assert cls["docset_key_questions"] == new_questions
     assert cls["error"] is None
-    assert cls["model"] == "gemini/gemini-2.5-flash-lite"
+    assert cls["model"] == "gemini/gemini-3.5-flash-lite"
 
     # Persisted: the created DocSet's record carries the key_questions
     # for future classification calls to read.
@@ -2065,7 +2065,7 @@ def test_file_add_auto_classify_new_docset_rolled_back_when_assign_fails(
     ws = tmp_path / "ws"
     _init_ws(ws)
     capsys.readouterr()
-    write_classification_config(Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite"})
+    write_classification_config(Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite"})
     response = _tool_response(
         "create_new_docset",
         {"name": "Receipts", "description": "expense receipts", "key_questions": ["Who?"]},
@@ -2139,7 +2139,7 @@ def test_file_add_auto_classify_assigns_existing_docset(
     ]
 
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
     response = _tool_response("assign_to_existing_docset", {"docset_id": existing_id})
 
@@ -2187,7 +2187,7 @@ def test_file_add_auto_classify_soft_fails_when_llm_errors(
     capsys.readouterr()
 
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
 
     with patch("litellm.completion", side_effect=RuntimeError("API down")):
@@ -2214,7 +2214,7 @@ def test_file_add_auto_classify_skipped_on_duplicate(
     capsys.readouterr()
 
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
 
     with patch("litellm.completion") as mock_completion:
@@ -2272,7 +2272,7 @@ def _seed_docset_and_config(
     )
     existing_id: str = _read_stdout(capsys)["id"]
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
     return existing_id
 
@@ -2433,7 +2433,7 @@ def test_file_add_auto_classify_existing_errors_when_no_docsets(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
 
     with patch("litellm.completion") as mock_completion:
@@ -2461,7 +2461,7 @@ def test_file_add_auto_classify_default_mode_handles_empty_workspace(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
     response = _tool_response(
         "create_new_docset",
@@ -4030,7 +4030,7 @@ def test_file_add_directory_auto_classify_amortizes_docsets(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
 
     src = tmp_path / "pdfs"
@@ -4182,7 +4182,7 @@ def test_file_add_directory_auto_classify_existing_aborts_before_adding(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-3.5-flash-lite", "max_pages": 1}
     )
 
     src = tmp_path / "pdfs"
@@ -5684,7 +5684,7 @@ def _write_grounded_config(ws: Path) -> None:
             {
                 "grounded": {
                     "schema_model": "anthropic/claude-opus-4-7",
-                    "values_model": "gemini/gemini-2.5-pro",
+                    "values_model": "gemini/gemini-3.1-pro-preview",
                 }
             }
         ),
@@ -6243,7 +6243,7 @@ def test_docset_add_file_auto_extracts_when_schema_set(
     assert payload["assigned"] is True
     assert payload["extraction"]["performed"] is True
     assert payload["extraction"]["error"] is None
-    assert payload["extraction"]["model"] == "gemini/gemini-2.5-pro"
+    assert payload["extraction"]["model"] == "gemini/gemini-3.1-pro-preview"
     # The run's cost is reported without --debug, so no usage.jsonl is needed.
     assert payload["extraction"]["usage"]["cost_usd"] == 0.03
     assert set(payload["extraction"]["usage"]) == {

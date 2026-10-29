@@ -113,7 +113,7 @@ def test_continued_prefills_the_partial_on_anthropic(capture_kwargs: Any) -> Non
     "cfg",
     [
         llm.LLMConfig(model="openai/gpt-5.4"),
-        llm.LLMConfig(model="gemini/gemini-2.5-pro"),
+        llm.LLMConfig(model="gemini/gemini-3.1-pro-preview"),
         # Extended thinking rejects prefill, so Anthropic asks explicitly too.
         llm.LLMConfig(model=PREFILL_MODEL, reasoning_effort="medium"),
         # Haiku 5.5 refuses prefill outright.

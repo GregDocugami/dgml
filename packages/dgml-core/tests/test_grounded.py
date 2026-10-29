@@ -68,7 +68,7 @@ from dgml_core.storage import Workspace
 # ---------------------------------------------------------------------------
 
 DEFAULT_SCHEMA_MODEL = "anthropic/claude-opus-4-7"
-DEFAULT_VALUES_MODEL = "gemini/gemini-2.5-pro"
+DEFAULT_VALUES_MODEL = "gemini/gemini-3.1-pro-preview"
 
 # Extraction schemas are RNC at rest. A lowercase `title` tag keeps the
 # engine's JSON-Schema property key "title" (matching the mocked LLM output).
@@ -276,11 +276,16 @@ def test_load_config_models_from_tiers(workspace: Workspace) -> None:
 
     write_config(
         workspace,
-        {"models": {"advanced": "gemini/gemini-2.5-pro", "expert": "anthropic/claude-opus-4-8"}},
+        {
+            "models": {
+                "advanced": "gemini/gemini-3.1-pro-preview",
+                "expert": "anthropic/claude-opus-4-8",
+            }
+        },
     )
     config = load_grounded_config(workspace)
     assert config.schema_model == "anthropic/claude-opus-4-8"
-    assert config.values_model == "gemini/gemini-2.5-pro"
+    assert config.values_model == "gemini/gemini-3.1-pro-preview"
 
 
 def test_load_config_section_overrides_tier(workspace: Workspace) -> None:
@@ -289,7 +294,10 @@ def test_load_config_section_overrides_tier(workspace: Workspace) -> None:
     write_config(
         workspace,
         {
-            "models": {"advanced": "gemini/gemini-2.5-pro", "expert": "anthropic/claude-opus-4-8"},
+            "models": {
+                "advanced": "gemini/gemini-3.1-pro-preview",
+                "expert": "anthropic/claude-opus-4-8",
+            },
             "grounded": {"values_model": "openai/gpt-5"},
         },
     )
@@ -307,7 +315,10 @@ def test_load_config_call_override_resolves_like_section(workspace: Workspace) -
     write_config(
         workspace,
         {
-            "models": {"advanced": "gemini/gemini-2.5-pro", "expert": "anthropic/claude-opus-4-8"},
+            "models": {
+                "advanced": "gemini/gemini-3.1-pro-preview",
+                "expert": "anthropic/claude-opus-4-8",
+            },
             "grounded": {
                 "values_model": "openai/gpt-5",
                 "values_api_key_env": "MY_KEY",
@@ -677,7 +688,7 @@ def test_declared_schema_accepts_a_collection_inside_a_collection() -> None:
 
 def test_submit_schema_tool_stays_within_geminis_decoder_budget() -> None:
     """Gemini rejects an over-large constrained-decoding schema with "too many
-    states for serving". Measured against gemini-2.5-pro: the current schema
+    states for serving". Measured against Gemini Pro: the current schema
     (~13 KB) is served, one more level of depth (~27 KB) is not. Guard the size
     here so raising the depth fails in CI rather than in front of a user."""
     assert len(json.dumps(_submit_schema_tool())) < 20_000
@@ -728,7 +739,7 @@ def test_generate_schema_omits_reasoning_for_anthropic(workspace: Workspace) -> 
 
     # Gemini — kept.
     gemini_cfg = GroundedConfig(
-        schema_model="gemini/gemini-2.5-pro",
+        schema_model="gemini/gemini-3.1-pro-preview",
         values_model=DEFAULT_VALUES_MODEL,
     )
     with patch("litellm.completion", return_value=response) as m:
@@ -760,7 +771,7 @@ def test_extract_values_drops_temperature_for_anthropic(
     assert "temperature" not in phase1_kwargs
 
     gemini_cfg = GroundedConfig(
-        schema_model=DEFAULT_SCHEMA_MODEL, values_model="gemini/gemini-2.5-pro"
+        schema_model=DEFAULT_SCHEMA_MODEL, values_model="gemini/gemini-3.1-pro-preview"
     )
     with patch("litellm.completion", return_value=response) as m:
         extract_values(workspace, ds_id, fid, config=gemini_cfg)
@@ -2027,7 +2038,7 @@ def _rejection(message: str) -> Exception:
     import litellm.exceptions
 
     return litellm.exceptions.BadRequestError(
-        message, model="gemini-2.5-pro", llm_provider="gemini"
+        message, model="gemini-3.1-pro-preview", llm_provider="gemini"
     )
 
 
@@ -2145,7 +2156,7 @@ def test_non_rejection_errors_do_not_fall_back(
     _seed_page_text(workspace, fid, page=1)
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
 
-    m, p = "gemini-2.5-pro", "gemini"
+    m, p = "gemini-3.1-pro-preview", "gemini"
     exc = {
         "timeout": litellm.exceptions.Timeout("request timed out", model=m, llm_provider=p),
         "context_window": litellm.exceptions.ContextWindowExceededError(
@@ -3931,7 +3942,7 @@ def test_phase1_schema_block_not_cached_off_anthropic(workspace: Workspace) -> N
     response = _tool_call_response("submit_values", {"values": values})
 
     gemini_cfg = GroundedConfig(
-        schema_model=DEFAULT_SCHEMA_MODEL, values_model="gemini/gemini-2.5-pro"
+        schema_model=DEFAULT_SCHEMA_MODEL, values_model="gemini/gemini-3.1-pro-preview"
     )
     with patch("litellm.completion", return_value=response) as m:
         extract_values(workspace, ds_id, fid, config=gemini_cfg)

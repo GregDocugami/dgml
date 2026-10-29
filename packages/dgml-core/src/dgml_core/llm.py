@@ -710,7 +710,7 @@ def _require_supported_model(model: str, api_base: str | None) -> None:
     except Exception as exc:
         raise ModelNotSupported(
             f"model '{model}' is not a recognized model id — check the spelling and "
-            "provider prefix (e.g. 'gemini/gemini-2.5-pro'); it may be unavailable in "
+            "provider prefix (e.g. 'gemini/gemini-3.1-pro-preview'); it may be unavailable in "
             f"this litellm version ({short_error_message(exc)})"
         ) from exc
 
